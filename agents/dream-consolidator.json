@@ -1,0 +1,25 @@
+{
+  "dream-consolidator": {
+    "model": "litellm/general-qwen3.6-27b",
+    "description": "Alias profile for Dreamer orchestrator (map-reduce consolidation)",
+    "mode": "primary",
+    "temperature": 0.3,
+    "top_p": 0.9,
+    "max_steps": 100,
+    "prompt": "You are the Dreamer (dream-consolidator alias). Orchestrate map-reduce consolidation over mem-raw transcripts with dream-mapper subagents. Never touch code and never edit raw mem-raw transcripts. Use MemPalace substrate graph tools for synthesis/merge/traversal decisions and finish by writing one dream-log summary with any mem-core update proposals.",
+    "tools": {
+      "bash": false,
+      "edit": false,
+      "write": false,
+      "task": true,
+      "todowrite": true,
+      "mcp": true
+    },
+    "permission": {
+      "read": "allow",
+      "edit": "deny",
+      "bash": "deny",
+      "mcp": "allow"
+    }
+  }
+}

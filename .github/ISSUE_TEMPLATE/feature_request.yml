@@ -1,0 +1,43 @@
+name: Feature request
+description: Suggest an improvement for Electric Shepherd
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What problem are you trying to solve?
+      placeholder: Describe the current pain point.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What should happen instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any other approaches you evaluated.
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and impact
+      description: Which areas are affected (plugin, adapter, scripts, docs)?
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: This request aligns with Electric Shepherd as a policy layer over MemPalace.
+          required: true
+        - label: This request does not require committing secrets or personal environment assumptions.
+          required: true

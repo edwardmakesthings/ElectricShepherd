@@ -1,0 +1,32 @@
+{
+  "name": "electric-shepherd",
+  "version": "0.1.0",
+  "description": "Policy layer for MemPalace memory consolidation (Dreamer).",
+  "type": "module",
+  "license": "MIT",
+  "files": [
+    "plugin",
+    "agents",
+    "instructions",
+    "skills",
+    "snippets",
+    "adapter",
+    "scripts",
+    "docs",
+    "QUICKSTART.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "policy:cycle": "node --experimental-strip-types scripts/run-policy-cycle.ts",
+    "policy:example": "node --experimental-strip-types scripts/run-policy-cycle.ts --query \"active architecture decisions\" --scope-room context-blocks --scope-wing context-blocks",
+    "policy:consolidate-validate": "node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts",
+    "policy:consolidate-validate:example": "node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts --query \"synthesis and merge decisions\" --wing context-blocks --room context-blocks --scope-room context-blocks",
+    "policy:cadence": "node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts --run-cadence --cadence-mode plan",
+    "policy:cadence:execute": "node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts --run-cadence --cadence-mode execute",
+    "policy:mem-core:load": "node --experimental-strip-types scripts/run-mem-core-loader.ts"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "1.17.8"
+  }
+}
