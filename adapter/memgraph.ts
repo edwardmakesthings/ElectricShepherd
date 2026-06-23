@@ -22,10 +22,9 @@ export type MemgraphToolMap = {
 };
 
 // Short base names — no prefix. MemPalace natively exposes these as `mempalace_<base>`.
-// When accessed through a LiteLLM MCP gateway, LiteLLM prepends `litellm_mempalace-`,
-// producing `litellm_mempalace-mempalace_<base>`. So:
+// Some MCP gateways prepend a namespace, producing `<namespace>mempalace_<base>`. So:
 //   Direct MCP (:8093):      prefix = "mempalace_"     (default)
-//   LiteLLM MCP gateway:     prefix = "litellm_mempalace-mempalace_"
+//   Namespaced gateway:      prefix = "<namespace>mempalace_"
 // The prefix is resolved once (constructor option > MEMGRAPH_TOOL_PREFIX env var > default).
 const TOOL_BASE_NAMES: MemgraphToolMap = {
   createSynthesisNode: "create_synthesis_node",
@@ -67,7 +66,7 @@ export type MemgraphClientOptions = {
   callTool: ToolCaller;
   // Prefix applied to every MemPalace tool name. Falls back to the
   // MEMGRAPH_TOOL_PREFIX env var, then "mempalace_". Set this to
-  // "litellm_mempalace-mempalace_" when calling through a LiteLLM MCP gateway.
+  // "<namespace>mempalace_" when calling through a namespaced MCP gateway.
   toolPrefix?: string;
   // Per-tool overrides win over the prefix-built names. Values are FULL tool
   // names (prefix included), for the rare case where one tool is exposed oddly.

@@ -8,11 +8,11 @@ retrieval expansion, or any session that will write synthesis nodes).
 
 ## Tool prefix
 
-MemPalace tools are named `mempalace_<operation>`. If you are calling through a LiteLLM
-MCP gateway, LiteLLM prepends its own namespace, producing:
+MemPalace tools are named `mempalace_<operation>`. If you are calling through a namespaced
+MCP gateway, it may prepend its own namespace, producing:
 
 ```
-litellm_mempalace-mempalace_<operation>
+<namespace>mempalace_<operation>
 ```
 
 The correct prefix for your setup is in `QUICKSTART.md §2`. Use that full name for every

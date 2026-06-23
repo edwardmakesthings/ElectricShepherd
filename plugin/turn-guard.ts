@@ -722,7 +722,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
           type: "text",
           text:
             `${AUTO_RETRY_MARKER} Your previous turn ended with finish=stop and ${retryReason}. ` +
-            "Before responding, evaluate why progression stalled. If uncertain, call litellm_sequentialthinking-sequentialthinking once to choose the next concrete action. " +
+            "Before responding, evaluate why progression stalled. If uncertain, call your configured sequentialthinking MCP tool once to choose the next concrete action. " +
             "Then continue execution immediately (do not stop at status-only output). If the tool result is empty/no-match, recover by checking alternative paths/patterns or report a precise blocker. " +
             "End with a short 'Review' section containing: what you did, what changed or what failed, and the exact next action.",
         },

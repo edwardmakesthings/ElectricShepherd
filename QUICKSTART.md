@@ -22,6 +22,28 @@ Enable the plugin package and memory instructions in `opencode.jsonc`:
 `agent-discipline.md` contains the full agent ruleset. `memory-blocks.md` is the
 always-loaded mem-core render artifact for the active scope.
 
+## 1b. Local env setup
+
+Create your machine-local env file from the tracked template:
+
+```bash
+cp .env.example .env
+```
+
+Runtime scripts auto-load env files in this order:
+
+1. `ESHEPHERD_ENV_FILE` (if set)
+2. `./.env` and `./.env.local` in ElectricShepherd root
+3. fallback: `../docker/.env` (for monorepo setups)
+
+No manual `source .env` step is required.
+
+Optional explicit override:
+
+```bash
+export ESHEPHERD_ENV_FILE="/absolute/path/to/your.env"
+```
+
 ## 2. Set the tool prefix
 
 MemPalace tool names vary by how MemPalace is registered with your MCP host:
@@ -29,7 +51,7 @@ MemPalace tool names vary by how MemPalace is registered with your MCP host:
 | Registration | Tool name shape | Correct `MEMGRAPH_TOOL_PREFIX` |
 |---|---|---|
 | Direct MCP at `:8093` | `mempalace_search` | `mempalace_` *(default, no action needed)* |
-| LiteLLM MCP gateway | `litellm_mempalace-mempalace_search` | `litellm_mempalace-mempalace_` |
+| Namespaced gateway | `<namespace>mempalace_search` | `<namespace>mempalace_` |
 
 For agent prompts (the dreamer and mapper subagents) you also need to state the full
 prefix in any agent prompt that calls MemPalace tools directly, or load `skills/mempalace/SKILL.md`
@@ -39,8 +61,25 @@ For the TypeScript adapter (`adapter/memgraph.ts`), set the env var in your shel
 profile or in the environment passed to the process:
 
 ```bash
-# If calling through LiteLLM gateway:
-export MEMGRAPH_TOOL_PREFIX="litellm_mempalace-mempalace_"
+# Set this only when your gateway rewrites tool names.
+# Example for namespaced tools: export MEMGRAPH_TOOL_PREFIX="mygateway_mempalace_"
+```
+
+For standalone runtime scripts (`policy:cycle`, `policy:consolidate-validate`,
+`policy:cadence`) on authenticated MCP endpoints, set MCP auth via env:
+
+```bash
+export MEMPALACE_MCP_URL="http://your-mcp-endpoint/mcp"
+# Generic API key/token value
+export MEMPALACE_MCP_API_KEY="<your-key-or-token>"
+# Optional: force auth header name (default: Authorization)
+# export MEMPALACE_MCP_AUTH_HEADER="Authorization"
+# Optional: prepend a scheme (for example Bearer)
+# export MEMPALACE_MCP_AUTH_SCHEME="Bearer"
+# Optional: explicit bearer token shortcut for Authorization header
+# export MEMPALACE_MCP_BEARER_TOKEN="<your-token>"
+# Optional: full custom headers as JSON
+# export MEMPALACE_MCP_HEADERS_JSON='{"X-Api-Key":"<your-key>"}'
 ```
 
 Or pass it at construction time:
@@ -48,7 +87,7 @@ Or pass it at construction time:
 ```typescript
 const client = createMemgraphClient({
   callTool,
-  toolPrefix: "litellm_mempalace-mempalace_",
+  toolPrefix: "mygateway_mempalace_",
 });
 ```
 
@@ -129,10 +168,15 @@ export ESHEPHERD_MEMCORE_REINJECT_ON_IDLE=true
 export ESHEPHERD_MEMCORE_REINJECT_ON_START=true
 export ESHEPHERD_ALLOWED_SYNTH_WRITERS="dreamer,dream-consolidator"
 export ESHEPHERD_MEMRAW_VERIFY_ENABLED=true
-# Required: full MCP endpoint URL, including any toolset path used by your gateway.
-export ESHEPHERD_MEMPALACE_MCP_URL="${LITELLM_MCP_URL:-}"
-# Optional when gateway requires auth:
-# export ESHEPHERD_MEMPALACE_API_KEY="Bearer <your-litellm-key>"
+# Required: full MCP endpoint URL used for mem-raw verification/capture.
+export MEMPALACE_MCP_URL="http://your-mcp-endpoint/mcp"
+# Optional auth controls for capture pipeline:
+# export MEMPALACE_MCP_API_KEY="<your-key-or-token>"
+# export MEMPALACE_MCP_AUTH_HEADER="Authorization"
+# export MEMPALACE_MCP_AUTH_SCHEME="Bearer"
+# export MEMPALACE_MCP_HEADERS_JSON='{"X-Api-Key":"<your-key>"}'
+# Optional tool prefix for capture endpoint (default: mempalace_):
+# export ESHEPHERD_MEMRAW_TOOL_PREFIX="mempalace_"
 # Optional capture command on stop/compact events:
 # export ESHEPHERD_MEMRAW_CAPTURE_CMD="bash ./scripts/capture-memraw.sh"
 ```

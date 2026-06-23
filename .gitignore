@@ -225,3 +225,4 @@ __marimo__/
 /eshepherd/memory/
 /memory/
 node_modules/
+.serena/

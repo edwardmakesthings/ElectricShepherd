@@ -22,6 +22,7 @@ import {
   type CadenceOrchestratorOptions,
   type CadenceOrchestratorResult,
 } from "../adapter/cadence-orchestrator.ts";
+import { loadRuntimeEnv } from "./runtime-env.ts";
 
 declare const process: {
   argv: string[];
@@ -69,11 +70,13 @@ class MCPHttpClient {
   private url: string;
   private sessionId: string | null;
   private idCounter: number;
+  private staticHeaders: Record<string, string>;
 
-  constructor(url: string) {
+  constructor(url: string, staticHeaders: Record<string, string> = {}) {
     this.url = url;
     this.sessionId = null;
     this.idCounter = 0;
+    this.staticHeaders = staticHeaders;
   }
 
   private nextID(): number {
@@ -108,6 +111,7 @@ class MCPHttpClient {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       Accept: "application/json, text/event-stream",
+      ...this.staticHeaders,
     };
     if (this.sessionId) {
       headers["Mcp-Session-Id"] = this.sessionId;
@@ -187,6 +191,54 @@ class MCPHttpClient {
 
     return result as JsonMap;
   }
+}
+
+function resolveMCPHeadersFromEnv(env: Record<string, string | undefined>): Record<string, string> {
+  const headers: Record<string, string> = {};
+
+  const hasHeader = (name: string): boolean =>
+    Object.keys(headers).some((key) => key.toLowerCase() === name.toLowerCase());
+
+  const rawHeadersJSON = (env.MEMPALACE_MCP_HEADERS_JSON || "").trim();
+  if (rawHeadersJSON) {
+    try {
+      const parsed = JSON.parse(rawHeadersJSON) as Record<string, unknown>;
+      for (const [key, value] of Object.entries(parsed || {})) {
+        if (typeof value === "string" && key) {
+          headers[key] = value;
+        }
+      }
+    } catch {
+      // Ignore malformed override headers and keep known-safe defaults.
+    }
+  }
+
+  const rawBearerToken = (env.MEMPALACE_MCP_BEARER_TOKEN || "").trim();
+  if (rawBearerToken && !hasHeader("Authorization")) {
+    headers.Authorization = /^Bearer\s+/i.test(rawBearerToken)
+      ? rawBearerToken
+      : `Bearer ${rawBearerToken}`;
+  }
+
+  const rawAPIKey = (env.MEMPALACE_MCP_API_KEY || "").trim();
+
+  const authHeader = (env.MEMPALACE_MCP_AUTH_HEADER || "Authorization").trim();
+  const authScheme = (env.MEMPALACE_MCP_AUTH_SCHEME || "").trim();
+  const resolvedHeaderName = authHeader || "Authorization";
+
+  if (rawAPIKey && !hasHeader(resolvedHeaderName)) {
+    let authValue = rawAPIKey;
+    if (authScheme) {
+      authValue = authScheme.toLowerCase() === "none" ? rawAPIKey : `${authScheme} ${rawAPIKey}`;
+    } else if (resolvedHeaderName.toLowerCase() === "authorization") {
+      authValue = /^[A-Za-z][A-Za-z0-9_-]*\s+/.test(rawAPIKey)
+        ? rawAPIKey
+        : `Bearer ${rawAPIKey}`;
+    }
+    headers[resolvedHeaderName] = authValue;
+  }
+
+  return headers;
 }
 
 function getArg(argv: string[], flag: string): string | undefined {
@@ -718,6 +770,8 @@ function usage(): string {
 }
 
 async function main(): Promise<void> {
+  loadRuntimeEnv({ scriptUrl: import.meta.url, env: process.env });
+
   const argv = process.argv.slice(2);
   if (hasFlag(argv, "--help") || hasFlag(argv, "-h")) {
     process.stdout.write(`${usage()}\n`);
@@ -731,8 +785,9 @@ async function main(): Promise<void> {
 
   const mcpURL = process.env.MEMPALACE_MCP_URL || "http://localhost:8093/mcp";
   const toolPrefix = process.env.MEMGRAPH_TOOL_PREFIX || "mempalace_";
+  const mcpHeaders = resolveMCPHeadersFromEnv(process.env);
 
-  const mcp = new MCPHttpClient(mcpURL);
+  const mcp = new MCPHttpClient(mcpURL, mcpHeaders);
   await mcp.initialize();
 
   const client = createMemgraphClient({

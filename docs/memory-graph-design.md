@@ -75,7 +75,7 @@ deterministic consequence-application *after* it. The model makes the call; the 
 sets up the call and executes the result.
 
 This is why memory beats context (memory is structured and inspectable; context is an opaque
-probabilistic blob), and the same move already used elsewhere in the stack: the LiteLLM
+probabilistic blob), and the same move already used elsewhere in the stack: the gateway
 finish_reason callback determinizes a model *output*, the turn-guard determinizes *when* a
 memory decision is prompted, the custom tool suite determinizes *how* edits apply. The
 substrate/policy split (§0) is this same principle as a repo boundary. Default answer to

@@ -1,5 +1,16 @@
 import { createMemgraphClient, type JsonMap } from "../adapter/memgraph.ts";
 import { expandScopedRetrieval, type RetrievalExpansionOptions } from "../adapter/retrieval-expansion.ts";
+import { loadRuntimeEnv } from "./runtime-env.ts";
+
+const runtimeProcess = (globalThis as unknown as {
+  process: {
+    argv: string[];
+    env: Record<string, string | undefined>;
+    stdout: { write: (text: string) => void };
+    stderr: { write: (text: string) => void };
+    exit: (code: number) => never;
+  };
+}).process;
 
 type MCPMessage = {
   jsonrpc: "2.0";
@@ -19,11 +30,13 @@ class MCPHttpClient {
   private url: string;
   private sessionId: string | null;
   private idCounter: number;
+  private staticHeaders: Record<string, string>;
 
-  constructor(url: string) {
+  constructor(url: string, staticHeaders: Record<string, string> = {}) {
     this.url = url;
     this.sessionId = null;
     this.idCounter = 0;
+    this.staticHeaders = staticHeaders;
   }
 
   private nextID(): number {
@@ -58,6 +71,7 @@ class MCPHttpClient {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       Accept: "application/json, text/event-stream",
+      ...this.staticHeaders,
     };
     if (this.sessionId) {
       headers["Mcp-Session-Id"] = this.sessionId;
@@ -138,6 +152,54 @@ class MCPHttpClient {
   }
 }
 
+function resolveMCPHeadersFromEnv(): Record<string, string> {
+  const headers: Record<string, string> = {};
+
+  const hasHeader = (name: string): boolean =>
+    Object.keys(headers).some((key) => key.toLowerCase() === name.toLowerCase());
+
+  const rawHeadersJSON = (runtimeProcess.env.MEMPALACE_MCP_HEADERS_JSON || "").trim();
+  if (rawHeadersJSON) {
+    try {
+      const parsed = JSON.parse(rawHeadersJSON) as Record<string, unknown>;
+      for (const [key, value] of Object.entries(parsed || {})) {
+        if (typeof value === "string" && key) {
+          headers[key] = value;
+        }
+      }
+    } catch {
+      // Ignore malformed override headers and keep known-safe defaults.
+    }
+  }
+
+  const rawBearerToken = (runtimeProcess.env.MEMPALACE_MCP_BEARER_TOKEN || "").trim();
+  if (rawBearerToken && !hasHeader("Authorization")) {
+    headers.Authorization = /^Bearer\s+/i.test(rawBearerToken)
+      ? rawBearerToken
+      : `Bearer ${rawBearerToken}`;
+  }
+
+  const rawAPIKey = (runtimeProcess.env.MEMPALACE_MCP_API_KEY || "").trim();
+
+  const authHeader = (runtimeProcess.env.MEMPALACE_MCP_AUTH_HEADER || "Authorization").trim();
+  const authScheme = (runtimeProcess.env.MEMPALACE_MCP_AUTH_SCHEME || "").trim();
+  const resolvedHeaderName = authHeader || "Authorization";
+
+  if (rawAPIKey && !hasHeader(resolvedHeaderName)) {
+    let authValue = rawAPIKey;
+    if (authScheme) {
+      authValue = authScheme.toLowerCase() === "none" ? rawAPIKey : `${authScheme} ${rawAPIKey}`;
+    } else if (resolvedHeaderName.toLowerCase() === "authorization") {
+      authValue = /^[A-Za-z][A-Za-z0-9_-]*\s+/.test(rawAPIKey)
+        ? rawAPIKey
+        : `Bearer ${rawAPIKey}`;
+    }
+    headers[resolvedHeaderName] = authValue;
+  }
+
+  return headers;
+}
+
 function parseArgs(argv: string[]): RetrievalExpansionOptions {
   const get = (flag: string): string | undefined => {
     const idx = argv.indexOf(flag);
@@ -186,11 +248,14 @@ function parseArgs(argv: string[]): RetrievalExpansionOptions {
 }
 
 async function main(): Promise<void> {
-  const mcpURL = process.env.MEMPALACE_MCP_URL || "http://localhost:8093/mcp";
-  const toolPrefix = process.env.MEMGRAPH_TOOL_PREFIX;
-  const args = parseArgs(process.argv.slice(2));
+  loadRuntimeEnv({ scriptUrl: import.meta.url, env: runtimeProcess.env });
 
-  const mcp = new MCPHttpClient(mcpURL);
+  const mcpURL = runtimeProcess.env.MEMPALACE_MCP_URL || "http://localhost:8093/mcp";
+  const toolPrefix = runtimeProcess.env.MEMGRAPH_TOOL_PREFIX;
+  const mcpHeaders = resolveMCPHeadersFromEnv();
+  const args = parseArgs(runtimeProcess.argv.slice(2));
+
+  const mcp = new MCPHttpClient(mcpURL, mcpHeaders);
   await mcp.initialize();
 
   const client = createMemgraphClient({
@@ -199,10 +264,10 @@ async function main(): Promise<void> {
   });
 
   const result = await expandScopedRetrieval(client, args);
-  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  runtimeProcess.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
 main().catch((err) => {
-  process.stderr.write(`[policy-cycle] ${String(err)}\n`);
-  process.exit(1);
+  runtimeProcess.stderr.write(`[policy-cycle] ${String(err)}\n`);
+  runtimeProcess.exit(1);
 });

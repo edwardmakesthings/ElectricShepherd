@@ -341,7 +341,7 @@ only. If you don't know the exact content of the rest of the file, you will corr
 ## Sequential thinking — use before complex multi-step operations
 
 Before attempting a complex edit, non-trivial plan, or anything that has already failed
-once: call `litellm_sequentialthinking-sequentialthinking` to think it through first.
+once: call your configured sequentialthinking MCP tool to think it through first.
 
 Good triggers:
 - About to edit a file that has previously failed matching

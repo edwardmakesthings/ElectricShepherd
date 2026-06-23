@@ -167,7 +167,7 @@ All configuration is optional — defaults work out of the box.
 | Env var | Default | Description |
 |---|---|---|
 | `MEMPALACE_MCP_URL` | `http://localhost:8093/mcp` | MemPalace MCP endpoint |
-| `MEMGRAPH_TOOL_PREFIX` | `mempalace_` | Prefix for MemPalace tools (use LiteLLM-prefixed value when applicable) |
+| `MEMGRAPH_TOOL_PREFIX` | `mempalace_` | Prefix for MemPalace tools (set only if your gateway rewrites tool names) |
 | `NTFY_URL` | unset | ntfy endpoint for escalation notifications |
 | `ESHEPHERD_MEMCORE_REINJECT_ENABLED` | `true` | Enable plugin-driven scoped mem-core reinjection |
 | `ESHEPHERD_MEMCORE_REINJECT_ON_COMPACT` | `true` | Force mem-core reload after `session.compacted` |
@@ -181,6 +181,12 @@ All configuration is optional — defaults work out of the box.
 | `ESHEPHERD_ALLOWED_SYNTH_WRITERS` | `dreamer,dream-consolidator` | Allowed agent identities for synthesis writes |
 | `ESHEPHERD_MEMRAW_VERIFY_ENABLED` | `true` | Emit OpenCode mem-raw capture verification status |
 | `ESHEPHERD_MEMRAW_CAPTURE_CMD` | unset | Optional command run on stop/compact verification events |
+
+Local env workflow:
+- Repo template: `.env.example`
+- Your machine-specific values: `.env` (ignored by git)
+- Auto-discovery order: `ESHEPHERD_ENV_FILE` -> `./.env` + `./.env.local` -> `../docker/.env`
+- No manual `source` step required
 
 ---
 
