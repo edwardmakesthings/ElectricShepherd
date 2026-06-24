@@ -158,11 +158,15 @@ async function maybeNotify(args: {
   if (!args.notificationURL) return { notified: false };
   try {
     const url = args.topic ? `${args.notificationURL.replace(/\/$/, "")}/${args.topic}` : args.notificationURL;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
     const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "text/plain" },
       body: args.body,
+      signal: controller.signal,
     });
+    clearTimeout(timeout);
     if (!response.ok) {
       return { notified: false, error: `notify http ${response.status}` };
     }

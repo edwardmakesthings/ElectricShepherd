@@ -32,9 +32,19 @@
  */
 // @ts-nocheck
 
-import { execFileSync, execSync } from "node:child_process"
+import { execFileSync, execSync, spawn } from "node:child_process"
 import { dirname, join, resolve } from "node:path"
-import { existsSync, mkdirSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
+import {
+  buildCommandExecutionPlan,
+  clipText,
+  computeMemcoreSignature,
+  decideAutoSynth,
+  decideMemcoreInjection,
+  pruneAutoSynthTracking,
+} from "../adapter/turn-guard-helpers.ts"
+import type { AutoSynthTrigger, MemcoreInjectionRecord } from "../adapter/turn-guard-helpers.ts"
+import { loadPackagedAssets, mergeWithoutOverride, loadInstructionPaths, dedupeAppendInstructions } from "../adapter/asset-loader.ts"
 
 type MessageWithParts = {
   info?: any
@@ -53,8 +63,28 @@ const STATUS_FILE = "turn-guard-status.json"
 const DEFAULT_MEMCORE_MAX_CHARS = 12000
 const DEFAULT_MEMCORE_MAX_SCOPES = 6
 const DEFAULT_INJECTION_COOLDOWN_MS = 15000
+const DEFAULT_RETRY_ENABLED = true
 const DEFAULT_ALLOWED_SYNTH_WRITERS = ["dreamer", "dream-consolidator"]
 const SYNTH_WRITE_TOOL_NAMES = ["create_synthesis_node", "apply_merge"]
+
+// Automatic synthesis ("count-sheep in the background"): OPT-IN. When enabled,
+// the plugin runs the deterministic consolidation script after the session has
+// either gone quiet for a delay (idle-timer) or accumulated enough new turns
+// (volume-threshold), and on compaction. The idle-timer is overridable: any new
+// message clears the pending timer so consolidation only runs once the session
+// has actually stayed quiet for the full delay.
+const DEFAULT_AUTOSYNTH_IDLE_DELAY_MS = 120000 // 2 minutes of quiet before idle-triggered synthesis
+const DEFAULT_AUTOSYNTH_MESSAGE_THRESHOLD = 12 // new assistant turns that force a synthesis pass
+const DEFAULT_AUTOSYNTH_COOLDOWN_MS = 600000 // 10 minutes minimum between auto-synth runs
+const DEFAULT_AUTOSYNTH_TIMEOUT_MS = 300000 // 5 minutes before a hung run is killed (also the lock staleness window)
+const AUTOSYNTH_LOCK_FILE = "auto-synth.lock"
+const DEFAULT_MEMRAW_CAPTURE_TIMEOUT_MS = 20000 // blocking capture call ceiling so a hung script can't freeze the session
+const DEFAULT_MEMCORE_LOADER_TIMEOUT_MS = 15000 // blocking loader call ceiling
+// Bound the per-session auto-synth tracking maps so a long-lived process that
+// touches thousands of sessions cannot leak memory. Oldest (least-recently
+// inserted) sessions are evicted first; evicting a still-active session is
+// harmless (it is simply re-tracked on its next turn as if newly seen).
+const DEFAULT_AUTOSYNTH_MAX_TRACKED_SESSIONS = 512
 
 // Checkpoint gating: only after real work, only in agents that learn durable facts.
 const MIN_TERMINAL_MESSAGES_BEFORE_CHECKPOINT = 4
@@ -81,6 +111,10 @@ function parseCSV(value: string | undefined): string[] {
     .filter(Boolean)
 }
 
+function toLowerSet(items: string[]): Set<string> {
+  return new Set(items.map((item) => item.toLowerCase()))
+}
+
 function normalizePathForHost(path: string): string {
   if (!path) return ""
   const trimmed = path.trim()
@@ -89,20 +123,6 @@ function normalizePathForHost(path: string): string {
     return resolve(trimmed)
   }
   return resolve(trimmed)
-}
-
-function hashText(input: string): string {
-  let hash = 2166136261
-  for (let i = 0; i < input.length; i += 1) {
-    hash ^= input.charCodeAt(i)
-    hash = (hash * 16777619) >>> 0
-  }
-  return hash.toString(16).padStart(8, "0")
-}
-
-function clipText(input: string, maxChars: number): string {
-  if (input.length <= maxChars) return input
-  return `${input.slice(0, maxChars)}\n\n<!-- truncated by turn-guard (${input.length - maxChars} chars omitted) -->`
 }
 
 function findSessionID(event: any): string {
@@ -191,6 +211,82 @@ function writeStatusFile(projectRoot: string, payload: Record<string, unknown>):
   }
 }
 
+/**
+ * Cross-process / orphan guard for auto-synth. A lockfile carries the owning pid
+ * and a start timestamp; it is treated as stale once `staleMs` has elapsed, which
+ * self-heals the case where a previous run was orphaned (e.g. OpenCode exited
+ * before the background process finished) and never released the lock.
+ *
+ * Fails open on lock-I/O errors: synthesis should not be permanently blocked by a
+ * filesystem hiccup, and the in-process guard still prevents same-process overlap.
+ */
+function acquireAutoSynthLock(projectRoot: string, payload: Record<string, unknown>, staleMs: number): boolean {
+  try {
+    const dir = join(projectRoot, STATUS_DIR)
+    mkdirSync(dir, { recursive: true })
+    const lockPath = join(dir, AUTOSYNTH_LOCK_FILE)
+    if (existsSync(lockPath)) {
+      try {
+        const raw = JSON.parse(readFileSync(lockPath, "utf8"))
+        const startedAtMs = Number(raw?.startedAtMs || 0)
+        if (startedAtMs && Date.now() - startedAtMs < staleMs) {
+          return false // a still-fresh run holds the lock
+        }
+      } catch {
+        // unreadable/corrupt lock -> treat as stale and reclaim
+      }
+    }
+    writeFileSync(
+      lockPath,
+      `${JSON.stringify({ ...payload, pid: process.pid, startedAtMs: Date.now() }, null, 2)}\n`,
+      "utf8",
+    )
+    return true
+  } catch (err) {
+    console.error("[turn-guard] auto-synth lock acquire failed (failing open):", err)
+    return true
+  }
+}
+
+function releaseAutoSynthLock(projectRoot: string): void {
+  try {
+    const lockPath = join(projectRoot, STATUS_DIR, AUTOSYNTH_LOCK_FILE)
+    if (existsSync(lockPath)) unlinkSync(lockPath)
+  } catch (err) {
+    console.error("[turn-guard] auto-synth lock release failed:", err)
+  }
+}
+
+/**
+ * Kill a background run *and any children it spawned*. `child.kill()` only signals
+ * the direct child, so a shell-wrapped `ESHEPHERD_AUTO_SYNTH_CMD` (or a runner that
+ * forks a grandchild) could be orphaned. On Windows we use `taskkill /T` to kill
+ * the whole tree; on POSIX we signal the process group (the runs are spawned with
+ * `detached: true` so the child is a group leader). Either path falls back to a
+ * direct kill so a missing `taskkill`/absent group can never leave the run alive.
+ */
+function killProcessTree(child: { pid?: number; kill: (signal?: string) => boolean }): void {
+  const pid = child?.pid
+  try {
+    if (process.platform === "win32") {
+      if (pid) {
+        execFileSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" })
+        return
+      }
+    } else if (pid) {
+      process.kill(-pid, "SIGKILL") // negative pid => signal the whole process group
+      return
+    }
+  } catch (err) {
+    console.error("[turn-guard] auto-synth tree-kill failed; falling back to direct kill:", err)
+  }
+  try {
+    child.kill("SIGKILL")
+  } catch (err) {
+    console.error("[turn-guard] auto-synth direct kill failed:", err)
+  }
+}
+
 function loadMemcoreMarkdown(projectRoot: string, scopeDir: string): { markdown: string; loaderInfo: Record<string, unknown> } {
   const loaderScript = join(projectRoot, "scripts", "run-mem-core-loader.ts")
   if (!existsSync(loaderScript)) {
@@ -226,6 +322,8 @@ function loadMemcoreMarkdown(projectRoot: string, scopeDir: string): { markdown:
       encoding: "utf8",
       maxBuffer: 2 * 1024 * 1024,
       stdio: ["ignore", "pipe", "pipe"],
+      timeout: getNumberEnv("ESHEPHERD_MEMCORE_LOADER_TIMEOUT_MS", DEFAULT_MEMCORE_LOADER_TIMEOUT_MS),
+      killSignal: "SIGKILL",
     })
     return {
       markdown: String(output || "").trim(),
@@ -271,9 +369,11 @@ function getAgentIdentity(msg: MessageWithParts | null | undefined): string {
 }
 
 function runMemrawCaptureCommand(projectRoot: string, sid: string, eventType: string): { attempted: boolean; ok: boolean; output?: string; error?: string } {
-  const command = String(process?.env?.ESHEPHERD_MEMRAW_CAPTURE_CMD || "").trim()
+  const configured = String(process?.env?.ESHEPHERD_MEMRAW_CAPTURE_CMD || "").trim()
+  const defaultScript = join(projectRoot, "scripts", "capture-memraw.sh")
+  const command = configured || (existsSync(defaultScript) ? "bash ./scripts/capture-memraw.sh" : "")
   if (!command) {
-    return { attempted: false, ok: false, error: "ESHEPHERD_MEMRAW_CAPTURE_CMD not set" }
+    return { attempted: false, ok: false, error: "capture command not set and default script missing" }
   }
 
   try {
@@ -282,6 +382,8 @@ function runMemrawCaptureCommand(projectRoot: string, sid: string, eventType: st
       encoding: "utf8",
       maxBuffer: 2 * 1024 * 1024,
       stdio: ["ignore", "pipe", "pipe"],
+      timeout: getNumberEnv("ESHEPHERD_MEMRAW_CAPTURE_TIMEOUT_MS", DEFAULT_MEMRAW_CAPTURE_TIMEOUT_MS),
+      killSignal: "SIGKILL",
       env: {
         ...process.env,
         ESHEPHERD_SESSION_ID: sid,
@@ -400,6 +502,43 @@ function getActiveModel(msg: MessageWithParts | null | undefined): { providerID:
   return null
 }
 
+function getActiveAgent(msg: MessageWithParts | null | undefined): string | null {
+  if (!msg?.info) return null
+  const explicitAgent = String(msg.info.agent ?? "").trim()
+  if (explicitAgent) return explicitAgent
+  const modeFallback = String(msg.info.mode ?? "").trim()
+  if (modeFallback) return modeFallback
+  return null
+}
+
+function getPromptRouting(...candidates: Array<MessageWithParts | null | undefined>): {
+  agent?: string
+  model?: { providerID: string; modelID: string }
+} {
+  let agent: string | undefined
+  let model: { providerID: string; modelID: string } | undefined
+
+  for (const msg of candidates) {
+    if (!agent) {
+      const resolvedAgent = getActiveAgent(msg)
+      if (resolvedAgent) agent = resolvedAgent
+    }
+    if (!model) {
+      const resolvedModel = getActiveModel(msg)
+      if (resolvedModel) model = resolvedModel
+    }
+    if (agent && model) break
+  }
+
+  const routing: {
+    agent?: string
+    model?: { providerID: string; modelID: string }
+  } = {}
+  if (agent) routing.agent = agent
+  if (model) routing.model = model
+  return routing
+}
+
 export const TurnGuard = async ({ client, directory }: any) => {
   console.log(`${START_BANNER}: plugin loaded (directory=${directory})`)
   console.log("[turn-guard] hooks registered: event(message.updated, session.idle, session.compacted, session.started)")
@@ -412,8 +551,24 @@ export const TurnGuard = async ({ client, directory }: any) => {
   const memcoreInjectOnStart = getBoolEnv("ESHEPHERD_MEMCORE_REINJECT_ON_START", true)
   const memcoreMaxChars = getNumberEnv("ESHEPHERD_MEMCORE_MAX_CHARS", DEFAULT_MEMCORE_MAX_CHARS)
   const injectionCooldownMs = getNumberEnv("ESHEPHERD_MEMCORE_INJECTION_COOLDOWN_MS", DEFAULT_INJECTION_COOLDOWN_MS)
+  const retryEnabled = getBoolEnv("ESHEPHERD_RETRY_ENABLED", DEFAULT_RETRY_ENABLED)
+  const retryDisabledAgents = toLowerSet(parseCSV(process?.env?.ESHEPHERD_RETRY_DISABLED_AGENTS))
+  const retryDisabledModes = toLowerSet(parseCSV(process?.env?.ESHEPHERD_RETRY_DISABLED_MODES))
   const synthWriteGuardEnabled = getBoolEnv("ESHEPHERD_SYNTH_WRITE_GUARD_ENABLED", true)
   const memrawVerifyEnabled = getBoolEnv("ESHEPHERD_MEMRAW_VERIFY_ENABLED", true)
+  // Automatic synthesis is OFF unless explicitly opted in — it triggers memory
+  // writes in the background, so callers must enable it deliberately.
+  const autoSynthEnabled = getBoolEnv("ESHEPHERD_AUTO_SYNTH_ENABLED", false)
+  const autoSynthOnIdle = getBoolEnv("ESHEPHERD_AUTO_SYNTH_ON_IDLE", true)
+  const autoSynthOnCompact = getBoolEnv("ESHEPHERD_AUTO_SYNTH_ON_COMPACT", true)
+  const autoSynthIdleDelayMs = getNumberEnv("ESHEPHERD_AUTO_SYNTH_IDLE_DELAY_MS", DEFAULT_AUTOSYNTH_IDLE_DELAY_MS)
+  const autoSynthMessageThreshold = getNumberEnv("ESHEPHERD_AUTO_SYNTH_MESSAGE_THRESHOLD", DEFAULT_AUTOSYNTH_MESSAGE_THRESHOLD)
+  const autoSynthCooldownMs = getNumberEnv("ESHEPHERD_AUTO_SYNTH_COOLDOWN_MS", DEFAULT_AUTOSYNTH_COOLDOWN_MS)
+  const autoSynthTimeoutMs = getNumberEnv("ESHEPHERD_AUTO_SYNTH_TIMEOUT_MS", DEFAULT_AUTOSYNTH_TIMEOUT_MS)
+  const autoSynthMaxTrackedSessions = getNumberEnv(
+    "ESHEPHERD_AUTO_SYNTH_MAX_TRACKED_SESSIONS",
+    DEFAULT_AUTOSYNTH_MAX_TRACKED_SESSIONS,
+  )
   const allowedSynthWriters = new Set(
     parseCSV(process?.env?.ESHEPHERD_ALLOWED_SYNTH_WRITERS).length > 0
       ? parseCSV(process?.env?.ESHEPHERD_ALLOWED_SYNTH_WRITERS).map((item) => item.toLowerCase())
@@ -436,6 +591,16 @@ export const TurnGuard = async ({ client, directory }: any) => {
   const warnedSynthWriteMessageIDs = new Set<string>()
   const memrawCaptureBySession = new Map<string, { totalEvents: number; lastEvent: string; lastAt: string; lastSuccess: boolean }>()
 
+  // --- auto-synth state ---
+  // Pending idle-delay timers (cleared/overridden when a new message arrives),
+  // last-run timestamps for the cooldown throttle, and a count of new assistant
+  // turns since the last run for the volume trigger. A single in-flight flag
+  // prevents overlapping background consolidations across all sessions.
+  const autoSynthPendingTimer = new Map<string, ReturnType<typeof setTimeout>>()
+  const autoSynthLastRunAt = new Map<string, number>()
+  const autoSynthMessagesSinceRun = new Map<string, number>()
+  let autoSynthInFlight = false
+
   function statusSnapshot(extra: Record<string, unknown> = {}): Record<string, unknown> {
     return {
       generatedAt: new Date().toISOString(),
@@ -445,8 +610,18 @@ export const TurnGuard = async ({ client, directory }: any) => {
       memcoreInjectOnIdle,
       memcoreInjectOnCompacted,
       memcoreInjectOnStart,
+      retryEnabled,
+      retryDisabledAgents: [...retryDisabledAgents],
+      retryDisabledModes: [...retryDisabledModes],
       synthWriteGuardEnabled,
       memrawVerifyEnabled,
+      autoSynthEnabled,
+      autoSynthOnIdle,
+      autoSynthOnCompact,
+      autoSynthIdleDelayMs,
+      autoSynthMessageThreshold,
+      autoSynthCooldownMs,
+      autoSynthTimeoutMs,
       allowedSynthWriters: [...allowedSynthWriters],
       sessions: {
         checkpointed: checkpointedSessions.size,
@@ -462,6 +637,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
     event: any
     reason: "idle" | "compacted" | "started"
     messages?: MessageWithParts[]
+    anchor?: MessageWithParts | null
     force?: boolean
   }): Promise<boolean> {
     if (!memcoreInjectEnabled) return false
@@ -491,33 +667,43 @@ export const TurnGuard = async ({ client, directory }: any) => {
     }
 
     const clipped = clipText(markdown, memcoreMaxChars)
-    const signature = `${scopeDir}|${hashText(clipped)}`
+    const signature = computeMemcoreSignature(scopeDir, clipped)
     const now = Date.now()
     const previous = memcoreInjectionBySession.get(args.sid)
-    const changed = !previous || previous.signature !== signature || previous.scopeDir !== scopeDir
-    const cooldownElapsed = !previous || now - previous.at >= injectionCooldownMs
-    const shouldInject = Boolean(args.force) || (changed && cooldownElapsed)
+    const { shouldInject } = decideMemcoreInjection({
+      scopeDir,
+      signature,
+      now,
+      previous,
+      cooldownMs: injectionCooldownMs,
+      force: args.force,
+    })
 
     if (!shouldInject) {
       return false
     }
 
     try {
+      const routing = getPromptRouting(args.anchor)
+      const body: any = {
+        parts: [
+          {
+            type: "text",
+            text:
+              `${MEMCORE_REINJECT_MARKER} Refreshing scoped mem-core for this session (reason=${args.reason}). ` +
+              `Use this as the currently active resident memory for scope: ${scopeDir}. ` +
+              "This is derived render output from mem-synth; do not hand-edit mem-core files.\n\n" +
+              clipped,
+          },
+        ],
+      }
+      if (routing.agent) body.agent = routing.agent
+      if (routing.model) body.model = routing.model
+
       await client.session.prompt({
         path: { id: args.sid },
         query: { directory },
-        body: {
-          parts: [
-            {
-              type: "text",
-              text:
-                `${MEMCORE_REINJECT_MARKER} Refreshing scoped mem-core for this session (reason=${args.reason}). ` +
-                `Use this as the currently active resident memory for scope: ${scopeDir}. ` +
-                "This is derived render output from mem-synth; do not hand-edit mem-core files.\n\n" +
-                clipped,
-            },
-          ],
-        },
+        body,
       })
 
       memcoreInjectionBySession.set(args.sid, { signature, at: now, scopeDir })
@@ -574,22 +760,27 @@ export const TurnGuard = async ({ client, directory }: any) => {
     }))
 
     try {
+      const routing = getPromptRouting(msg)
+      const body: any = {
+        parts: [
+          {
+            type: "text",
+            text:
+              `${WRITE_AUTHORITY_MARKER} mem-synth write tools are restricted to dreamer agents (` +
+              `${[...allowedSynthWriters].join(", ")}). ` +
+              `This turn attempted: ${namesJoined}. ` +
+              "Do not call create_synthesis_node/apply_merge from interactive build/plan flows. " +
+              "Use diary/add_drawer/kg writes for raw findings and defer synthesis-node writes to the dreamer.",
+          },
+        ],
+      }
+      if (routing.agent) body.agent = routing.agent
+      if (routing.model) body.model = routing.model
+
       await client.session.prompt({
         path: { id: sid },
         query: { directory },
-        body: {
-          parts: [
-            {
-              type: "text",
-              text:
-                `${WRITE_AUTHORITY_MARKER} mem-synth write tools are restricted to dreamer agents (` +
-                `${[...allowedSynthWriters].join(", ")}). ` +
-                `This turn attempted: ${namesJoined}. ` +
-                "Do not call create_synthesis_node/apply_merge from interactive build/plan flows. " +
-                "Use diary/add_drawer/kg writes for raw findings and defer synthesis-node writes to the dreamer.",
-            },
-          ],
-        },
+        body,
       })
     } catch (err) {
       console.error("[turn-guard] failed write-authority prompt:", err)
@@ -619,7 +810,184 @@ export const TurnGuard = async ({ client, directory }: any) => {
     }))
 
     if (!result.attempted) {
-      console.log("[turn-guard] mem-raw capture verification: command not configured; set ESHEPHERD_MEMRAW_CAPTURE_CMD")
+      console.log("[turn-guard] mem-raw capture verification: command not configured and default script not found")
+    }
+  }
+
+  // Spawn the deterministic consolidation script in the background. Deterministic
+  // (no live mapper) so it never forces a model load. The caller has already set
+  // autoSynthInFlight and acquired the cross-process lock; this function owns the
+  // process lifecycle and is the SOLE place that clears both, via settle().
+  //
+  // Robustness:
+  //   - The default path spawns `node` directly (no shell) so the watchdog can
+  //     actually kill the process tree; a user-provided command is free-form and
+  //     needs a shell.
+  //   - A watchdog kills a run that exceeds autoSynthTimeoutMs, so a hung MCP
+  //     endpoint can never wedge the in-flight flag permanently.
+  //   - settle() is idempotent, so exit/error/timeout racing each other only
+  //     clears state once.
+  function runConsolidationCommand(sid: string, trigger: string, onStartFailure?: () => void): void {
+    const configured = String(process?.env?.ESHEPHERD_AUTO_SYNTH_CMD || "").trim()
+    const startedAt = new Date().toISOString()
+    console.log(`[turn-guard] auto-synth start sid=${sid} trigger=${trigger}`)
+    writeStatusFile(projectRoot, statusSnapshot({ type: "auto-synth-start", sid, trigger, startedAt }))
+
+    let settled = false
+    let watchdog: ReturnType<typeof setTimeout> | null = null
+    const settle = (status: Record<string, unknown>, startFailure = false) => {
+      if (settled) return
+      settled = true
+      if (watchdog) {
+        clearTimeout(watchdog)
+        watchdog = null
+      }
+      autoSynthInFlight = false
+      releaseAutoSynthLock(projectRoot)
+      // A run that never actually started should not consume the cooldown, so a
+      // later trigger can retry promptly. A run that started and then failed/timed
+      // out keeps the cooldown (anti-thrash).
+      if (startFailure) {
+        try {
+          onStartFailure?.()
+        } catch (err) {
+          console.error("[turn-guard] auto-synth start-failure rollback failed:", err)
+        }
+      }
+      writeStatusFile(projectRoot, statusSnapshot({ ...status, finishedAt: new Date().toISOString() }))
+    }
+
+    try {
+      const childEnv = {
+        ...process.env,
+        ESHEPHERD_SESSION_ID: sid,
+        ESHEPHERD_EVENT_TYPE: `auto-synth:${trigger}`,
+        // The plugin already holds the shared lock; tell the child runner not to
+        // re-acquire (or release) it so the plugin->script handoff doesn't
+        // deadlock against itself. Standalone cron/n8n runs lack this flag and
+        // take the lock themselves.
+        ESHEPHERD_SYNTH_LOCK_INHERITED: "1",
+      }
+      // detached:true makes the child a process-group leader on POSIX so the
+      // watchdog can kill the entire tree (see killProcessTree); harmless on
+      // Windows where taskkill /T handles the tree instead.
+      const detached = process.platform !== "win32"
+      const plan = buildCommandExecutionPlan({
+        configured,
+        projectRoot,
+        defaultScript: join(projectRoot, "scripts", "capture-memraw.sh"),
+      })
+
+      if (plan.mode === "rejected") {
+        console.error(`[turn-guard] auto-synth rejected unsafe command: ${plan.reason}`)
+        settle({ type: "auto-synth-rejected", sid, trigger, reason: plan.reason }, true)
+        return
+      }
+
+      const child = spawn(plan.command, plan.args, { cwd: plan.cwd, shell: false, stdio: "ignore", env: childEnv, detached })
+
+      watchdog = setTimeout(() => {
+        console.error(
+          `[turn-guard] auto-synth timeout sid=${sid} trigger=${trigger} after ${autoSynthTimeoutMs}ms; killing`,
+        )
+        killProcessTree(child)
+        settle({ type: "auto-synth-timeout", sid, trigger, timeoutMs: autoSynthTimeoutMs })
+      }, autoSynthTimeoutMs)
+      watchdog.unref?.()
+
+      child.on("error", (err: unknown) => {
+        console.error("[turn-guard] auto-synth spawn error:", err)
+        settle({ type: "auto-synth-error", sid, trigger, error: String(err) }, true)
+      })
+      child.on("exit", (code: number | null) => {
+        console.log(`[turn-guard] auto-synth finished sid=${sid} trigger=${trigger} code=${String(code)}`)
+        settle({ type: "auto-synth-finish", sid, trigger, exitCode: code })
+      })
+      child.unref?.()
+    } catch (err) {
+      console.error("[turn-guard] auto-synth failed to start:", err)
+      settle({ type: "auto-synth-error", sid, trigger, error: String(err) }, true)
+    }
+  }
+
+  // Evaluate the opt-in/cooldown/threshold gate and, if it passes, claim the
+  // cross-process lock and start a run. State (cooldown stamp, message reset,
+  // in-flight) is only stamped once the lock is held, so a run blocked by another
+  // process/instance can still fire on a later trigger.
+  function evaluateAutoSynth(sid: string, trigger: AutoSynthTrigger): void {
+    const messagesSinceRun = autoSynthMessagesSinceRun.get(sid) ?? 0
+    const decision = decideAutoSynth({
+      enabled: autoSynthEnabled,
+      now: Date.now(),
+      lastRunAt: autoSynthLastRunAt.get(sid) ?? null,
+      cooldownMs: autoSynthCooldownMs,
+      messagesSinceRun,
+      messageThreshold: autoSynthMessageThreshold,
+      trigger,
+      inFlight: autoSynthInFlight,
+    })
+
+    if (!decision.shouldRun) {
+      if (autoSynthEnabled) {
+        console.log(
+          `[turn-guard] auto-synth skip sid=${sid} trigger=${trigger} reason=${decision.reason} msgsSince=${messagesSinceRun}`,
+        )
+      }
+      return
+    }
+
+    // Claim the cross-process lock before stamping any state. If another instance
+    // (or n8n/cron) is mid-run, skip without consuming the cooldown so a later
+    // trigger can retry.
+    if (!acquireAutoSynthLock(projectRoot, { sid, trigger: decision.reason }, autoSynthTimeoutMs)) {
+      console.log(`[turn-guard] auto-synth skip sid=${sid} trigger=${trigger} reason=locked`)
+      writeStatusFile(projectRoot, statusSnapshot({ type: "auto-synth-skip", sid, trigger, reason: "locked" }))
+      return
+    }
+
+    autoSynthInFlight = true
+    const previousLastRunAt = autoSynthLastRunAt.get(sid) ?? null
+    autoSynthLastRunAt.set(sid, Date.now())
+    autoSynthMessagesSinceRun.set(sid, 0)
+    pruneAutoSynthTracking(autoSynthMessagesSinceRun, autoSynthLastRunAt, autoSynthMaxTrackedSessions)
+    // If the run never actually starts, undo the cooldown stamp so the next
+    // trigger can retry immediately instead of waiting out a phantom cooldown.
+    runConsolidationCommand(sid, decision.reason, () => {
+      if (previousLastRunAt === null) autoSynthLastRunAt.delete(sid)
+      else autoSynthLastRunAt.set(sid, previousLastRunAt)
+    })
+  }
+
+  // Arm/replace the idle-delay timer. The timer represents \"stayed quiet for the
+  // full delay\"; a new message clears it (see onMessageUpdated) so it is the
+  // overridable delay rather than a fixed schedule.
+  function armAutoSynthIdleTimer(sid: string): void {
+    if (!autoSynthEnabled || !autoSynthOnIdle) return
+    const existing = autoSynthPendingTimer.get(sid)
+    if (existing) clearTimeout(existing)
+    const timer = setTimeout(() => {
+      autoSynthPendingTimer.delete(sid)
+      evaluateAutoSynth(sid, "idle-timer")
+    }, autoSynthIdleDelayMs)
+    timer.unref?.()
+    autoSynthPendingTimer.set(sid, timer)
+    writeStatusFile(projectRoot, statusSnapshot({ type: "auto-synth-armed", sid, idleDelayMs: autoSynthIdleDelayMs }))
+  }
+
+  // A new message means the session is active again: cancel any pending
+  // idle-triggered run and, for terminal assistant turns, advance the volume
+  // counter and eagerly evaluate the volume trigger.
+  function noteAutoSynthActivity(sid: string, info: any): void {
+    if (!autoSynthEnabled) return
+    const pending = autoSynthPendingTimer.get(sid)
+    if (pending) {
+      clearTimeout(pending)
+      autoSynthPendingTimer.delete(sid)
+    }
+    if (info?.role === "assistant" && info?.finish) {
+      autoSynthMessagesSinceRun.set(sid, (autoSynthMessagesSinceRun.get(sid) ?? 0) + 1)
+      pruneAutoSynthTracking(autoSynthMessagesSinceRun, autoSynthLastRunAt, autoSynthMaxTrackedSessions)
+      evaluateAutoSynth(sid, "volume")
     }
   }
 
@@ -629,8 +997,17 @@ export const TurnGuard = async ({ client, directory }: any) => {
     last: MessageWithParts,
     prev: MessageWithParts | null,
   ): Promise<boolean> => {
-    if (String(last?.info?.mode ?? "") !== "build") return false
+    if (!retryEnabled) return false
     if (!isAssistantStop(last)) return false
+
+    const currentMode = String(last?.info?.mode ?? "").trim().toLowerCase()
+    const currentAgent = String(last?.info?.agent ?? "").trim().toLowerCase()
+    if (currentMode && retryDisabledModes.has(currentMode)) {
+      return false
+    }
+    if (currentAgent && retryDisabledAgents.has(currentAgent)) {
+      return false
+    }
 
     const messageID = String(last?.info?.id ?? "")
     if (messageID) {
@@ -705,7 +1082,8 @@ export const TurnGuard = async ({ client, directory }: any) => {
       `prevFinish=${String(prev?.info?.finish ?? "")} issuing one auto-retry`
     )
 
-    const activeModel = getActiveModel(last) ?? getActiveModel(prev)
+    const routing = getPromptRouting(last, prev)
+    const activeModel = routing.model
     if (activeModel) {
       console.log(
         `[turn-guard] retry model pin sid=${sid} ` +
@@ -716,7 +1094,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
     }
 
     const body: any = {
-      agent: "build",
       parts: [
         {
           type: "text",
@@ -727,6 +1104,10 @@ export const TurnGuard = async ({ client, directory }: any) => {
             "End with a short 'Review' section containing: what you did, what changed or what failed, and the exact next action.",
         },
       ],
+    }
+
+    if (routing.agent) {
+      body.agent = routing.agent
     }
 
     if (activeModel) {
@@ -766,51 +1147,56 @@ export const TurnGuard = async ({ client, directory }: any) => {
     console.log(`[turn-guard] prompting memory checkpoint for sid=${sid} (mode=${mode})`)
 
     try {
+      const routing = getPromptRouting(last)
+      const body: any = {
+        parts: [
+          {
+            type: "text",
+            text:
+              `${CHECKPOINT_MARKER} Before this session winds down, run a two-part memory ` +
+              `check. These are independent — answer both; either can warrant saving alone.\n\n` +
+              `PART 1 — did durable STATE change? (the always-loaded blocks)\n` +
+              `- project-state — architecture, active work, or a major decision changed?\n` +
+              `- active-conventions — a naming/style/structural/tooling rule changed?\n` +
+              `- user-preferences — a new durable preference was stated?\n` +
+              `For each durable STATE change, write/update the corresponding mem-synth fact using ` +
+              `add_drawer, kg_add, or create_synthesis_node (the same durable layer used in PART 2).\n` +
+              `mem-core is a deterministic file-only render regenerated by the consolidation runtime from mem-synth. ` +
+              `Do NOT hand-edit mem-core files and do NOT write any context-blocks drawer for mem-core.\n\n` +
+              `PART 2 — was substantive WORK done or something LEARNED? (diary / worked example)\n` +
+              `This applies EVEN IF no block changed. Save a synthesized entry if any happened:\n` +
+              `- a feature/fix was implemented (what was built, where, key choices),\n` +
+              `- a bug's root cause was found (the cause, not just the fix),\n` +
+              `- a non-obvious "how/why this works" was discovered,\n` +
+              `- a problem was solved in a reusable way (file as a worked example in the ` +
+              `apprenticeship room),\n` +
+              `- a dead end worth not repeating was hit.\n` +
+              `Use diary_write / kg_add / add_drawer / the apprenticeship room. Synthesize — ` +
+              `don't dump a transcript; write what a future session would want to retrieve. ` +
+              `Lead each saved entry with a one-line \`DESC:\` (what it is + when it's ` +
+              `relevant) so it's discoverable without loading the body.\n\n` +
+              `IF this session's work appears to already be done / already correct / a ` +
+              `continuation of prior work: do NOT assume a prior session already saved it. ` +
+              `You cannot see whether that happened. SEARCH MemPalace (diary/drawers) for an ` +
+              `entry covering this specific work before concluding nothing needs saving. ` +
+              `If you find a matching entry: genuinely a no-op, say so and cite what you found. ` +
+              `If you find NO matching entry: this is unsaved work regardless of which session ` +
+              `did it — save it now per PART 2 above. Never write "a previous session should ` +
+              `have handled this" without having searched and found evidence it did.\n\n` +
+              `Do not invent changes just to have something to write — but "no block changed" ` +
+              `is NOT "nothing to save"; implementation work and discoveries belong in PART 2. ` +
+              `If genuinely nothing in either part, reply "No memory updates needed" and stop. ` +
+              `End by listing what you saved under each part.`,
+          },
+        ],
+      }
+      if (routing.agent) body.agent = routing.agent
+      if (routing.model) body.model = routing.model
+
       await client.session.prompt({
         path: { id: sid },
         query: { directory },
-        body: {
-          parts: [
-            {
-              type: "text",
-              text:
-                `${CHECKPOINT_MARKER} Before this session winds down, run a two-part memory ` +
-                `check. These are independent — answer both; either can warrant saving alone.\n\n` +
-                `PART 1 — did durable STATE change? (the always-loaded blocks)\n` +
-                `- project-state — architecture, active work, or a major decision changed?\n` +
-                `- active-conventions — a naming/style/structural/tooling rule changed?\n` +
-                `- user-preferences — a new durable preference was stated?\n` +
-                `For each durable STATE change, write/update the corresponding mem-synth fact using ` +
-                `add_drawer, kg_add, or create_synthesis_node (the same durable layer used in PART 2).\n` +
-                `mem-core is a deterministic file-only render regenerated by the consolidation runtime from mem-synth. ` +
-                `Do NOT hand-edit mem-core files and do NOT write any context-blocks drawer for mem-core.\n\n` +
-                `PART 2 — was substantive WORK done or something LEARNED? (diary / worked example)\n` +
-                `This applies EVEN IF no block changed. Save a synthesized entry if any happened:\n` +
-                `- a feature/fix was implemented (what was built, where, key choices),\n` +
-                `- a bug's root cause was found (the cause, not just the fix),\n` +
-                `- a non-obvious "how/why this works" was discovered,\n` +
-                `- a problem was solved in a reusable way (file as a worked example in the ` +
-                `apprenticeship room),\n` +
-                `- a dead end worth not repeating was hit.\n` +
-                `Use diary_write / kg_add / add_drawer / the apprenticeship room. Synthesize — ` +
-                `don't dump a transcript; write what a future session would want to retrieve. ` +
-                `Lead each saved entry with a one-line \`DESC:\` (what it is + when it's ` +
-                `relevant) so it's discoverable without loading the body.\n\n` +
-                `IF this session's work appears to already be done / already correct / a ` +
-                `continuation of prior work: do NOT assume a prior session already saved it. ` +
-                `You cannot see whether that happened. SEARCH MemPalace (diary/drawers) for an ` +
-                `entry covering this specific work before concluding nothing needs saving. ` +
-                `If you find a matching entry: genuinely a no-op, say so and cite what you found. ` +
-                `If you find NO matching entry: this is unsaved work regardless of which session ` +
-                `did it — save it now per PART 2 above. Never write "a previous session should ` +
-                `have handled this" without having searched and found evidence it did.\n\n` +
-                `Do not invent changes just to have something to write — but "no block changed" ` +
-                `is NOT "nothing to save"; implementation work and discoveries belong in PART 2. ` +
-                `If genuinely nothing in either part, reply "No memory updates needed" and stop. ` +
-                `End by listing what you saved under each part.`,
-            },
-          ],
-        },
+        body,
       })
     } catch (err) {
       console.error("[turn-guard] failed to issue checkpoint prompt:", err)
@@ -834,6 +1220,10 @@ export const TurnGuard = async ({ client, directory }: any) => {
     if (info?.role === "assistant" && info?.finish) {
       terminalCountBySession.set(sid, (terminalCountBySession.get(sid) ?? 0) + 1)
     }
+
+    // Auto-synth: a new message cancels any pending idle run and advances the
+    // volume counter; harmless no-op when auto-synth is disabled.
+    noteAutoSynthActivity(sid, info)
 
     try {
       const messageID = String(info?.id ?? "")
@@ -901,7 +1291,12 @@ export const TurnGuard = async ({ client, directory }: any) => {
         event,
         reason: "idle",
         messages,
+        anchor: last,
       })
+
+      // Arm the overridable idle-delay timer: consolidation fires only if the
+      // session stays quiet for the full delay (a new message cancels it).
+      armAutoSynthIdleTimer(sid)
     } catch (err) {
       console.error("[turn-guard] failed:", err)
     }
@@ -918,6 +1313,11 @@ export const TurnGuard = async ({ client, directory }: any) => {
       reason: "compacted",
       force: true,
     })
+
+    // Compaction is a natural consolidation point; run auto-synth if enabled.
+    if (autoSynthOnCompact) {
+      evaluateAutoSynth(sid, "compacted")
+    }
   }
 
   async function onSessionStarted(event: any): Promise<void> {
@@ -932,7 +1332,35 @@ export const TurnGuard = async ({ client, directory }: any) => {
     })
   }
 
-  const hooks = {
+  return {
+    config: async (config: any) => {
+      // Make the bundled agents and slash commands load like the rest of the
+      // plugin. OpenCode only auto-discovers agents/ and command/ folders when a
+      // repo is the active project, which never happens for an installed plugin.
+      // Reading the markdown files here and injecting them into the resolved
+      // config means they load in any consumer project — while each agent and
+      // command stays in its own standalone file. User-defined entries win.
+      try {
+        const { agents, commands } = loadPackagedAssets()
+        config.agent = mergeWithoutOverride(agents, config.agent)
+        config.command = mergeWithoutOverride(commands, config.command)
+        let injectedInstructions = 0
+        // Instructions (memory-discipline + memory-blocks) are part of the
+        // plugin's behavior, so inject their absolute paths too. Opt out with
+        // ESHEPHERD_INJECT_INSTRUCTIONS=false.
+        if (getBoolEnv("ESHEPHERD_INJECT_INSTRUCTIONS", true)) {
+          const instructionPaths = loadInstructionPaths()
+          config.instructions = dedupeAppendInstructions(config.instructions, instructionPaths)
+          injectedInstructions = instructionPaths.length
+        }
+        console.log(
+          `[turn-guard] config hook injected ${Object.keys(agents).length} agents, ` +
+            `${Object.keys(commands).length} commands, ${injectedInstructions} instructions`,
+        )
+      } catch (err) {
+        console.log(`[turn-guard] config hook asset injection failed: ${String(err)}`)
+      }
+    },
     event: async ({ event }: any) => {
       if (!event?.type) return
       if (event.type === "message.updated") {
@@ -951,9 +1379,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
         await onSessionStarted(event)
       }
     },
-  }
-
-  return hooks as any
+  } as any
 }
 
 export default TurnGuard

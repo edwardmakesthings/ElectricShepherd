@@ -30,6 +30,9 @@ Minimum checks before opening a PR:
 ```bash
 # Ensure package contents are correct
 npm pack --dry-run
+
+# Run unit tests (fast, no live MCP dependency)
+npm test
 ```
 
 For runtime or adapter changes, also run one or more policy scripts in an environment with MemPalace tools available:
@@ -38,6 +41,9 @@ For runtime or adapter changes, also run one or more policy scripts in an enviro
 npm run policy:example
 npm run policy:consolidate-validate:example
 npm run policy:mem-core:load -- --format markdown
+
+# Optional integration smoke tests for quickstart runtime flows
+ESHEPHERD_TEST_INTEGRATION=1 npm run test:integration
 ```
 
 If a command requires local environment variables (for example MCP endpoint/tool prefix), document what you used in the PR description.

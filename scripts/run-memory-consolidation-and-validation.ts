@@ -1,8 +1,9 @@
-import { createMemgraphClient, type JsonMap } from "../adapter/memgraph.ts";
+import { createMemgraphClient } from "../adapter/memgraph.ts";
+import { MCPHttpClient, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-client.ts";
 // @ts-expect-error runtime script package does not include node typings
 import { execFileSync } from "node:child_process";
 // @ts-expect-error runtime script package does not include node typings
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 // @ts-expect-error runtime script package does not include node typings
 import { dirname, join, relative, resolve } from "node:path";
 import {
@@ -23,37 +24,34 @@ import {
   type CadenceOrchestratorResult,
 } from "../adapter/cadence-orchestrator.ts";
 import { loadRuntimeEnv } from "./runtime-env.ts";
+import { acquireSynthLock, releaseSynthLock } from "./synth-lock.ts";
 
 declare const process: {
   argv: string[];
   env: Record<string, string | undefined>;
   cwd: () => string;
+  pid: number;
   stdout: { write: (text: string) => void };
   stderr: { write: (text: string) => void };
   exit: (code: number) => never;
 };
 
-type MCPMessage = {
-  jsonrpc: "2.0";
-  id: number;
-  method: string;
-  params?: Record<string, unknown>;
-};
+// Project root whose shared synth-lock this process currently holds (null when it
+// does not hold one, e.g. the lock was inherited from the spawning plugin). Used
+// so both the success path and the top-level catch can release it.
+let heldSynthLockRoot: string | null = null;
 
-type MCPResponse = {
-  jsonrpc: "2.0";
-  id: number;
-  result?: Record<string, unknown>;
-  error?: { code: number; message: string; data?: unknown };
-};
+function isTruthyFlag(value: string | undefined): boolean {
+  if (!value) return false;
+  const v = value.trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes" || v === "on";
+}
 
 type MapperEnvelope = {
   summaries: TranscriptInsightSummary[];
   raw: unknown;
   via: "task-tool" | "opencode-run" | "none";
-};
-
-type AuditorEnvelope = {
+};type AuditorEnvelope = {
   verdict: "pass" | "revise" | "escalate";
   findings: string[];
   recommendedActions: string[];
@@ -65,181 +63,6 @@ type CadenceState = {
   lastRunISO: string;
   areas: Record<string, { lastCandidateCount: number; lastTriggeredISO?: string }>;
 };
-
-class MCPHttpClient {
-  private url: string;
-  private sessionId: string | null;
-  private idCounter: number;
-  private staticHeaders: Record<string, string>;
-
-  constructor(url: string, staticHeaders: Record<string, string> = {}) {
-    this.url = url;
-    this.sessionId = null;
-    this.idCounter = 0;
-    this.staticHeaders = staticHeaders;
-  }
-
-  private nextID(): number {
-    this.idCounter += 1;
-    return this.idCounter;
-  }
-
-  private parseResponsePayload(raw: string): MCPResponse {
-    const trimmed = raw.trim();
-    if (!trimmed) {
-      throw new Error("Empty MCP response");
-    }
-    if (trimmed.startsWith("{")) {
-      return JSON.parse(trimmed) as MCPResponse;
-    }
-
-    let lastData: string | null = null;
-    const lines = trimmed.split(/\r?\n/);
-    for (const line of lines) {
-      const clean = line.trim();
-      if (clean.startsWith("data:")) {
-        lastData = clean.slice(5).trim();
-      }
-    }
-    if (!lastData) {
-      throw new Error(`Unable to parse MCP response: ${trimmed.slice(0, 200)}`);
-    }
-    return JSON.parse(lastData) as MCPResponse;
-  }
-
-  private async post(payload: MCPMessage): Promise<MCPResponse> {
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      Accept: "application/json, text/event-stream",
-      ...this.staticHeaders,
-    };
-    if (this.sessionId) {
-      headers["Mcp-Session-Id"] = this.sessionId;
-    }
-
-    const response = await fetch(this.url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-    });
-
-    const sessionHeader = response.headers.get("Mcp-Session-Id");
-    if (sessionHeader) {
-      this.sessionId = sessionHeader;
-    }
-
-    const text = await response.text();
-    if (!response.ok) {
-      throw new Error(`MCP HTTP ${response.status}: ${text.slice(0, 300)}`);
-    }
-    return this.parseResponsePayload(text);
-  }
-
-  async initialize(): Promise<void> {
-    const init: MCPMessage = {
-      jsonrpc: "2.0",
-      id: this.nextID(),
-      method: "initialize",
-      params: {
-        protocolVersion: "2025-03-26",
-        capabilities: {},
-        clientInfo: { name: "electric-shepherd-memory-system", version: "0.1.0" },
-      },
-    };
-
-    const response = await this.post(init);
-    if (response.error) {
-      throw new Error(`MCP initialize failed: ${response.error.message}`);
-    }
-
-    const notify: MCPMessage = {
-      jsonrpc: "2.0",
-      id: this.nextID(),
-      method: "notifications/initialized",
-      params: {},
-    };
-    await this.post(notify).catch(() => {
-      // Some MCP servers reject this style; safe to ignore.
-    });
-  }
-
-  async callTool(name: string, args?: JsonMap): Promise<JsonMap> {
-    const payload: MCPMessage = {
-      jsonrpc: "2.0",
-      id: this.nextID(),
-      method: "tools/call",
-      params: { name, arguments: args || {} },
-    };
-
-    const response = await this.post(payload);
-    if (response.error) {
-      throw new Error(`Tool call failed (${name}): ${response.error.message}`);
-    }
-
-    const result = response.result || {};
-    const content = (result.content || []) as Array<Record<string, unknown>>;
-
-    for (const item of content) {
-      if (item.type === "text" && typeof item.text === "string") {
-        try {
-          return JSON.parse(item.text) as JsonMap;
-        } catch {
-          // Continue to fallback.
-        }
-      }
-    }
-
-    return result as JsonMap;
-  }
-}
-
-function resolveMCPHeadersFromEnv(env: Record<string, string | undefined>): Record<string, string> {
-  const headers: Record<string, string> = {};
-
-  const hasHeader = (name: string): boolean =>
-    Object.keys(headers).some((key) => key.toLowerCase() === name.toLowerCase());
-
-  const rawHeadersJSON = (env.MEMPALACE_MCP_HEADERS_JSON || "").trim();
-  if (rawHeadersJSON) {
-    try {
-      const parsed = JSON.parse(rawHeadersJSON) as Record<string, unknown>;
-      for (const [key, value] of Object.entries(parsed || {})) {
-        if (typeof value === "string" && key) {
-          headers[key] = value;
-        }
-      }
-    } catch {
-      // Ignore malformed override headers and keep known-safe defaults.
-    }
-  }
-
-  const rawBearerToken = (env.MEMPALACE_MCP_BEARER_TOKEN || "").trim();
-  if (rawBearerToken && !hasHeader("Authorization")) {
-    headers.Authorization = /^Bearer\s+/i.test(rawBearerToken)
-      ? rawBearerToken
-      : `Bearer ${rawBearerToken}`;
-  }
-
-  const rawAPIKey = (env.MEMPALACE_MCP_API_KEY || "").trim();
-
-  const authHeader = (env.MEMPALACE_MCP_AUTH_HEADER || "Authorization").trim();
-  const authScheme = (env.MEMPALACE_MCP_AUTH_SCHEME || "").trim();
-  const resolvedHeaderName = authHeader || "Authorization";
-
-  if (rawAPIKey && !hasHeader(resolvedHeaderName)) {
-    let authValue = rawAPIKey;
-    if (authScheme) {
-      authValue = authScheme.toLowerCase() === "none" ? rawAPIKey : `${authScheme} ${rawAPIKey}`;
-    } else if (resolvedHeaderName.toLowerCase() === "authorization") {
-      authValue = /^[A-Za-z][A-Za-z0-9_-]*\s+/.test(rawAPIKey)
-        ? rawAPIKey
-        : `Bearer ${rawAPIKey}`;
-    }
-    headers[resolvedHeaderName] = authValue;
-  }
-
-  return headers;
-}
 
 function getArg(argv: string[], flag: string): string | undefined {
   const index = argv.indexOf(flag);
@@ -277,8 +100,14 @@ function tryReadFile(path: string): string | undefined {
 }
 
 function tryWriteFile(path: string, content: string): void {
+  // Atomic write: render to a sibling temp file then rename over the target.
+  // rename(2) is atomic on the same filesystem (and overwrites on Windows via
+  // Node's fs), so a process killed mid-write can never leave a half-rendered
+  // mem-core file — a reader sees either the old file or the complete new one.
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, content, "utf8");
+  const tmpPath = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmpPath, content, "utf8");
+  renameSync(tmpPath, path);
 }
 
 function parseMapperSummariesFromFile(path: string | undefined): TranscriptInsightSummary[] | undefined {
@@ -778,6 +607,25 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Cross-process lock so a plugin-triggered run, a cron run, and an n8n run can
+  // never overlap. The turn-guard plugin sets ESHEPHERD_SYNTH_LOCK_INHERITED when
+  // it spawns us (it already holds the lock), so we skip acquire/release in that
+  // case to avoid deadlocking against the parent. --no-lock /
+  // ESHEPHERD_SYNTH_LOCK_DISABLED bypass it for tests.
+  const lockInherited =
+    isTruthyFlag(process.env.ESHEPHERD_SYNTH_LOCK_INHERITED) ||
+    isTruthyFlag(process.env.ESHEPHERD_SYNTH_LOCK_DISABLED) ||
+    hasFlag(argv, "--no-lock");
+  if (!lockInherited) {
+    const staleMs = Number(process.env.ESHEPHERD_AUTO_SYNTH_TIMEOUT_MS) || 300000;
+    const lockRoot = process.cwd();
+    if (!acquireSynthLock(lockRoot, { source: "run-memory-consolidation-and-validation" }, staleMs)) {
+      process.stdout.write(`${JSON.stringify({ skipped: true, reason: "synth-lock-held" }, null, 2)}\n`);
+      return;
+    }
+    heldSynthLockRoot = lockRoot;
+  }
+
   const consolidationOptions = parseConsolidationOptions(argv);
   const validationOptions = parseValidationOptions(argv, consolidationOptions);
   const cadenceOptions = parseCadenceOptions(argv, consolidationOptions);
@@ -787,7 +635,9 @@ async function main(): Promise<void> {
   const toolPrefix = process.env.MEMGRAPH_TOOL_PREFIX || "mempalace_";
   const mcpHeaders = resolveMCPHeadersFromEnv(process.env);
 
-  const mcp = new MCPHttpClient(mcpURL, mcpHeaders);
+  const mcp = new MCPHttpClient(mcpURL, mcpHeaders, {
+    clientName: "electric-shepherd-memory-system",
+  });
   await mcp.initialize();
 
   const client = createMemgraphClient({
@@ -914,9 +764,15 @@ async function main(): Promise<void> {
   if (cadenceStateOut) output.cadenceState = cadenceStateOut;
 
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+
+  if (heldSynthLockRoot) {
+    releaseSynthLock(heldSynthLockRoot);
+    heldSynthLockRoot = null;
+  }
 }
 
 main().catch((err) => {
+  if (heldSynthLockRoot) releaseSynthLock(heldSynthLockRoot);
   process.stderr.write(`[memory-consolidation-validation] ${String(err)}\n`);
   process.exit(1);
 });

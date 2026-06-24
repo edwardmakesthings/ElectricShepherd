@@ -64,6 +64,7 @@ mcp_auth_header="${MEMPALACE_MCP_AUTH_HEADER:-Authorization}"
 mcp_auth_scheme="${MEMPALACE_MCP_AUTH_SCHEME:-}"
 mcp_headers_json="${MEMPALACE_MCP_HEADERS_JSON:-}"
 memraw_tool_prefix="${ESHEPHERD_MEMRAW_TOOL_PREFIX:-${MEMGRAPH_TOOL_PREFIX:-mempalace_}}"
+memraw_dedup_enabled="${ESHEPHERD_MEMRAW_DEDUP_ENABLED:-false}"
 
 if [[ -z "$mcp_url" ]]; then
   echo "capture-memraw: set MEMPALACE_MCP_URL (full MCP endpoint URL)" >&2
@@ -88,14 +89,15 @@ if [[ ! -s "$tmpfile" ]]; then
   exit 4
 fi
 
-python - "$tmpfile" "$mcp_url" "$mcp_api_key" "$wing" "$room" "$added_by" "$source_file" "$mcp_auth_header" "$mcp_auth_scheme" "$mcp_headers_json" "$memraw_tool_prefix" <<'PY'
+python - "$tmpfile" "$mcp_url" "$mcp_api_key" "$wing" "$room" "$added_by" "$source_file" "$mcp_auth_header" "$mcp_auth_scheme" "$mcp_headers_json" "$memraw_tool_prefix" "$memraw_dedup_enabled" <<'PY'
 import json
 import re
 import sys
 import urllib.request
 
-payload_path, mcp_url, api_key, wing, room, added_by, source_file, auth_header, auth_scheme, headers_json, tool_prefix = sys.argv[1:12]
+payload_path, mcp_url, api_key, wing, room, added_by, source_file, auth_header, auth_scheme, headers_json, tool_prefix, dedup_enabled_raw = sys.argv[1:13]
 session_id = None
+dedup_enabled = dedup_enabled_raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def has_auth_scheme(value: str) -> bool:
@@ -220,23 +222,24 @@ maybe_initialize()
 tool_check = f"{tool_prefix}check_duplicate"
 tool_add = f"{tool_prefix}add_drawer"
 
-dup_resp = tool_call(1, tool_check, {"content": content})
-dup_text = ""
-for item in (dup_resp.get("result", {}).get("content") or []):
-  if isinstance(item, dict) and item.get("type") == "text":
-    dup_text += item.get("text", "")
+if dedup_enabled:
+  dup_resp = tool_call(1, tool_check, {"content": content})
+  dup_text = ""
+  for item in (dup_resp.get("result", {}).get("content") or []):
+    if isinstance(item, dict) and item.get("type") == "text":
+      dup_text += item.get("text", "")
 
-is_dup = False
-if dup_text:
-  try:
-    parsed = json.loads(dup_text)
-    is_dup = bool(parsed.get("is_duplicate", False))
-  except json.JSONDecodeError:
-    is_dup = False
+  is_dup = False
+  if dup_text:
+    try:
+      parsed = json.loads(dup_text)
+      is_dup = bool(parsed.get("is_duplicate", False))
+    except json.JSONDecodeError:
+      is_dup = False
 
-if is_dup:
-  print(json.dumps({"status": "skipped-duplicate", "wing": wing, "room": room, "source_file": source_file}))
-  raise SystemExit(0)
+  if is_dup:
+    print(json.dumps({"status": "skipped-duplicate", "wing": wing, "room": room, "source_file": source_file}))
+    raise SystemExit(0)
 
 add_resp = tool_call(
   2,

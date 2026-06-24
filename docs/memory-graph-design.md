@@ -1,9 +1,10 @@
 # Memory Graph — Design Document
 
-**Status: substrate (Project A, A1–A4) implemented in MemPalace fork; PR open.**
-ElectricShepherd now starts the policy side with a deterministic adapter + retrieval-expansion
-runtime path and removes the earlier transitional runner/export scripts.
-Most sections below describe the remaining ElectricShepherd build work.
+**Status: architecture reference for the policy/runtime split.**
+ElectricShepherd now implements the policy side in this repository with a
+ deterministic adapter + retrieval-expansion runtime path, while MemPalace remains the
+ substrate dependency/fork boundary. Most sections below describe the intended design
+ and the runtime contracts ElectricShepherd depends on.
 
 This document was rewritten after reading MemPalace's actual source (`backends/base.py`,
 `mcp_server.py` at v3.4.x). Two findings reshaped it: **(1)** the backend seam is a pure
@@ -325,6 +326,13 @@ rotting — the capability already built for global mem-core, extended with a sc
 
 ## 9b. Tier enforcement and injection: mechanical vs. still-convention
 
+**Status update (2026-06-23):** the gap framing in this section is now mostly
+historical. ElectricShepherd's current `turn-guard` wiring already implements
+compaction-aware scoped reinjection and OpenCode-oriented capture verification,
+and the runtime now includes shared synthesis locking and orphan/hang hardening.
+The gap descriptions are retained below as design rationale and failure-mode
+analysis.
+
 The three tiers are *structurally* sound (§§4–9a). This section grades them on the standard
 that actually matters: **is each boundary enforced by mechanism, or hoped for by prompt?** —
 and names the gaps where prompt-and-hope still lives. The pattern across the gaps is
@@ -340,7 +348,7 @@ at the right moment lags. The fixes are event-triggered plugins, not more prompt
 | **mem-synth** | only well-formed nodes exist | **Mechanical** (substrate gates `create_synthesis_node` on DESC + ≥2 validated sources; inflation guard blocks weak syntheses before write). |
 | **mem-synth** | *only the dreamer writes it* | **Convention** — nothing stops an interactive agent from calling `create_synthesis_node` if it holds the tool. Gap #3. |
 | **mem-core** | derived render, file-only, never round-trips | **Mechanical** (post-audit: render is deterministic, file-only). |
-| **mem-core** | *right render present in context, at compaction not just session start* | **Weakest link** — session-start-only, scope-static, compaction-blind. Gaps #1, #2. |
+| **mem-core** | *right render present in context, at compaction not just session start* | **Mechanical in OpenCode plugin path** — `turn-guard` re-resolves and reinjects scoped mem-core on `session.started`, `session.idle`, and `session.compacted` (remaining risk is harness/tooling drift, not missing mechanism). |
 
 The counterintuitive result: the most important tier (mem-core, the always-resident one) is
 the *least reliably present when it matters*, because injection is the unsolved part.
@@ -421,6 +429,16 @@ Current plugin/runtime state now closes these with deterministic wiring:
   correction prompts (authoritative hard denial still belongs in harness/tool-scope policy).
 - Gap #4: `turn-guard` emits OpenCode mem-raw capture verification heartbeats and optional
   capture-command execution status to `./.electric-shepherd/turn-guard-status.json`.
+- Operator control surface: slash commands in `command/` (`/count-sheep`, `/herd`,
+  `/lucid-dream`, `/wake-up`, `/headcount`) provide explicit consolidation actions;
+  memory-mutating commands run as isolated subtasks, while `/wake-up` intentionally
+  runs in-session to refresh the active context.
+- Auto-synthesis hardening: idle/volume/compaction triggers are now guarded by
+  cooldown + timeout watchdog + cross-process lockfile + process-tree kill +
+  bounded tracking maps + start-failure cooldown rollback.
+- Standalone scheduler safety: `scripts/run-memory-consolidation-and-validation.ts`
+  now uses shared lock primitives in `scripts/synth-lock.ts` so cron/n8n runs do
+  not overlap plugin-triggered synthesis runs.
 
 
 ## 10. Authored-notes unification (mechanism = substrate, policy = ElectricShepherd)

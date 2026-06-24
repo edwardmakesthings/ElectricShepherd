@@ -3,10 +3,18 @@
   "version": "0.1.0",
   "description": "Policy layer for MemPalace memory consolidation (Dreamer).",
   "type": "module",
+  "main": "index.ts",
+  "exports": {
+    ".": {
+      "import": "./index.ts"
+    }
+  },
   "license": "MIT",
   "files": [
+    "index.ts",
     "plugin",
     "agents",
+    "command",
     "instructions",
     "skills",
     "snippets",
@@ -24,7 +32,14 @@
     "policy:consolidate-validate:example": "node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts --query \"synthesis and merge decisions\" --wing context-blocks --room context-blocks --scope-room context-blocks",
     "policy:cadence": "node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts --run-cadence --cadence-mode plan",
     "policy:cadence:execute": "node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts --run-cadence --cadence-mode execute",
-    "policy:mem-core:load": "node --experimental-strip-types scripts/run-mem-core-loader.ts"
+    "policy:mem-core:load": "node --experimental-strip-types scripts/run-mem-core-loader.ts",
+    "sheep:count": "node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts --apply",
+    "sheep:herd": "node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts --run-cadence --cadence-mode plan",
+    "sheep:lucid-dream": "node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts --run-cadence --cadence-mode execute --apply --apply-merges",
+    "sheep:wake-up": "node --experimental-strip-types scripts/run-mem-core-loader.ts",
+    "test": "node --experimental-strip-types --test tests/unit/**/*.test.mjs",
+    "test:integration": "node --experimental-strip-types --test tests/integration/**/*.test.mjs",
+    "test:all": "node --experimental-strip-types --test tests/**/*.test.mjs"
   },
   "dependencies": {
     "@opencode-ai/plugin": "1.17.8"

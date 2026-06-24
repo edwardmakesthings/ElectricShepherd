@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      # Integration suites are enabled only when an MCP endpoint is configured.
+      MEMPALACE_MCP_URL: ${{ vars.MEMPALACE_MCP_URL || secrets.MEMPALACE_MCP_URL }}
+      MEMPALACE_MCP_HEADERS_JSON: ${{ secrets.MEMPALACE_MCP_HEADERS_JSON }}
+      MEMPALACE_MCP_BEARER_TOKEN: ${{ secrets.MEMPALACE_MCP_BEARER_TOKEN }}
+      MEMPALACE_MCP_API_KEY: ${{ secrets.MEMPALACE_MCP_API_KEY }}
+      MEMPALACE_MCP_AUTH_HEADER: ${{ vars.MEMPALACE_MCP_AUTH_HEADER }}
+      MEMPALACE_MCP_AUTH_SCHEME: ${{ vars.MEMPALACE_MCP_AUTH_SCHEME }}
+      MEMGRAPH_TOOL_PREFIX: ${{ vars.MEMGRAPH_TOOL_PREFIX }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        run: npm test
+
+      - name: Setup Python (ephemeral MemPalace fallback)
+        if: ${{ env.MEMPALACE_MCP_URL == '' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Start ephemeral MemPalace MCP server
+        id: start_ephemeral
+        if: ${{ env.MEMPALACE_MCP_URL == '' }}
+        run: |
+          set -euo pipefail
+
+          python -m pip install --upgrade pip
+          python -m pip install mempalace
+
+          palace_dir="${RUNNER_TEMP}/mempalace-ci-palace"
+          mkdir -p "$palace_dir"
+          export MEMPALACE_PALACE_PATH="$palace_dir"
+
+          nohup python -m mempalace.mcp_server \
+            --transport http \
+            --host 127.0.0.1 \
+            --port 8093 \
+            > "${RUNNER_TEMP}/mempalace-mcp.log" 2>&1 &
+
+          echo $! > "${RUNNER_TEMP}/mempalace-mcp.pid"
+
+          for i in {1..60}; do
+            if curl -fsS "http://127.0.0.1:8093/healthz" >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+
+          if ! curl -fsS "http://127.0.0.1:8093/healthz" >/dev/null; then
+            echo "MemPalace MCP did not become healthy in time" >&2
+            echo "--- mempalace-mcp.log ---" >&2
+            cat "${RUNNER_TEMP}/mempalace-mcp.log" >&2 || true
+            exit 1
+          fi
+
+          echo "endpoint=http://127.0.0.1:8093/mcp" >> "$GITHUB_OUTPUT"
+          echo "MEMPALACE_MCP_URL=http://127.0.0.1:8093/mcp" >> "$GITHUB_ENV"
+          echo "MEMPALACE_PALACE_PATH=$palace_dir" >> "$GITHUB_ENV"
+
+      - name: Run integration suites (gateway configured)
+        if: ${{ env.MEMPALACE_MCP_URL != '' || steps.start_ephemeral.outputs.endpoint != '' }}
+        env:
+          ESHEPHERD_TEST_INTEGRATION: "1"
+          MEMPALACE_MCP_URL: ${{ env.MEMPALACE_MCP_URL || steps.start_ephemeral.outputs.endpoint }}
+        run: npm run test:integration
+
+      - name: Integration suites skipped (no endpoint and fallback unavailable)
+        if: ${{ env.MEMPALACE_MCP_URL == '' && steps.start_ephemeral.outputs.endpoint == '' }}
+        run: |
+          echo "Skipping integration suites: no external MEMPALACE_MCP_URL and no ephemeral fallback endpoint."
+
+      - name: Stop ephemeral MemPalace MCP server
+        if: ${{ always() && steps.start_ephemeral.outputs.endpoint != '' }}
+        run: |
+          set -euo pipefail
+          if [[ -f "${RUNNER_TEMP}/mempalace-mcp.pid" ]]; then
+            kill "$(cat "${RUNNER_TEMP}/mempalace-mcp.pid")" 2>/dev/null || true
+          fi
+
+      - name: Print ephemeral MemPalace logs on failure
+        if: ${{ failure() && steps.start_ephemeral.outputs.endpoint != '' }}
+        run: |
+          if [[ -f "${RUNNER_TEMP}/mempalace-mcp.log" ]]; then
+            echo "--- mempalace-mcp.log ---"
+            cat "${RUNNER_TEMP}/mempalace-mcp.log"
+          fi

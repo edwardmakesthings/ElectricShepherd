@@ -11,8 +11,11 @@ Designed for [OpenCode](https://opencode.ai) as the agent harness, distributable
 npm package for one-line install. The deterministic adapter + retrieval policy runtime can be run locally
 with Node against MemPalace MCP — no cloud, no API bills.
 
-Current repo status: policy bootstrap is present (plugin, snippets, adapter, runtime,
-and agent profiles) and the substrate graph APIs are available for integration.
+Current repo status: core policy runtime is in place (plugin, commands, snippets,
+adapter, deterministic runtime scripts, and dreamer agent profiles), with
+compaction-aware scoped mem-core reinjection, opt-in auto-synthesis, and bounded
+MCP/notification timeouts wired. The runtime also now rejects unsafe shell-style
+commands for the turn-guard subprocess path.
 
 ---
 
@@ -68,6 +71,7 @@ Add to your `opencode.json`:
 OpenCode resolves this package on startup. This repo currently provides:
 - The `turn-guard` plugin (checkpoint + stop-quality retry + compaction-aware mem-core reinjection + scope-aware loader wiring + write-authority/capture guards)
 - Dreamer agent profiles (`dreamer`, `dream-consolidator`, `dream-mapper`, `dream-auditor`)
+- Slash commands in `command/` (`/count-sheep`, `/herd`, `/lucid-dream`, `/wake-up`, `/headcount`) for consolidation workflows
 - The `memsave` / `memload` OpenChamber snippets
 - The memory discipline instructions (loadable via `instructions`)
 
@@ -85,30 +89,63 @@ npm install
 
 ## Setup
 
-### 1. Add Electric Shepherd instructions to your OpenCode instructions
+### 0. Config layering (important)
+
+OpenCode merges config layers; it does not replace one with another. In practice:
+
+- Global defaults come from `~/.config/opencode/opencode.jsonc`.
+- Project overrides come from `opencode.jsonc` in this repo.
+
+ElectricShepherd ships a project-level `opencode.jsonc` that only enables the plugin. The
+plugin self-provides its agents, slash commands, and instruction rules (see below), so the
+project config stays minimal while preserving your global defaults.
+
+### 1. Enable the plugin (everything else comes with it)
 
 In your `opencode.json`:
 
 ```json
 {
-  "plugin": ["electric-shepherd"],
-  "instructions": [
-    "node_modules/electric-shepherd/instructions/agent-discipline.md",
-    "node_modules/electric-shepherd/instructions/memory-blocks.md"
-  ]
+  "plugin": ["electric-shepherd"]
 }
 ```
 
-Or copy `instructions/agent-discipline.md` and `instructions/memory-blocks.md`
-into your own config and customize them.
+That single line is enough. On startup the plugin's `config` hook injects its bundled agents,
+slash commands, and instruction rules into your resolved OpenCode config, so they load in any
+project that enables the plugin — no need to run OpenCode from inside this repo, copy files into
+`.opencode/`, or list anything under `agent` / `command` / `instructions` yourself.
 
-### 2. Add the dreamer agent profiles
+User-defined entries always win: if you declare an agent or command with the same name, yours
+overrides the bundled one. Opt out of instruction injection with `ESHEPHERD_INJECT_INSTRUCTIONS=false`.
 
-Merge any profiles you want from `agents/` into your `opencode.json`:
-- `agents/dreamer.json`
-- `agents/dream-consolidator.json` (alias profile)
-- `agents/dream-mapper.json`
-- `agents/dream-auditor.json`
+### What loads automatically vs. what is provided
+
+ElectricShepherd is a plugin, so it loads the same way wherever it is enabled — you do **not**
+need to run OpenCode from inside this repo. The plugin's `config` hook reads its bundled
+markdown files at startup and injects them into the resolved config:
+
+| Asset | Bundled | Auto-loaded in any consumer project | Mechanism |
+|---|---|---|---|
+| Plugin (`plugin/turn-guard.ts`) | Yes | Yes | `"plugin": ["electric-shepherd"]` |
+| Agents (`agents/*.md`) | Yes | Yes | Injected into `config.agent` by the plugin's `config` hook |
+| Commands (`command/*.md`) | Yes | Yes | Injected into `config.command` by the plugin's `config` hook |
+| Instructions (`instructions/*.md`) | Yes | Yes | Absolute paths appended to `config.instructions` (opt out: `ESHEPHERD_INJECT_INSTRUCTIONS=false`) |
+| Skills (`skills/*/SKILL.md`) | Yes | No | OpenCode has no config-injection path for skills — place in your own `.opencode/skills/<name>/SKILL.md` if you want it |
+| Snippets (`snippets/*.md`) | Yes | No | OpenChamber snippet assets; not an OpenCode auto-load concept |
+
+Why the hook is needed: OpenCode only auto-discovers `agents/` / `command/` / `skills/` folders
+for the active **project** (git/cwd root). An installed plugin is never the project root, so
+folder discovery never fires for it — the `config` hook is what makes the bundled assets load
+like the rest of the plugin. Each agent and command stays in its own standalone markdown file.
+
+### 2. The dreamer agent profiles
+
+The dreamer profiles in `agents/` are markdown agent files that the plugin injects automatically
+— no `opencode.json` edits required:
+- `agents/dreamer.md`
+- `agents/dream-consolidator.md` (alias profile)
+- `agents/dream-mapper.md`
+- `agents/dream-auditor.md`
 
 ### 3. Run deterministic retrieval expansion
 
@@ -127,6 +164,20 @@ tools through the Electric Shepherd adapter and prints a JSON plan/result payloa
 
 ---
 
+## Local validation
+
+After installing dependencies, the quickest sanity check is:
+
+```bash
+npm test
+npm run policy:mem-core:load -- --format markdown
+```
+
+The first command exercises the unit suite; the second confirms the mem-core loader
+path works without requiring a live model.
+
+---
+
 ## Project layout
 
 ```
@@ -134,10 +185,16 @@ electric-shepherd/
 ├── plugin/
 │   └── turn-guard.ts          # OpenCode plugin: retry/checkpoint + mem-core injection + authority/capture guards
 ├── agents/
-│   ├── dreamer.json           # primary dream orchestrator profile
-│   ├── dream-consolidator.json # alias profile name used by some setups
-│   ├── dream-mapper.json      # per-transcript subagent (isolated context)
-│   └── dream-auditor.json     # validator subagent (bidirectional coherence check)
+│   ├── dreamer.md             # primary dream orchestrator profile
+│   ├── dream-consolidator.md  # alias profile name used by some setups
+│   ├── dream-mapper.md        # per-transcript subagent (isolated context)
+│   └── dream-auditor.md       # validator subagent (bidirectional coherence check)
+├── command/
+│   ├── count-sheep.md         # standard consolidation slash command
+│   ├── herd.md                # read-only consolidation preview slash command
+│   ├── lucid-dream.md         # deep consolidation+merge slash command
+│   ├── wake-up.md             # in-session scoped mem-core refresh slash command
+│   └── headcount.md           # pending-vs-synth counts slash command
 ├── instructions/
 │   ├── agent-discipline.md    # agent behavior rules and guardrails
 │   └── memory-blocks.md       # always-loaded mem-core render artifact
@@ -166,14 +223,23 @@ All configuration is optional — defaults work out of the box.
 
 | Env var | Default | Description |
 |---|---|---|
+| `ESHEPHERD_ENV_FILE` | unset | Optional explicit env file path override for runtime scripts |
 | `MEMPALACE_MCP_URL` | `http://localhost:8093/mcp` | MemPalace MCP endpoint |
+| `MEMPALACE_MCP_API_KEY` | unset | Optional API key header value for MCP gateway auth |
+| `MEMPALACE_MCP_AUTH_HEADER` | `Authorization` | Header name used when sending API key/bearer auth |
+| `MEMPALACE_MCP_AUTH_SCHEME` | unset | Optional auth scheme prefix (for example `Bearer`) |
+| `MEMPALACE_MCP_BEARER_TOKEN` | unset | Optional bearer token (alternate to API-key header style) |
+| `MEMPALACE_MCP_HEADERS_JSON` | unset | Optional JSON map of additional MCP HTTP headers |
 | `MEMGRAPH_TOOL_PREFIX` | `mempalace_` | Prefix for MemPalace tools (set only if your gateway rewrites tool names) |
 | `NTFY_URL` | unset | ntfy endpoint for escalation notifications |
+| `ESHEPHERD_MEMRAW_TOOL_PREFIX` | `mempalace_` | Optional tool prefix override for mem-raw capture path |
+| `ESHEPHERD_MEMRAW_DEDUP_ENABLED` | `false` | Optional raw-capture dedupe gate (default keeps mem-raw append-only) |
 | `ESHEPHERD_MEMCORE_REINJECT_ENABLED` | `true` | Enable plugin-driven scoped mem-core reinjection |
 | `ESHEPHERD_MEMCORE_REINJECT_ON_COMPACT` | `true` | Force mem-core reload after `session.compacted` |
 | `ESHEPHERD_MEMCORE_REINJECT_ON_IDLE` | `true` | Reinject when scope/content changed during idle checks |
 | `ESHEPHERD_MEMCORE_REINJECT_ON_START` | `true` | Prime scoped mem-core when a session starts |
 | `ESHEPHERD_SCOPE_DIR` | unset | Optional fixed scope directory override for reinjection |
+| `ESHEPHERD_MEMCORE_DIRECT_FILE` | `memory.md` | Direct per-directory mem-core filename used by loader wiring |
 | `ESHEPHERD_MEMCORE_STORE_ROOTS` | `eshepherd/memory,memory` | Store roots consulted by loader wiring |
 | `ESHEPHERD_MEMCORE_MAX_SCOPES` | `6` | Max broad→narrow scopes merged by reinjection loader |
 | `ESHEPHERD_MEMCORE_MAX_CHARS` | `12000` | Character cap for injected mem-core payload |
@@ -181,12 +247,27 @@ All configuration is optional — defaults work out of the box.
 | `ESHEPHERD_ALLOWED_SYNTH_WRITERS` | `dreamer,dream-consolidator` | Allowed agent identities for synthesis writes |
 | `ESHEPHERD_MEMRAW_VERIFY_ENABLED` | `true` | Emit OpenCode mem-raw capture verification status |
 | `ESHEPHERD_MEMRAW_CAPTURE_CMD` | unset | Optional command run on stop/compact verification events |
+| `ESHEPHERD_MEMRAW_CAPTURE_TIMEOUT_MS` | `20000` | Timeout ceiling for blocking mem-raw capture subprocess |
+| `ESHEPHERD_MEMCORE_LOADER_TIMEOUT_MS` | `15000` | Timeout ceiling for blocking mem-core loader subprocess |
+| `ESHEPHERD_AUTO_SYNTH_ENABLED` | `false` | Master switch for background auto-synthesis |
+| `ESHEPHERD_AUTO_SYNTH_ON_IDLE` | `true` | Trigger auto-synthesis after idle debounce window |
+| `ESHEPHERD_AUTO_SYNTH_ON_COMPACT` | `true` | Trigger auto-synthesis after compaction |
+| `ESHEPHERD_AUTO_SYNTH_IDLE_DELAY_MS` | `120000` | Idle debounce delay before idle-triggered run |
+| `ESHEPHERD_AUTO_SYNTH_MESSAGE_THRESHOLD` | `12` | Assistant-turn volume trigger threshold |
+| `ESHEPHERD_AUTO_SYNTH_COOLDOWN_MS` | `600000` | Minimum gap between auto-synth run starts |
+| `ESHEPHERD_AUTO_SYNTH_TIMEOUT_MS` | `300000` | Watchdog timeout and stale-lock reclaim window |
+| `ESHEPHERD_AUTO_SYNTH_MAX_TRACKED_SESSIONS` | `512` | Max tracked sessions in auto-synth state maps (oldest evicted first) |
+| `ESHEPHERD_AUTO_SYNTH_CMD` | unset | Optional override command for auto-synth execution |
+| `ESHEPHERD_SYNTH_LOCK_DISABLED` | unset | Test-only bypass for shared synth lock (`1` disables lock) |
 
 Local env workflow:
+
 - Repo template: `.env.example`
 - Your machine-specific values: `.env` (ignored by git)
 - Auto-discovery order: `ESHEPHERD_ENV_FILE` -> `./.env` + `./.env.local` -> `../docker/.env`
 - No manual `source` step required
+
+For trigger semantics and operational caveats, see QUICKSTART section 3f.
 
 ---
 
@@ -216,7 +297,7 @@ Also: a shepherd that doesn't sleep wouldn't be much use.
 
 ## Status
 
-Bootstrap in place. The following are committed and usable now:
+Core policy runtime in place. The following are committed and usable now:
 - Deterministic policy-cycle runtime in `scripts/run-policy-cycle.ts`
 - Consolidation + validation runtime pipeline in `scripts/run-memory-consolidation-and-validation.ts`
 - Optional live mapper and auditor integration hooks in `scripts/run-memory-consolidation-and-validation.ts` (`--use-live-mapper`, `--use-live-auditor`)
@@ -225,11 +306,17 @@ Bootstrap in place. The following are committed and usable now:
 - Cadence orchestration module in `adapter/cadence-orchestrator.ts`
 - Cadence state persistence in `scripts/run-memory-consolidation-and-validation.ts` (`--cadence-state-file`)
 - OpenCode plugin/snippet/instruction assets in `plugin/`, `snippets/`, and `instructions/`
+- OpenCode slash commands in `command/` (both `command/` and `commands/` are recognized by OpenCode)
+- Command isolation defaults for memory mutations (`/count-sheep`, `/herd`, `/lucid-dream`, `/headcount` run as subtask-isolated dreamer passes; `/wake-up` runs in-session by design)
 - Compaction-aware mem-core reinjection + scope-aware loader wiring in `plugin/turn-guard.ts` (`session.compacted`, `session.started`, `session.idle`)
 - mem-synth write-authority guard in `plugin/turn-guard.ts` (alerts when non-dreamer agents call `create_synthesis_node` / `apply_merge`)
 - OpenCode mem-raw capture verification heartbeat in `plugin/turn-guard.ts` with status output in `./.electric-shepherd/turn-guard-status.json`
+- Opt-in auto-synthesis in `plugin/turn-guard.ts` (idle/volume/compaction triggers + cooldown + watchdog)
+- Orphan/hang hardening for auto-synthesis (cross-process lockfile, process-tree kill, bounded tracking maps, start-failure cooldown rollback)
+- Shared synth lock in `scripts/synth-lock.ts` used by standalone/cron runs and plugin-triggered runs
 - Policy adapter scaffold in `adapter/memgraph.ts`, retrieval expansion in `adapter/retrieval-expansion.ts`, synthesis consolidation in `adapter/synthesis-consolidation.ts`, and validation+merge review in `adapter/validation-merge-review.ts`
 - Dreamer profile files in `agents/`
+- Unit test coverage for auto-synth decision + hardening helpers (`npm test`: 34 passing)
 
 Still pending for full autonomy:
 - Broader harness integrations outside OpenCode defaults
