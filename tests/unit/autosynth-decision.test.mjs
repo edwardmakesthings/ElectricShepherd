@@ -42,7 +42,7 @@ test("never runs while a previous run is in flight", () => {
 
 test("respects the cooldown window", () => {
   const d = decideAutoSynth(
-    base({ trigger: "compacted", lastRunAt: 1_000_000 - (COOLDOWN - 1), messagesSinceRun: 5 }),
+    base({ trigger: "volume", lastRunAt: 1_000_000 - (COOLDOWN - 1), messagesSinceRun: THRESHOLD }),
   );
   assert.equal(d.shouldRun, false);
   assert.equal(d.reason, "cooldown");
@@ -50,10 +50,10 @@ test("respects the cooldown window", () => {
 
 test("runs once the cooldown window has elapsed", () => {
   const d = decideAutoSynth(
-    base({ trigger: "compacted", lastRunAt: 1_000_000 - COOLDOWN, messagesSinceRun: 1 }),
+    base({ trigger: "volume", lastRunAt: 1_000_000 - COOLDOWN, messagesSinceRun: THRESHOLD }),
   );
   assert.equal(d.shouldRun, true);
-  assert.equal(d.reason, "compacted");
+  assert.equal(d.reason, "volume-threshold");
 });
 
 test("volume trigger waits for the message threshold", () => {
@@ -76,8 +76,10 @@ test("idle-timer requires at least one new turn since the last run", () => {
   assert.equal(withActivity.reason, "idle-timer");
 });
 
-test("compacted trigger runs on any activity when enabled and not throttled", () => {
-  const d = decideAutoSynth(base({ trigger: "compacted", messagesSinceRun: 0 }));
+test("compacted trigger always runs when enabled", () => {
+  const d = decideAutoSynth(
+    base({ trigger: "compacted", messagesSinceRun: 0, lastRunAt: 1_000_000 - (COOLDOWN - 1) }),
+  );
   assert.equal(d.shouldRun, true);
   assert.equal(d.reason, "compacted");
 });

@@ -34,6 +34,7 @@ export type SynthesisConsolidationOptions = {
   labels?: string[];
   applyWrites?: boolean;
   mapperSummaries?: TranscriptInsightSummary[];
+  rawEntries?: Array<{ id: string; text: string }>;
 };
 
 /**
@@ -346,6 +347,8 @@ export async function runSynthesisConsolidation(
   if (Array.isArray(options.mapperSummaries) && options.mapperSummaries.length > 0) {
     summaries = parseProvidedMapperSummaries(options.mapperSummaries);
     usedProvidedMapperSummaries = true;
+  } else if (Array.isArray(options.rawEntries) && options.rawEntries.length > 0) {
+    summaries = options.rawEntries.map((entry) => mapEntryToSummary(entry));
   } else {
     const searchLimit = Math.max(3, Number(options.searchLimit ?? 12));
     const searchResult = await client.search(query, searchLimit, targetWing, targetRoom);

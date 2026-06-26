@@ -135,7 +135,7 @@ export function loadPackagedAssets(root: string = packagedAssetRoot()): {
  */
 export function loadInstructionPaths(
   root: string = packagedAssetRoot(),
-  names: string[] = ["agent-discipline.md", "memory-blocks.md"],
+  names: string[] = ["agent-discipline.md"],
 ): string[] {
   const dir = join(root, "instructions")
   const paths: string[] = []

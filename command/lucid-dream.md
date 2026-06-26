@@ -1,11 +1,14 @@
 ---
 description: Lucid dream — deep consolidation pass that also merges and dedupes existing synthesis nodes (isolated)
 agent: dreamer
-subtask: true
+subtask: false
 ---
 Take deliberate control of the dream: run a deep consolidation pass.
 
 Scope: $ARGUMENTS (default: the current project's memory if no scope is given)
+
+Tool routing: follow instructions/agent-discipline.md "MemPalace command routing matrix"
+for every memory operation (especially synthesis vs KG vs tunnel).
 
 Steps:
 1. Do everything /count-sheep does (synthesize the pending raw memories).

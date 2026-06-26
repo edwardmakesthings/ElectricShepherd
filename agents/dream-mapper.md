@@ -1,7 +1,7 @@
 ---
 description: Read-only per-transcript summarizer for Dreamer map phase
 mode: subagent
-model: "litellm/implementer-qwen3.6-27b"
+model: "litellm/implementer-qwen3.6-35b"
 temperature: 0.1
 top_p: 0.85
 steps: 35
@@ -10,6 +10,9 @@ permission:
   edit: deny
   bash: deny
   task: deny
+tools:
+  litellm_mempalace-mempalace_*: true
+  mempalace_direct_mempalace_*: true
 ---
 # Dream Mapper
 

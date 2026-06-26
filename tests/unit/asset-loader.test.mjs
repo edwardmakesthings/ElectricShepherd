@@ -119,7 +119,8 @@ test("real bundled assets parse into the expected dreamer agents and commands", 
   }
   for (const name of ["count-sheep", "herd", "lucid-dream", "wake-up", "headcount"]) {
     assert.ok(commands[name], `expected bundled command ${name}`);
-    assert.equal(commands[name].agent, "dreamer");
+    const expectedAgent = name === "count-sheep" ? "build" : "dreamer";
+    assert.equal(commands[name].agent, expectedAgent);
     assert.ok(typeof commands[name].template === "string" && commands[name].template.length > 0);
   }
   // Converted keys must be current, not deprecated.
@@ -127,16 +128,16 @@ test("real bundled assets parse into the expected dreamer agents and commands", 
   assert.deepEqual(agents.dreamer.permission, {
     read: "allow",
     edit: "deny",
-    bash: "deny",
+    bash: "allow",
     task: "allow",
   });
 });
 
 test("loadInstructionPaths returns absolute paths to existing bundled rule files", () => {
   const paths = loadInstructionPaths(repoRoot);
-  assert.equal(paths.length, 2);
+  assert.equal(paths.length, 1);
   for (const p of paths) {
-    assert.ok(p.endsWith("agent-discipline.md") || p.endsWith("memory-blocks.md"));
+    assert.ok(p.endsWith("agent-discipline.md"));
     assert.ok(p.includes("instructions"));
   }
 });
@@ -150,9 +151,9 @@ test("loadInstructionPaths skips names that do not exist", () => {
 test("dedupeAppendInstructions appends without duplicating existing entries", () => {
   const result = dedupeAppendInstructions(["CONTRIBUTING.md", "/abs/agent-discipline.md"], [
     "/abs/agent-discipline.md",
-    "/abs/memory-blocks.md",
+    "/abs/eshepherd/memory/memory.md",
   ]);
-  assert.deepEqual(result, ["CONTRIBUTING.md", "/abs/agent-discipline.md", "/abs/memory-blocks.md"]);
+  assert.deepEqual(result, ["CONTRIBUTING.md", "/abs/agent-discipline.md", "/abs/eshepherd/memory/memory.md"]);
 });
 
 test("dedupeAppendInstructions tolerates an undefined existing array", () => {

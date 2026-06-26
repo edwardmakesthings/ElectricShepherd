@@ -141,6 +141,47 @@ need to persist or recall something, use MemPalace (labeled blocks for durable w
 facts, drawers/diary/kg for everything else). Serena's other tools (symbol search, edits,
 onboarding/indexing) are unaffected and used normally.
 
+## MemPalace command routing matrix (required)
+
+When working memory tasks, choose tools by operation type first. Do not pick based on habit.
+
+1. Determine the operation type.
+2. Use the mapped tool path below.
+3. Follow the explicit "never use" rule for that operation.
+
+| Operation type | Use this tool path | Never use for this operation |
+|---|---|---|
+| Create a mem-synth node from 2+ sources | `mempalace_create_synthesis_node` with required `source_drawer_ids` + `desc` | `mempalace_add_drawer`, `mempalace_create_tunnel` |
+| Save a single synthesized finding (not a synthesis DAG node) | `mempalace_add_drawer` | `mempalace_create_synthesis_node` with only one source |
+| Find likely duplicate synth nodes | `mempalace_find_merge_candidates` | Manual guess merges without candidate review |
+| Execute a merge decision | `mempalace_apply_merge`, then `mempalace_resolve_canonical` | `mempalace_kg_add` to hand-roll `merged-into` |
+| Inspect synthesis lineage | `mempalace_get_ancestors`, `mempalace_get_descendants`, `mempalace_get_height` | `mempalace_create_tunnel` |
+| Scoped mem-core retrieval/ranking | `mempalace_find_scoped_synthesis_nodes` | Global `mempalace_search` as a replacement for lineage scope |
+| Add factual relationship (entity fact) | `mempalace_kg_add` | `mempalace_create_tunnel` for factual assertions |
+| Retire stale fact/edge | `mempalace_kg_invalidate` | Deleting drawers to remove a historical fact |
+| Manage synth labels | `mempalace_get_label_policy` then `mempalace_set_synthesis_labels` | Writing labels into free-text content only |
+| Cross-wing navigation bridge | `mempalace_create_tunnel` (and `list/follow/delete_tunnel`) | Any synthesis DAG operation |
+| Search relevant memory content | `mempalace_search`, then expand deterministically with lineage tools | Tunnels as search substitute |
+| Read/write session diary | `mempalace_diary_write`, `mempalace_diary_read` | `mempalace_add_drawer` for diary-only records |
+| Delete one known junk drawer | `mempalace_delete_drawer` (explicit confirmation first) | Bulk delete loops without confirmation |
+| Delete many by known source file | `mempalace_delete_by_source` (dry-run first, then apply) | Repeated single delete calls |
+
+Hard prohibitions:
+
+- Never use `mempalace_create_tunnel` to represent synthesis lineage or merge state.
+  Tunnels are navigation links only; they do not participate in synthesis DAG traversal,
+  canonical merge resolution, or scoped synthesis retrieval.
+- Never substitute `mempalace_add_drawer` when the task is to create a synthesis node.
+- Never call `mempalace_create_synthesis_node` with fewer than two distinct source IDs.
+
+Deep-consolidation sequence (must follow in order):
+
+1. Discover/search: `search`, `list_drawers`, `get_drawer` as needed.
+2. Synthesize: `create_synthesis_node` for each accepted synthesis.
+3. Merge review: `find_merge_candidates` then `apply_merge` for high-confidence merges.
+4. Drift evidence: scoped/lineage queries (`find_scoped_synthesis_nodes`, ancestors/descendants).
+5. Diary: `diary_write` final consolidation log.
+
 ## regex-replace / file-ops_bytes_replace workflow — do not loop
 
 Both tools are preview-first and follow the same sequence:
@@ -230,7 +271,7 @@ You operate with two memories, and they have different costs:
 Decide deliberately what belongs where. Do **not** try to hold everything in context —
 that just fills the working set with detail you will lose at the next compaction. When you
 need a fact you filed earlier, retrieve it; trust the store rather than re-deriving project
-state from scratch every session. The three labeled blocks in memory-blocks.md exist so
+state from scratch every session. The three labeled blocks in scoped mem-core renders exist so
 durable project state is already in your working set without a search.
 
 ## Self-editing memory — write durable facts the moment you learn them
@@ -245,7 +286,7 @@ state changes:
 1. **Durable STATE** (changes the always-loaded blocks) → a project fact, decision,
    convention, or preference future sessions should always see. Update the matching labeled
   block in generated mem-core files (`project-state`, `active-conventions`,
-  `user-preferences`) by updating `memory-blocks.md` and regenerating renders. Keep each
+  `user-preferences`) by updating mem-synth inputs and regenerating renders. Keep each
   block to a few hundred tokens. Do not write mem-core blocks into MemPalace drawers.
 
 2. **Durable WORK and DISCOVERIES** (does NOT touch the blocks) → this is the easy-to-miss
@@ -283,7 +324,7 @@ session, write it.
 The memory hierarchy has three tiers:
 - **mem-raw** — append-only verbatim transcripts (MemPalace diary, never edited).
 - **mem-synth** — synthesized searchable memory: drawers, kg facts, diary syntheses, worked examples.
-- **mem-core** — the always-loaded labeled blocks in memory-blocks.md.
+- **mem-core** — the always-loaded labeled blocks in scoped `memory.md` renders.
 
 For mem-synth writes, follow the schema of the tool you are calling:
 - `create_synthesis_node` typically requires structured provenance fields (for example `desc`

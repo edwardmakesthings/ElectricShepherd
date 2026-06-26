@@ -59,7 +59,7 @@ export class MCPHttpClient {
     this.staticHeaders = staticHeaders;
     this.clientName = options.clientName || "electric-shepherd";
     this.clientVersion = options.clientVersion || "0.1.0";
-    this.requestTimeoutMs = Number(options.requestTimeoutMs ?? 30000);
+    this.requestTimeoutMs = Number(options.requestTimeoutMs ?? 600000);
   }
 
   private nextID(): number {

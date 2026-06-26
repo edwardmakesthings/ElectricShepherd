@@ -21,8 +21,9 @@ Enable the plugin in `opencode.jsonc`:
 
 That one line is enough. On startup the plugin's `config` hook injects its bundled agents,
 slash commands, and instruction rules into your resolved config, so they load in any project
-that enables the plugin. `agent-discipline.md` (the full agent ruleset) and `memory-blocks.md`
-(the always-loaded mem-core render artifact) are appended to `instructions` automatically.
+that enables the plugin. `agent-discipline.md` (the full agent ruleset) is appended to
+`instructions` automatically; live mem-core is loaded from scoped `memory.md` renders under
+`eshepherd/memory/` (or `memory/`).
 
 ### 1a. Asset loading matrix
 
@@ -32,7 +33,7 @@ ElectricShepherd is a plugin, so it loads the same way wherever it is enabled. T
 - Plugin: yes — via `plugin: ["electric-shepherd"]`
 - Agents (`agents/*.md`): yes — injected into `config.agent` by the `config` hook
 - Commands (`command/*.md`): yes — injected into `config.command` by the `config` hook
-- Instructions (`instructions/*.md`): yes — absolute paths appended to `config.instructions`
+- Instructions (`instructions/agent-discipline.md`): yes — absolute paths appended to `config.instructions`
   (opt out with `ESHEPHERD_INJECT_INSTRUCTIONS=false`)
 
 Not config-injectable:
@@ -405,12 +406,18 @@ export ESHEPHERD_MEMCORE_MAX_CHARS=12000           # clip the merged payload
 
 ## 5. Updating mem-core
 
-`instructions/memory-blocks.md` is a shape/example for scoped mem-core render output.
+`docs/memory-blocks.reference.md` is a shape/example for scoped mem-core render output.
 Runtime + plugin wiring keep live mem-core in sync by deriving it from mem-synth:
 
 1. The runtime auto-writes a scoped `memory.md` render under `eshepherd/memory/<directory-scope>/memory.md` (or `memory/<directory-scope>/memory.md` when `memory` already exists).
 2. The loader composes broad-to-local memory layers by directory scope (`npm run policy:mem-core:load -- --format markdown`).
 3. The plugin re-injects scoped mem-core on compaction/start and when scope drifts during idle.
+
+To force a canonical rebuild to the top-level render file:
+
+```bash
+npm run policy:mem-core:rebuild
+```
 
 mem-core does not round-trip into MemPalace drawers and is not hand-authored. Human audit focus remains mem-synth consistency and label/pin tuning.
 

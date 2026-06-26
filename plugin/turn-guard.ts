@@ -34,7 +34,7 @@
 
 import { execFileSync, execSync, spawn } from "node:child_process"
 import { dirname, join, resolve } from "node:path"
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import {
   buildCommandExecutionPlan,
   clipText,
@@ -45,6 +45,7 @@ import {
 } from "../adapter/turn-guard-helpers.ts"
 import type { AutoSynthTrigger, MemcoreInjectionRecord } from "../adapter/turn-guard-helpers.ts"
 import { loadPackagedAssets, mergeWithoutOverride, loadInstructionPaths, dedupeAppendInstructions } from "../adapter/asset-loader.ts"
+import deleteDrawersTool from "../tools/delete_drawers.ts"
 
 type MessageWithParts = {
   info?: any
@@ -60,10 +61,11 @@ const START_BANNER = "[turn-guard] START"
 const MAX_RETRIES_PER_PARENT = 2
 const STATUS_DIR = ".electric-shepherd"
 const STATUS_FILE = "turn-guard-status.json"
+const AUTOSYNTH_LOG_FILE = "auto-synth.log"
 const DEFAULT_MEMCORE_MAX_CHARS = 12000
 const DEFAULT_MEMCORE_MAX_SCOPES = 6
 const DEFAULT_INJECTION_COOLDOWN_MS = 15000
-const DEFAULT_RETRY_ENABLED = true
+const DEFAULT_RETRY_ENABLED = false
 const DEFAULT_ALLOWED_SYNTH_WRITERS = ["dreamer", "dream-consolidator"]
 const SYNTH_WRITE_TOOL_NAMES = ["create_synthesis_node", "apply_merge"]
 
@@ -89,6 +91,17 @@ const DEFAULT_AUTOSYNTH_MAX_TRACKED_SESSIONS = 512
 // Checkpoint gating: only after real work, only in agents that learn durable facts.
 const MIN_TERMINAL_MESSAGES_BEFORE_CHECKPOINT = 4
 const CHECKPOINT_MODES = new Set(["build", "plan"])
+
+// ── LEGACY OPT-IN: Ollama finish_reason compensation ─────────────────────────
+// The retry apparatus (issueRetry, endsMidIntent, hasFinalReviewSignal, etc.)
+// was built to compensate for Ollama/LiteLLM returning finish_reason="stop" on
+// turns that still contained pending tool calls — a serving-layer mis-signal
+// (opencode#20719). With llama-server as the backend (or any correctly-signalling
+// OpenAI-compatible provider), finish="stop" means what it says and the model
+// reliably stops only when actually done.
+//
+// Set ESHEPHERD_RETRY_ENABLED=true to opt back in — useful if you encounter a
+// provider that still mis-signals. Expected to be a no-op on llama-server.
 
 function getBoolEnv(name: string, fallback: boolean): boolean {
   const raw = String(process?.env?.[name] ?? "").trim().toLowerCase()
@@ -208,6 +221,17 @@ function writeStatusFile(projectRoot: string, payload: Record<string, unknown>):
     writeFileSync(statusPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8")
   } catch (err) {
     console.error("[turn-guard] failed writing status file:", err)
+  }
+}
+
+function appendAutoSynthLog(projectRoot: string, line: string): void {
+  try {
+    const statusDir = join(projectRoot, STATUS_DIR)
+    mkdirSync(statusDir, { recursive: true })
+    const logPath = join(statusDir, AUTOSYNTH_LOG_FILE)
+    appendFileSync(logPath, `${line}\n`, "utf8")
+  } catch (err) {
+    console.error("[turn-guard] failed writing auto-synth log:", err)
   }
 }
 
@@ -422,15 +446,26 @@ function hasFinalReviewSignal(msg: MessageWithParts): boolean {
   return /review|summary|what i did|what changed|result|blocker|next step|next action/.test(text)
 }
 
+function hasActionPart(msg: MessageWithParts | null | undefined): boolean {
+  const parts = msg?.parts ?? []
+  return parts.some((p: any) => {
+    const type = String(p?.type ?? "")
+    return type === "tool" || type === "patch" || type === "file" || type === "subtask"
+  })
+}
+
+function isCapabilityQuestion(text: string): boolean {
+  const normalized = String(text || "").trim().toLowerCase()
+  if (!normalized || !normalized.includes("?")) return false
+  return /^(are you able|can you|could you|are you capable|do you have|are you able to)\b/.test(normalized)
+}
+
 // Mode B premature stop: the model announced an action (or trailed off on a
 // colon) but emitted finish=stop with no tool/patch/file part executing it.
 // e.g. "Now let me verify the delete button in the Control Panel:" then nothing.
 function endsMidIntent(msg: MessageWithParts): boolean {
   const parts = msg.parts ?? []
-  const hasActionPart = parts.some(
-    (p: any) => p?.type === "tool" || p?.type === "patch" || p?.type === "file",
-  )
-  if (hasActionPart) return false
+  if (hasActionPart(msg)) return false
   const text = getText(parts).trim()
   if (!text) return false
   const lastLine = (text.split(/\n/).pop() ?? "").trim()
@@ -541,7 +576,8 @@ function getPromptRouting(...candidates: Array<MessageWithParts | null | undefin
 
 export const TurnGuard = async ({ client, directory }: any) => {
   console.log(`${START_BANNER}: plugin loaded (directory=${directory})`)
-  console.log("[turn-guard] hooks registered: event(message.updated, session.idle, session.compacted, session.started)")
+  console.log("[turn-guard] hooks registered: event(message.updated, session.idle, session.compacted, session.started), experimental.session.compacting")
+  console.log("[turn-guard] retry guard: OFF by default (ESHEPHERD_RETRY_ENABLED=true to opt in)")
 
   const rootDirectory = normalizePathForHost(directory || process.cwd())
   const projectRoot = findProjectRoot(rootDirectory)
@@ -590,6 +626,10 @@ export const TurnGuard = async ({ client, directory }: any) => {
   const memcoreInjectionBySession = new Map<string, { signature: string; at: number; scopeDir: string }>()
   const warnedSynthWriteMessageIDs = new Set<string>()
   const memrawCaptureBySession = new Map<string, { totalEvents: number; lastEvent: string; lastAt: string; lastSuccess: boolean }>()
+  // Tracks which compaction path actually ran for each session: "pre-compact-hook"
+  // means the experimental.session.compacting hook fired before the summarizer;
+  // "post-compact-fallback" means only the session.compacted event fired.
+  const compactionPathBySession = new Map<string, { path: "pre-compact-hook" | "post-compact-fallback"; at: string }>()
 
   // --- auto-synth state ---
   // Pending idle-delay timers (cleared/overridden when a new message arrives),
@@ -628,6 +668,9 @@ export const TurnGuard = async ({ client, directory }: any) => {
         memcoreInjected: memcoreInjectionBySession.size,
         memrawCaptureTracked: memrawCaptureBySession.size,
       },
+      lastCompactionPath: compactionPathBySession.size > 0
+        ? Object.fromEntries([...compactionPathBySession.entries()].slice(-10))
+        : undefined,
       ...extra,
     }
   }
@@ -855,6 +898,10 @@ export const TurnGuard = async ({ client, directory }: any) => {
         }
       }
       writeStatusFile(projectRoot, statusSnapshot({ ...status, finishedAt: new Date().toISOString() }))
+      appendAutoSynthLog(
+        projectRoot,
+        `${new Date().toISOString()} [finish] sid=${sid} trigger=${trigger} status=${JSON.stringify(status)}`,
+      )
     }
 
     try {
@@ -884,7 +931,30 @@ export const TurnGuard = async ({ client, directory }: any) => {
         return
       }
 
-      const child = spawn(plan.command, plan.args, { cwd: plan.cwd, shell: false, stdio: "ignore", env: childEnv, detached })
+      const logPath = join(projectRoot, STATUS_DIR, AUTOSYNTH_LOG_FILE)
+      appendAutoSynthLog(
+        projectRoot,
+        `${new Date().toISOString()} [start] sid=${sid} trigger=${trigger} command=${plan.command} args=${JSON.stringify(plan.args)} logPath=${logPath}`,
+      )
+
+      const child = spawn(plan.command, plan.args, {
+        cwd: plan.cwd,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: childEnv,
+        detached,
+      })
+
+      child.stdout?.on("data", (chunk: Buffer | string) => {
+        const text = String(chunk ?? "").trim()
+        if (!text) return
+        appendAutoSynthLog(projectRoot, `${new Date().toISOString()} [stdout] sid=${sid} ${text}`)
+      })
+      child.stderr?.on("data", (chunk: Buffer | string) => {
+        const text = String(chunk ?? "").trim()
+        if (!text) return
+        appendAutoSynthLog(projectRoot, `${new Date().toISOString()} [stderr] sid=${sid} ${text}`)
+      })
 
       watchdog = setTimeout(() => {
         console.error(
@@ -991,6 +1061,15 @@ export const TurnGuard = async ({ client, directory }: any) => {
     }
   }
 
+  // ── LEGACY OPT-IN: auto-retry guard ────────────────────────────────────────────
+  // This block compensates for Ollama/LiteLLM returning finish_reason="stop" on
+  // turns that still contained structured tool_calls, causing premature agent-loop
+  // exit (opencode#20719). With llama-server (or any correctly-signalling backend),
+  // finish="stop" and finish="tool-calls" mean what they say.
+  //
+  // Default: DISABLED (ESHEPHERD_RETRY_ENABLED=true to opt in). When disabled the
+  // entire function returns immediately — zero per-message overhead.
+  // Retain as an opt-in safety net for providers that still mis-signal.
   // Returns true if a retry prompt was issued.
   const issueRetry = async (
     sid: string,
@@ -1033,19 +1112,26 @@ export const TurnGuard = async ({ client, directory }: any) => {
     const lastTextLen = getText(last.parts ?? []).length
     const prevWasSerenaMemory = isSerenaMemoryToolTurn(prev)
     const midIntent = endsMidIntent(last)
+    const capabilityQuestion = prevIsUser && isCapabilityQuestion(parentText)
+    const actionLikeTurn = prevIsToolTurn || hasActionPart(last) || midIntent
+    const reviewRequired = actionLikeTurn && !capabilityQuestion
 
     console.log(
       `[turn-guard] evaluate sid=${sid} msg=${messageID || "?"} ` +
       `prevRole=${String(prev?.info?.role ?? "?")} prevFinish=${String(prev?.info?.finish ?? "")} ` +
       `prevSerenaMemory=${String(prevWasSerenaMemory)} hasUseful=${String(hasUseful)} ` +
-      `hasReview=${String(hasReview)} midIntent=${String(midIntent)} textLen=${lastTextLen} partTypes=${partTypes(last)}`
+      `hasReview=${String(hasReview)} midIntent=${String(midIntent)} reviewRequired=${String(reviewRequired)} ` +
+      `capabilityQuestion=${String(capabilityQuestion)} textLen=${lastTextLen} partTypes=${partTypes(last)}`
     )
 
-    const memoryOnlyLikelyPremature = prevWasSerenaMemory && (lastTextLen < 120 || !hasReview)
-    if (!memoryOnlyLikelyPremature && !midIntent && hasUseful && hasReview) {
+    const memoryOnlyLikelyPremature = prevWasSerenaMemory && (lastTextLen < 120 || (reviewRequired && !hasReview))
+    const consideredComplete = !memoryOnlyLikelyPremature && !midIntent && hasUseful && (!reviewRequired || hasReview)
+    if (consideredComplete) {
       console.log(
         `[turn-guard] skip retry in ${sid}; considered complete ` +
-        `(hasUseful=${String(hasUseful)} hasReview=${String(hasReview)} midIntent=${String(midIntent)} prevSerenaMemory=${String(prevWasSerenaMemory)})`
+        `(hasUseful=${String(hasUseful)} hasReview=${String(hasReview)} midIntent=${String(midIntent)} ` +
+        `reviewRequired=${String(reviewRequired)} capabilityQuestion=${String(capabilityQuestion)} ` +
+        `prevSerenaMemory=${String(prevWasSerenaMemory)})`
       )
       return false
     }
@@ -1074,7 +1160,9 @@ export const TurnGuard = async ({ client, directory }: any) => {
         ? "announced an action but stopped before executing it"
         : !hasUseful
           ? "no useful output"
-          : "missing a final review of completed work"
+          : reviewRequired
+            ? "missing a final review of completed work"
+            : "incomplete continuation"
 
     console.log(
       `[turn-guard] low-value stop detected in ${sid}; ` +
@@ -1242,6 +1330,13 @@ export const TurnGuard = async ({ client, directory }: any) => {
 
       if (info?.finish !== "stop") return
 
+      // When retry is disabled, skip parent fetch and all heuristic evaluation —
+      // zero extra overhead per message.
+      if (!retryEnabled) {
+        verifyMemrawCapture(sid, "message.stop")
+        return
+      }
+
       const parentID = String(current?.info?.parentID ?? "")
       if (!parentID) return
 
@@ -1280,11 +1375,14 @@ export const TurnGuard = async ({ client, directory }: any) => {
       const last = messages[messages.length - 1]
       const prev = messages[messages.length - 2]
 
-      // Retry owns stalls; only consider a checkpoint when nothing was retried.
-      const retried = await issueRetry(sid, last, prev)
-      if (!retried) {
-        await maybeCheckpoint(sid, last)
+      // Checkpoint is independent of retry — its own guards (clean stop,
+      // !endsMidIntent, hasUsefulPayload) prevent it from firing on stalls even
+      // without the retry gate. When retry IS enabled it runs first so stall
+      // detection can still log; the checkpoint's guards exclude stalls either way.
+      if (retryEnabled) {
+        await issueRetry(sid, last, prev)
       }
+      await maybeCheckpoint(sid, last)
 
       await maybeInjectMemcore({
         sid,
@@ -1307,12 +1405,23 @@ export const TurnGuard = async ({ client, directory }: any) => {
     if (!sid) return
 
     verifyMemrawCapture(sid, "session.compacted")
-    await maybeInjectMemcore({
-      sid,
-      event,
-      reason: "compacted",
-      force: true,
-    })
+
+    // PRIMARY mem-core injection is the experimental.session.compacting pre-hook.
+    // This handler is a post-compaction fallback: re-inject only when the pre-hook
+    // did not already run for this session (hook unavailable or not triggered).
+    const preHookRan = compactionPathBySession.get(sid)?.path === "pre-compact-hook"
+    if (!preHookRan) {
+      compactionPathBySession.set(sid, { path: "post-compact-fallback", at: new Date().toISOString() })
+      console.log(`[turn-guard] post-compact fallback: pre-hook absent for sid=${sid}, re-injecting mem-core`)
+      await maybeInjectMemcore({
+        sid,
+        event,
+        reason: "compacted",
+        force: true,
+      })
+    } else {
+      console.log(`[turn-guard] post-compact event: pre-compact hook already ran for sid=${sid}, skipping re-injection`)
+    }
 
     // Compaction is a natural consolidation point; run auto-synth if enabled.
     if (autoSynthOnCompact) {
@@ -1332,8 +1441,61 @@ export const TurnGuard = async ({ client, directory }: any) => {
     })
   }
 
+  // Thin wrapper for the experimental.session.compacting pre-compaction hook.
+  // Isolated so that if OpenCode stabilises the hook shape (proposal #4317), only
+  // this function needs updating — same insulation discipline as the MemPalace
+  // tool-prefix adapter. Returns { prompt } to inject mem-core into the compaction
+  // context, or {} to leave the default prompt unchanged.
+  async function injectMemcoreIntoCompaction(input: any): Promise<Record<string, unknown>> {
+    const sid = String(input?.sessionID ?? input?.sessionId ?? findSessionID(input) ?? "")
+    const existingPrompt = String(input?.prompt ?? "")
+    const scopeDir = resolveScopeDirFromEvent(input, rootDirectory)
+    const { markdown, loaderInfo } = loadMemcoreMarkdown(projectRoot, scopeDir)
+    if (!markdown) {
+      console.log(`[turn-guard] pre-compact hook: no mem-core loaded sid=${sid} scope=${scopeDir}`)
+      writeStatusFile(projectRoot, statusSnapshot({ type: "pre-compact-hook", sid, scopeDir, injected: false, loaderInfo }))
+      return {}
+    }
+
+    const clipped = clipText(markdown, memcoreMaxChars)
+    const injectedPrompt =
+      (existingPrompt ? existingPrompt + "\n\n" : "") +
+      `--- mem-core (resident memory, scope: ${scopeDir}) ---\n` +
+      clipped +
+      "\n--- end mem-core ---\n\n" +
+      "The mem-core block above is the always-loaded resident memory for this session's active scope. " +
+      "Preserve and carry forward all facts listed in it when generating the continuation summary."
+
+    compactionPathBySession.set(sid, { path: "pre-compact-hook", at: new Date().toISOString() })
+    writeStatusFile(projectRoot, statusSnapshot({
+      type: "pre-compact-hook",
+      sid,
+      scopeDir,
+      injected: true,
+      chars: clipped.length,
+      loaderInfo,
+    }))
+    console.log(`[turn-guard] pre-compact hook: mem-core injected sid=${sid} scope=${scopeDir} chars=${clipped.length}`)
+    return { prompt: injectedPrompt }
+  }
+
   return {
     config: async (config: any) => {
+      // Safety default: destructive drawer deletion must prompt for approval.
+      const permission = config?.permission
+      if (typeof permission === "string") {
+        config.permission = {
+          "*": permission,
+          delete_drawers: "ask",
+        }
+      } else {
+        const currentPermission = permission && typeof permission === "object" ? permission : {}
+        if (!Object.prototype.hasOwnProperty.call(currentPermission, "delete_drawers")) {
+          currentPermission.delete_drawers = "ask"
+        }
+        config.permission = currentPermission
+      }
+
       // Make the bundled agents and slash commands load like the rest of the
       // plugin. OpenCode only auto-discovers agents/ and command/ folders when a
       // repo is the active project, which never happens for an installed plugin.
@@ -1345,8 +1507,8 @@ export const TurnGuard = async ({ client, directory }: any) => {
         config.agent = mergeWithoutOverride(agents, config.agent)
         config.command = mergeWithoutOverride(commands, config.command)
         let injectedInstructions = 0
-        // Instructions (memory-discipline + memory-blocks) are part of the
-        // plugin's behavior, so inject their absolute paths too. Opt out with
+        // Instructions (agent discipline) are part of the plugin's behavior,
+        // so inject their absolute paths too. Opt out with
         // ESHEPHERD_INJECT_INSTRUCTIONS=false.
         if (getBoolEnv("ESHEPHERD_INJECT_INSTRUCTIONS", true)) {
           const instructionPaths = loadInstructionPaths()
@@ -1378,6 +1540,12 @@ export const TurnGuard = async ({ client, directory }: any) => {
       if (event.type === "session.started" || event.type === "session.created") {
         await onSessionStarted(event)
       }
+    },
+    "experimental.session.compacting": async (input: any) => {
+      return injectMemcoreIntoCompaction(input)
+    },
+    tool: {
+      delete_drawers: deleteDrawersTool,
     },
   } as any
 }

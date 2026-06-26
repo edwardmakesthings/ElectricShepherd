@@ -1,4 +1,4 @@
-import { createMemgraphClient } from "../adapter/memgraph.ts";
+import { createMemgraphClient, type RawMemoryWorkItem } from "../adapter/memgraph.ts";
 import { MCPHttpClient, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-client.ts";
 // @ts-expect-error runtime script package does not include node typings
 import { execFileSync } from "node:child_process";
@@ -51,7 +51,9 @@ type MapperEnvelope = {
   summaries: TranscriptInsightSummary[];
   raw: unknown;
   via: "task-tool" | "opencode-run" | "none";
-};type AuditorEnvelope = {
+};
+
+type AuditorEnvelope = {
   verdict: "pass" | "revise" | "escalate";
   findings: string[];
   recommendedActions: string[];
@@ -62,6 +64,14 @@ type MapperEnvelope = {
 type CadenceState = {
   lastRunISO: string;
   areas: Record<string, { lastCandidateCount: number; lastTriggeredISO?: string }>;
+};
+
+type WorklistMode = "unsynthesized" | "all";
+
+type WorklistOptions = {
+  mode: WorklistMode;
+  limit: number;
+  batchSize: number;
 };
 
 function getArg(argv: string[], flag: string): string | undefined {
@@ -264,13 +274,17 @@ async function callSubagentMapper(args: {
   query: string;
   wing: string;
   room: string;
-  limit: number;
+  worklistIds: string[];
   opencodeBin: string;
 }): Promise<MapperEnvelope> {
-  const searchTool = `${args.toolPrefix}search`;
+  const getDrawerTool = `${args.toolPrefix}get_drawer`;
+  const orderedIds = args.worklistIds.filter(Boolean);
+  const serializedIds = orderedIds.join(", ");
   const taskPrompt = [
-    "Read relevant transcript memory and produce mapper summaries as JSON array.",
-    `Use tool: ${searchTool} with query='${args.query}', wing='${args.wing}', room='${args.room}', limit=${args.limit}.`,
+    "Read the exact worklist transcripts and produce mapper summaries as JSON array.",
+    `Scope context: wing='${args.wing}', room='${args.room}', query='${args.query}'.`,
+    `Use tool: ${getDrawerTool} for EACH drawer id in this exact order: ${serializedIds}.`,
+    "Do not use search or any broad query tools. Process only the provided IDs.",
     "Return ONLY valid JSON array with items shaped as:",
     "{ transcriptId, confidence, durableFacts[], decisions[], rootCausesAndWorkedExamples[], subsystemsAndFiles[], openItems[], rawExcerpt? }",
   ].join("\n");
@@ -411,18 +425,14 @@ async function callSubagentAuditor(args: {
 function parseConsolidationOptions(argv: string[]): SynthesisConsolidationOptions {
   const runCadence = hasFlag(argv, "--run-cadence");
 
-  let query = getArg(argv, "--query") || "";
-  let targetWing = getArg(argv, "--wing") || getArg(argv, "--target-wing") || "";
-  let targetRoom = getArg(argv, "--room") || getArg(argv, "--target-room") || "";
+  let query = getArg(argv, "--query") || "memory consolidation candidates";
+  let targetWing = getArg(argv, "--wing") || getArg(argv, "--target-wing") || getArg(argv, "--scope-wing") || "context-blocks";
+  let targetRoom = getArg(argv, "--room") || getArg(argv, "--target-room") || getArg(argv, "--scope-room") || "context-blocks";
 
   if ((!query || !targetWing || !targetRoom) && runCadence) {
     query = query || "memory consolidation candidates";
     targetWing = targetWing || "context-blocks";
     targetRoom = targetRoom || "context-blocks";
-  }
-
-  if (!query || !targetWing || !targetRoom) {
-    throw new Error("Consolidation requires --query, --wing/--target-wing, --room/--target-room");
   }
 
   const mapperSummaries = parseMapperSummariesFromFile(getArg(argv, "--mapper-summaries-file"));
@@ -440,6 +450,72 @@ function parseConsolidationOptions(argv: string[]): SynthesisConsolidationOption
     applyWrites: hasFlag(argv, "--apply"),
     mapperSummaries,
   };
+}
+
+function parseWorklistOptions(argv: string[]): WorklistOptions {
+  const allMode = hasFlag(argv, "--all") || hasFlag(argv, "--full-scope") || hasFlag(argv, "--reprocess-all");
+  const limit = Number(getArg(argv, "--worklist-limit") || getArg(argv, "--search-limit") || "200");
+  const batchSize = Math.max(1, Number(getArg(argv, "--batch-size") || "25"));
+  return {
+    mode: allMode ? "all" : "unsynthesized",
+    limit: Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 200,
+    batchSize,
+  };
+}
+
+function chunkItems<T>(items: T[], size: number): T[][] {
+  if (items.length === 0) return [];
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size));
+  }
+  return out;
+}
+
+function parseDrawerPayload(raw: unknown): RawMemoryWorkItem | null {
+  const root = asObject(raw);
+  const candidates = [
+    asObject(root.drawer),
+    asObject(root.result),
+    asObject(root.data),
+    asObject(asArray(root.drawers)[0]),
+    asObject(asArray(root.results)[0]),
+    root,
+  ];
+  const candidate = candidates.find((obj) => Object.keys(obj).length > 0) || {};
+  const drawerId = asString(candidate.drawer_id || candidate.node_id || candidate.id).trim();
+  if (!drawerId) return null;
+  return {
+    drawer_id: drawerId,
+    wing: asString(candidate.wing || candidate.closet || candidate.namespace).trim() || undefined,
+    room: asString(candidate.room).trim() || undefined,
+    desc: asString(candidate.desc || candidate.title || candidate.summary).trim() || undefined,
+    filed_at: asString(candidate.filed_at || candidate.created_at).trim() || undefined,
+    content: asString(candidate.content || candidate.text).trim() || undefined,
+  };
+}
+
+async function ensureRawEntriesForChunk(
+  client: ReturnType<typeof createMemgraphClient>,
+  items: RawMemoryWorkItem[],
+): Promise<Array<{ id: string; text: string }>> {
+  const out: Array<{ id: string; text: string }> = [];
+  for (const item of items) {
+    const existing = asString(item.content).trim();
+    if (existing) {
+      out.push({ id: item.drawer_id, text: existing });
+      continue;
+    }
+    try {
+      const raw = await client.getDrawer({ drawer_id: item.drawer_id });
+      const parsed = parseDrawerPayload(raw);
+      const text = asString(parsed?.content).trim();
+      if (text) out.push({ id: item.drawer_id, text });
+    } catch {
+      // Keep going; missing drawer text should not fail the whole batch.
+    }
+  }
+  return out;
 }
 
 function parseValidationOptions(argv: string[], consolidation: SynthesisConsolidationOptions): ValidationMergeReviewOptions {
@@ -545,7 +621,7 @@ function buildMemcoreMarkdown(args: {
 function usage(): string {
   return [
     "Usage:",
-    "  node scripts/run-memory-consolidation-and-validation.ts --query <text> --wing <wing> --room <room> [flags]",
+    "  node scripts/run-memory-consolidation-and-validation.ts [--query <text>] [--wing <wing>] [--room <room>] [flags]",
     "",
     "Synthesis Consolidation flags:",
     "  --search-limit <n>",
@@ -556,8 +632,11 @@ function usage(): string {
     "  --mapper-summaries-file <path-to-json-array>",
     "  --use-live-mapper                (invoke dream-mapper via task tool)",
     "  --mapper-agent <name>            (default: dream-mapper)",
+    "  --all | --full-scope             (worklist mode: reprocess all raw memories in scope)",
+    "  --batch-size <n>                 (chunk worklist into batch synthesis calls; default: 25)",
+    "  --worklist-limit <n>             (max raw drawers enumerated; default: 200)",
     "  --labels <csv>",
-    "  --apply                          (creates synthesis node if checks pass)",
+    "  --apply                          (creates synthesis node if checks pass; default is dry-run)",
     "",
     "Validation + Merge Review flags:",
     "  --scope-room <room>",
@@ -567,7 +646,7 @@ function usage(): string {
     "  --merge-threshold <float>",
     "  --merge-limit <n>",
     "  --allow-auto-merge-score <float>",
-    "  --apply-merges                   (applies auto-merge decisions)",
+    "  --apply-merges                   (applies auto-merge decisions; default is read-only)",
     "  --ntfy-url <url>",
     "  --escalation-topic <topic>",
     "  --use-live-auditor               (invoke dream-auditor via task tool)",
@@ -594,7 +673,11 @@ function usage(): string {
     "  --opencode-bin <path>            (default: opencode; used for live subagent fallback)",
     "",
     "Output:",
-    "  JSON envelope: { consolidation, validationMergeReview, mapper?, auditor?, memCoreApply?, cadence?, cadenceState? }",
+    "  JSON envelope: { worklist, worklistMode, consolidation, validationMergeReview, mapper?, auditor?, memCoreApply?, cadence?, cadenceState? }",
+    "",
+    "Read-only defaults:",
+    "  Without --apply and --apply-merges, the run proposes synthesis/merge decisions but does not write them to MemPalace.",
+    "  mem-core render remains enabled by default and writes local files only.",
   ].join("\n");
 }
 
@@ -629,6 +712,7 @@ async function main(): Promise<void> {
   const consolidationOptions = parseConsolidationOptions(argv);
   const validationOptions = parseValidationOptions(argv, consolidationOptions);
   const cadenceOptions = parseCadenceOptions(argv, consolidationOptions);
+  const worklistOptions = parseWorklistOptions(argv);
   const memcoreApply = parseMemcoreApply(argv);
 
   const mcpURL = process.env.MEMPALACE_MCP_URL || "http://localhost:8093/mcp";
@@ -650,28 +734,136 @@ async function main(): Promise<void> {
   const opencodeBin = getArg(argv, "--opencode-bin") || "opencode";
 
   let mapper: MapperEnvelope | undefined;
+  const mapperBatches: MapperEnvelope[] = [];
   let consolidation: SynthesisConsolidationResult | undefined;
+  const consolidationBatches: SynthesisConsolidationResult[] = [];
   let validationMergeReview: ValidationMergeReviewResult | undefined;
+  let validationSkippedReason: string | undefined;
 
-  if (includeBasePipeline && hasFlag(argv, "--use-live-mapper")) {
-    mapper = await callSubagentMapper({
-      mcp,
-      toolPrefix,
-      mapperAgentName: getArg(argv, "--mapper-agent") || "dream-mapper",
-      query: consolidationOptions.query,
-      wing: consolidationOptions.targetWing,
-      room: consolidationOptions.targetRoom,
-      limit: consolidationOptions.searchLimit || 12,
-      opencodeBin,
-    });
-    if (mapper.summaries.length > 0) {
-      consolidationOptions.mapperSummaries = mapper.summaries;
+  const enumerateAll = worklistOptions.mode === "all";
+  let worklist: RawMemoryWorkItem[] = [];
+  if (includeBasePipeline) {
+    worklist = enumerateAll
+      ? await client.listRawMemoriesByScope({
+          wing: consolidationOptions.targetWing,
+          room: consolidationOptions.targetRoom,
+          limit: worklistOptions.limit,
+        })
+      : await client.findUnsynthesizedRawMemories({
+          wing: consolidationOptions.targetWing,
+          room: consolidationOptions.targetRoom,
+          limit: worklistOptions.limit,
+        });
+  }
+
+  const worklistOutput = {
+    mode: worklistOptions.mode,
+    count: worklist.length,
+    limit: worklistOptions.limit,
+    batchSize: worklistOptions.batchSize,
+    note: includeBasePipeline
+      ? enumerateAll
+        ? "full-scope override active: this run may reprocess already-synthesized memories"
+        : "default mode: unsynthesized raw memories only"
+      : "cadence-only run: base worklist pipeline not executed",
+    items: worklist.map((item) => ({
+      drawer_id: item.drawer_id,
+      wing: item.wing,
+      room: item.room,
+      desc: item.desc,
+      filed_at: item.filed_at,
+    })),
+  };
+
+  if (!enumerateAll && worklist.length === 0 && includeBasePipeline) {
+    const output = {
+      skipped: true,
+      reason: "nothing-unsynthesized",
+      mode: includeBasePipeline ? "full-pipeline" : "cadence-only",
+      worklistMode: worklistOptions.mode,
+      worklist: worklistOutput,
+    };
+    process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+    if (heldSynthLockRoot) {
+      releaseSynthLock(heldSynthLockRoot);
+      heldSynthLockRoot = null;
     }
+    return;
+  }
+
+  if (enumerateAll && worklist.length === 0 && includeBasePipeline) {
+    const output = {
+      skipped: true,
+      reason: "scope-empty",
+      mode: includeBasePipeline ? "full-pipeline" : "cadence-only",
+      worklistMode: worklistOptions.mode,
+      worklist: worklistOutput,
+    };
+    process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+    if (heldSynthLockRoot) {
+      releaseSynthLock(heldSynthLockRoot);
+      heldSynthLockRoot = null;
+    }
+    return;
   }
 
   if (includeBasePipeline) {
-    consolidation = await runSynthesisConsolidation(client, consolidationOptions);
-    validationMergeReview = await runValidationMergeReview(client, validationOptions);
+    const worklistChunks = chunkItems(worklist, worklistOptions.batchSize);
+    const useLiveMapper = hasFlag(argv, "--use-live-mapper");
+
+    for (const chunk of worklistChunks) {
+      const chunkIds = chunk.map((item) => item.drawer_id);
+      let chunkMapper: MapperEnvelope | undefined;
+
+      if (useLiveMapper) {
+        chunkMapper = await callSubagentMapper({
+          mcp,
+          toolPrefix,
+          mapperAgentName: getArg(argv, "--mapper-agent") || "dream-mapper",
+          query: consolidationOptions.query,
+          wing: consolidationOptions.targetWing,
+          room: consolidationOptions.targetRoom,
+          worklistIds: chunkIds,
+          opencodeBin,
+        });
+        mapperBatches.push(chunkMapper);
+      }
+
+      const rawEntries = await ensureRawEntriesForChunk(client, chunk);
+      const chunkConsolidation = await runSynthesisConsolidation(client, {
+        ...consolidationOptions,
+        mapperSummaries: chunkMapper && chunkMapper.summaries.length > 0 ? chunkMapper.summaries : undefined,
+        rawEntries,
+      });
+      consolidationBatches.push(chunkConsolidation);
+    }
+
+    if (consolidationBatches.length > 0) {
+      consolidation = consolidationBatches[consolidationBatches.length - 1];
+    }
+
+    if (mapperBatches.length > 0) {
+      const mergedSummaries = mapperBatches.flatMap((batch) => batch.summaries);
+      mapper = {
+        summaries: mergedSummaries,
+        raw: mapperBatches.map((batch) => batch.raw),
+        via: mapperBatches.every((batch) => batch.via === "task-tool")
+          ? "task-tool"
+          : mapperBatches.some((batch) => batch.via === "opencode-run")
+            ? "opencode-run"
+            : "none",
+      };
+    }
+
+    const touchedNodeIds = [...new Set(consolidationBatches.map((c) => c.createdNodeId).filter(Boolean))] as string[];
+    if (touchedNodeIds.length > 0) {
+      validationMergeReview = await runValidationMergeReview(client, {
+        ...validationOptions,
+        candidateNodeIds: touchedNodeIds,
+      });
+    } else {
+      validationSkippedReason = "no-created-nodes";
+    }
   }
 
   let auditor: AuditorEnvelope | undefined;
@@ -686,11 +878,23 @@ async function main(): Promise<void> {
   }
 
   let memCoreApplyResult: Record<string, unknown> | undefined;
-  if (memcoreApply.enabled && includeBasePipeline && consolidation && validationMergeReview) {
+  if (memcoreApply.enabled && includeBasePipeline && consolidation) {
+    const validationForRender: ValidationMergeReviewResult = validationMergeReview || {
+      phase: "validation-merge-review",
+      downwardValidation: [],
+      mergeAdjudications: [],
+      escalations: {
+        reasons: validationSkippedReason ? [validationSkippedReason] : [],
+        nodeIds: [],
+        mergePairs: [],
+        notified: false,
+      },
+    };
+
     const markdown = buildMemcoreMarkdown({
       query: consolidation.query,
       consolidation,
-      validation: validationMergeReview,
+      validation: validationForRender,
       auditor,
     });
 
@@ -722,7 +926,7 @@ async function main(): Promise<void> {
   } else {
     memCoreApplyResult = {
       applied: false,
-      reason: "missing consolidation/validation outputs",
+      reason: "missing consolidation outputs",
     };
   }
 
@@ -752,10 +956,14 @@ async function main(): Promise<void> {
 
   const output: Record<string, unknown> = {
     mode: includeBasePipeline ? "full-pipeline" : "cadence-only",
+    worklistMode: worklistOptions.mode,
+    worklist: worklistOutput,
   };
 
   if (consolidation) output.consolidation = consolidation;
+  if (consolidationBatches.length > 0) output.consolidationBatches = consolidationBatches;
   if (validationMergeReview) output.validationMergeReview = validationMergeReview;
+  if (validationSkippedReason && !validationMergeReview) output.validationSkipped = { reason: validationSkippedReason };
 
   if (mapper) output.mapper = mapper;
   if (auditor) output.auditor = auditor;

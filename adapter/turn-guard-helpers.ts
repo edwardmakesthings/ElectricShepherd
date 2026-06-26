@@ -53,7 +53,18 @@ export function buildCommandExecutionPlan(args: {
   }
 
   if (normalizedConfigured.command === "node") {
-    const scriptArgs = normalizedConfigured.args.length > 0 ? normalizedConfigured.args : ["scripts/run-memory-consolidation-and-validation.ts", "--run-cadence", "--cadence-mode", "execute", "--apply"]
+    const scriptArgs = normalizedConfigured.args.length > 0
+      ? normalizedConfigured.args
+      : [
+          "scripts/run-memory-consolidation-and-validation.ts",
+          "--run-cadence",
+          "--cadence-mode",
+          "execute",
+          "--include-base-pipeline",
+          "--apply",
+          "--mem-core-file",
+          "eshepherd/memory/memory.md",
+        ]
     return {
       mode: "exec",
       command: normalizedConfigured.command,
@@ -119,6 +130,12 @@ export function decideAutoSynth(args: {
   if (!args.enabled) return { shouldRun: false, reason: "disabled" }
   if (args.inFlight) return { shouldRun: false, reason: "in-flight" }
 
+  // Compaction is an explicit memory-boundary event. Run synthesis every time it
+  // happens so mem-core refresh does not get deferred by cooldown.
+  if (args.trigger === "compacted") {
+    return { shouldRun: true, reason: "compacted" }
+  }
+
   const cooldownElapsed = args.lastRunAt == null || args.now - args.lastRunAt >= args.cooldownMs
   if (!cooldownElapsed) return { shouldRun: false, reason: "cooldown" }
 
@@ -130,7 +147,7 @@ export function decideAutoSynth(args: {
     if (args.messagesSinceRun <= 0) return { shouldRun: false, reason: "no-activity" }
     return { shouldRun: true, reason: "idle-timer" }
   }
-  return { shouldRun: true, reason: "compacted" }
+  return { shouldRun: false, reason: "unknown-trigger" }
 }
 
 export function pruneAutoSynthTracking(

@@ -73,7 +73,7 @@ OpenCode resolves this package on startup. This repo currently provides:
 - Dreamer agent profiles (`dreamer`, `dream-consolidator`, `dream-mapper`, `dream-auditor`)
 - Slash commands in `command/` (`/count-sheep`, `/herd`, `/lucid-dream`, `/wake-up`, `/headcount`) for consolidation workflows
 - The `memsave` / `memload` OpenChamber snippets
-- The memory discipline instructions (loadable via `instructions`)
+- The memory discipline instruction plus runtime-derived mem-core renders under `eshepherd/memory/`
 
 **Policy runtime (separate — runs headless, not inside OpenCode):**
 
@@ -129,7 +129,7 @@ markdown files at startup and injects them into the resolved config:
 | Plugin (`plugin/turn-guard.ts`) | Yes | Yes | `"plugin": ["electric-shepherd"]` |
 | Agents (`agents/*.md`) | Yes | Yes | Injected into `config.agent` by the plugin's `config` hook |
 | Commands (`command/*.md`) | Yes | Yes | Injected into `config.command` by the plugin's `config` hook |
-| Instructions (`instructions/*.md`) | Yes | Yes | Absolute paths appended to `config.instructions` (opt out: `ESHEPHERD_INJECT_INSTRUCTIONS=false`) |
+| Instructions (`instructions/agent-discipline.md`) | Yes | Yes | Absolute paths appended to `config.instructions` (opt out: `ESHEPHERD_INJECT_INSTRUCTIONS=false`) |
 | Skills (`skills/*/SKILL.md`) | Yes | No | OpenCode has no config-injection path for skills — place in your own `.opencode/skills/<name>/SKILL.md` if you want it |
 | Snippets (`snippets/*.md`) | Yes | No | OpenChamber snippet assets; not an OpenCode auto-load concept |
 
@@ -171,10 +171,12 @@ After installing dependencies, the quickest sanity check is:
 ```bash
 npm test
 npm run policy:mem-core:load -- --format markdown
+npm run policy:mem-core:rebuild
 ```
 
 The first command exercises the unit suite; the second confirms the mem-core loader
-path works without requiring a live model.
+path works without requiring a live model. The rebuild command writes canonical
+scoped mem-core to `eshepherd/memory/memory.md`.
 
 ---
 
@@ -197,7 +199,9 @@ electric-shepherd/
 │   └── headcount.md           # pending-vs-synth counts slash command
 ├── instructions/
 │   ├── agent-discipline.md    # agent behavior rules and guardrails
-│   └── memory-blocks.md       # always-loaded mem-core render artifact
+├── eshepherd/
+│   └── memory/
+│       └── memory.md          # canonical runtime-rendered mem-core output
 ├── skills/
 │   └── mempalace/SKILL.md     # optional deep reference for MemPalace tool usage
 ├── snippets/
@@ -211,6 +215,7 @@ electric-shepherd/
 │   └── run-policy-cycle.ts    # Runtime entrypoint for deterministic policy cycle
 ├── docs/
 │   └── memory-graph-design.md # architecture and build-order source of truth
+│   └── memory-blocks.reference.md # reference/example render shape (not injected)
 ├── package.json
 └── README.md
 ```

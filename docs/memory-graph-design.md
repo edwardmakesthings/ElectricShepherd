@@ -310,6 +310,23 @@ render top-N tuning question, not an architectural one. Project-level scope is c
 it; finer directory-level scope is permitted-but-prove-it — the value drops below the project
 level and the context cost doesn't.
 
+### mem-core is a notepad beside recent turns, not a re-derivation of the whole context
+
+A guard against a tempting-but-wrong version. The context the model sees each turn is a flat
+token sequence reassembled fresh every call from a *curated slice* of stored history (OpenCode
+already separates full stored history from the model-context slice it sends). The wrong idea
+is "re-derive the *entire* context each turn from mem-core + system prompt only" — that throws
+away recent turns and produces an agent that forgets what was just said: amnesia with a
+reference book. The right composition is **[system prompt] + [mem-core: the distilled resident
+working set] + [recent N turns, verbatim] + [current message]**. Recent conversation stays raw
+(no forgetting the immediate thread); only *old* context is distilled into mem-core and dropped
+from verbatim history. mem-core is the notepad the agent refers to; it does not replace the
+agent's short-term memory of the current exchange. OpenCode's own compaction already protects
+recent turns (tail-turn protection) while distilling old ones — the notepad model matches how
+the harness already behaves; mem-core just makes the distilled part graph-derived and scoped.
+(What gets *re-derived* each turn is which mem-core to inject — cheap, the notepad refreshing —
+not the conversation.)
+
 ### Substrate vs. policy split for mem-core
 
 - **Substrate (MemPalace):** the scoped lineage query ("synth nodes whose lineage reaches
@@ -355,21 +372,30 @@ the *least reliably present when it matters*, because injection is the unsolved 
 
 ### Gap #1 — compaction-aware mem-core re-injection (highest priority, not deferrable)
 
-Compaction is a re-injection event, and nothing currently guarantees mem-core survives it or
+Compaction is a re-injection event, and nothing initially guaranteed mem-core survives it or
 is refreshed at it. mem-core enters context via OpenCode's `instructions` at session start;
 when OpenCode compacts, the post-compaction context is determined by the summarizer, not
 re-derived from the render. Worse, compaction is exactly when you'd want to *re-pull the
-freshest render* — the dreamer may have updated it, or the work may have crossed into a
-different scope since session start — and nothing does. So mem-core silently degrades across
-long sessions, precisely when memory matters most.
+freshest render* — the consolidation pass may have updated it, or the work may have crossed
+into a different scope since session start.
 
-The stack already has the *push* side of this (the PreCompact hook pushes transcripts out to
-mem-raw). What's missing is the *pull* side: a plugin firing on the compaction event that
-re-resolves the scoped mem-core for the current working directory and ensures it is in the
-post-compaction context. Same deterministic-trigger shape as turn-guard firing on idle —
-pull-on-compact to mirror the existing push-on-compact. This is load-bearing for the core
-promise ("the right memory is present when the agent works") and every long session without
-it is a session where memory quietly decays.
+**The seam is a documented OpenCode hook: `experimental.session.compacting`.** It fires
+*before* the LLM generates the continuation summary, and a plugin can either inject context
+into the compaction prompt or **replace the compaction prompt entirely** (`output.prompt`).
+This is the real "run a script before the agent's context is cleaned" mechanism — not the
+earlier turn-guard approach of injecting mem-core as a synthetic user message (which was at
+the summarizer's mercy). The fix: turn-guard implements `experimental.session.compacting` to
+inject the freshly-resolved scoped mem-core into the compaction prompt, guaranteeing it
+survives into the post-compaction context. Mirrors the existing PreCompact *push* (transcripts
+out to mem-raw) with a *pull* (mem-core in).
+
+Two cautions: the hook is `experimental.` (an active proposal, #4317, would stabilize
+`/compact` and the compaction API), so isolate it behind a thin wrapper — same adapter
+discipline as the MemPalace tool names — so a rename touches one file. And OpenCode's
+*unrecoverable-overflow* case is real (if compaction itself overflows, the session hard-fails),
+which is another argument for keeping context shallow proactively rather than letting it grow
+to where even summarization can't fit. Validate against the real hook on the brutal
+low-context local models (4-turn compaction) before building anything larger on it.
 
 ### Gap #2 — scope-aware injection wiring
 
@@ -468,20 +494,94 @@ still applies, so the mechanism transfers but the trigger shouldn't be purely ti
 - **Opportunistic execution:** flagged work runs when idle (no active session, GPU free).
 - **Nightly backstop:** catches what didn't trigger, plus global passes (orphan sweep, decay).
 
-## 12. The dreamer itself (policy): map-reduce fan-out
+## 12. The dreamer: a script owns the loop, the model is a stateless judgment function
 
-Consolidation is a map-reduce problem, built as subagent fan-out (not a single batch session):
-**MAP** — a subagent reads one transcript/node-set in isolated context, returns a structured
-summary (no raw content to the parent); **REDUCE** — the parent synthesizes across the compact
-summaries, seeing cross-memory relationships. Fan-out fails *visibly and containedly* (a bad
-subagent returns one flagged summary to re-dispatch, vs. a batch run silently corrupting
-overnight output), keeps the parent's context bounded (only disposable subagents touch raw
-content), and gives a per-unit boundary for validation. Model: Qwen3.6-27B both phases
-(tool-call-dense + comprehension/synthesis; fan-out removes the context-ceiling objection).
+**The control hierarchy is inverted from the usual pattern.** The dominant pattern is
+*agent-orchestrates-scripts* — the LLM is the control flow, holds the loop in its context,
+decides what to do next, calls tools as subroutines. The dreamer is the opposite:
+*script-orchestrates-model* — a deterministic program is the control flow, holds the loop,
+decides what's next, and calls the model as a subroutine for the one thing only a model can
+do: make a bounded judgment. Factory, not agent: the assembly line (script) is fixed and
+deterministic; each worker (a model call) does one judgment at its station and passes the
+result down the line; no worker holds the whole factory in its head.
 
-Safety: revises synthesis nodes freely and auto-updates the always-loaded mem-core render,
-never edits raw drawers or code. Human audit is concentrated on mem-synth anomalies
-(inconsistency, bad merge candidates, drift), not on approving every mem-core refresh.
+This was forced by observation. The earlier design put a `dreamer` *agent* in charge of the
+pass — it had to hold watermark, fan-out, collect, synthesize, merge-review, drift-audit,
+mem-core refresh, and dream-log in its context as control flow, on a 24B local model. It
+couldn't: the orchestration ate the context the work needed, and it compacted before
+producing anything (and never delegated to mappers). Putting the component that's *worst* at
+long deterministic procedure (probabilistic, limited context) in charge of the procedure,
+while the component that's *best* at it (a script) sat idle as an occasionally-called tool,
+was upside down. The fix is to give the loop to the script.
+
+**The loop (script-owned, resume-safe):**
+1. **Worklist (deterministic, no model):** query for mem-raw drawers with no
+   `synthesized-from` edge — i.e. unsynthesized. That's a graph query; it's the worklist.
+   Triggerable by a `/count-sheep`-style command that runs the *script*, not an agent.
+2. **Per-item judgment (model as stateless function):** for each raw memory, one **bounded,
+   isolated** model call — fresh context containing only that one transcript + a strict
+   output schema ("read this, return this JSON"). No tools in this call (see §12a). The model
+   returns a structured judgment (durable facts, decisions, confidence, tags). The script
+   writes it to a local **journal** file (`eshepherd/cache/<id>.json`) — crash-safe and
+   resumable: on restart the loop skips items that already have a journal entry. The model
+   **never accumulates** across items; each call is stateless; the *script* holds loop state
+   externally, so nothing fills a context and nothing compacts.
+3. **Promote then clear:** a judgment is an **annotation on its mem-raw drawer** (not a synth
+   node — see §12b), committed once journaled. Clear each journal file only *after* its
+   annotation is confirmed committed (per-item, not all-at-once) — a write-ahead-log
+   discipline: the annotation is authoritative once written; the journal is the rebuildable
+   buffer discarded only when the real write lands.
+4. **Reduce (model, seeing compressed judgments only):** group annotated-but-unsynthesized
+   memories and create synth nodes — again bounded calls, the model seeing distilled
+   judgments, not raw transcripts; the script writes the nodes and edges.
+
+Per-memory judgments and pairwise adjudications are bounded function calls; relationship
+*finding* is substrate work (§12c). Model: Qwen3.6-27B for the judgment/synthesis calls.
+
+### 12a. Direct model calls, no tools (immunity to the finish_reason bug by design)
+
+The judgment and adjudication calls go **directly to the model (via LiteLLM), with no tools
+offered.** Two reasons. First, the factory model means the model never needs tools — the
+*script* does all tool-work (queries, traversal) deterministically and hands the model
+already-fetched data; the model only judges and returns text. Second, this grants *immunity*
+to the LiteLLM-Ollama `finish_reason`/`tool_calls` bug (the adapter mis-parses tool calls and
+returns `finish_reason: stop` with `tool_calls: null`): a call that requests **no tools** has
+no tool-call signal to mis-parse — you ask for JSON, you get text, the script parses and
+schema-validates it (bounded retry on malformed output). The whole bug class can't touch the
+dream loop. (Switching the local backend to llama-server — see decisions log — fixes the bug
+at the source for the *interactive* path; the dream loop is immune regardless.)
+
+### 12b. A judgment is an annotation, not a synth node
+
+A **synth node connects ≥2 memories**; a **judgment annotates one memory**. They are
+different kinds of thing, so a per-memory judgment is stored as metadata *on the mem-raw
+drawer* (e.g. a `judgment` field + a `judged` status), never as a synth node. The
+synth-creation step then queries "judged-but-unsynthesized" drawers. This keeps the synth
+graph meaning what it says (connections), and keeps judgments queryable as the worklist
+marker. Uncommitted/pending judgments are **script-private** (local journal, or a
+`pending`-status the agent-facing read path filters out) and the script may purge them
+freely — agents only ever see committed, validated memory.
+
+### 12c. The dream script uses MemPalace as a library, and finds relationships in a funnel
+
+The script imports **MemPalace directly as a library** (or queries its DB) rather than
+talking to the MCP server. MCP is the *agent-facing* boundary — it exists so a *model* can
+reach tools across a protocol. The script is not an agent; making it speak MCP to annotate a
+row it could write directly is overhead, and the library path also lets it write the
+script-private states (pending judgments) the MCP tools don't expose. (Content writes that
+need embedding still go through MemPalace's own functions so the invariants and embedding
+hold — library, not raw SQL.)
+
+Relationship-finding is a **deterministic funnel**, model only at the end: tag-overlap (free,
+pure set intersection) → substrate similarity (`check_duplicate` / near-but-distant query,
+cheap) → model adjudication only on the few survivors. The substrate *finds* candidates; the
+model only *judges finalists*. The need for an agent-with-tools to "find related memories" is
+a smell that orchestration leaked back into the model.
+
+Safety: the script revises synth nodes and re-renders mem-core, never edits raw-drawer
+*content* (only appends annotations), never touches code. Human audit concentrates on
+mem-synth anomalies (inconsistency, bad merge candidates, drift), not on approving every
+mem-core refresh.
 
 ## 13. The honest risk, and what bounds it
 
@@ -560,6 +660,29 @@ mem-raw capture fires on the OpenCode harness. All are event-triggered plumbing 
 scope denial — no prompts. Build this **before** the graph-view inspection surface
 (operational reliability precedes inspection).
 
+#### Implementation status (policy, ElectricShepherd repo)
+
+- **Steps 1–2 (adapter + retrieval expansion).** *Built.* `adapter/memgraph.ts` is the
+  graph-ops→MemPalace adapter; `adapter/retrieval-expansion.ts` does probabilistic-entry /
+  deterministic-expansion recall.
+- **Steps 3–4 (synthesis consolidation + validation/merge).** *Built.*
+  `adapter/synthesis-consolidation.ts` (map-reduce + inflation guard) and
+  `adapter/validation-merge-review.ts` (context-isolated validation, merge adjudication).
+- **Step 5 (cadence).** *Built.* `adapter/cadence-orchestrator.ts` +
+  `.electric-shepherd-cadence-state.json` drive the volume-queue cadence.
+- **Step 6 (tier enforcement + injection plumbing, §9b).** *Built* via `plugin/turn-guard.ts`
+  (gaps #1, #2, #4 closed; gap #3 is event-time warn-guard plus config-level tool denial, not
+  hard substrate enforcement — see scorecard).
+- **§12 factory inversion — partial / divergent.** The consolidation pass *is* a script that
+  owns the loop (`scripts/run-memory-consolidation-and-validation.ts`: worklist-first,
+  batch-chunked, cross-process lock via `scripts/synth-lock.ts`, triggered by `/count-sheep`
+  and auto-synth-on-compact — not an agent-in-charge). But its *internal mechanics* still
+  diverge from §12a–c: it talks to MemPalace over **MCP** (not as a library), uses **live
+  subagent mappers/auditors** (not per-item bounded **no-tools** direct model calls), and has
+  **no `eshepherd/cache/` crash-safe judgment journal** or `judged`-status drawer-annotation
+  promote-then-clear funnel. The factory *shape* is real; the strict no-tools/library/journal
+  form in §12 is the remaining work.
+
 Substrate A1–A2 are the foundation and highest value-to-risk (schema, counters, the
 deterministic graph + visualization — all before any model-judgment machinery). Everything
 that can go wrong by *judgment* (ElectricShepherd) sits on a proven deterministic substrate.
@@ -570,3 +693,38 @@ A1–A4 are implemented in the MemPalace fork (open PR). Run ElectricShepherd ag
 If/when those additions land upstream, ElectricShepherd's adapter repoints to the upstream toolset
 without changing dreamer logic. If the substrate surface differs across environments,
 adjust only the adapter mapping. Either way ElectricShepherd is insulated.
+
+---
+
+## 15. Stack-level dependencies (cross-references to the decisions log)
+
+ElectricShepherd's reliability rests on two stack-level choices recorded in the decisions log;
+noted here because they directly shape the architecture above.
+
+**Local serving via llama-server, not Ollama (behind LiteLLM).** The
+`finish_reason`/`tool_calls` breakage is in LiteLLM's *Ollama adapter* specifically (it
+mis-parses Ollama's tool calls, returning `finish_reason: stop` / `tool_calls: null`); direct
+curl to Ollama is correct, and llama-server exposes a natively OpenAI-compatible endpoint that
+LiteLLM passes through without that transformation. Pointing LiteLLM at llama-server as an
+`openai/` provider removes the bug from the *interactive* path. The dream loop is immune
+regardless (§12a, no tools requested). LiteLLM stays — it's the gateway that defines models
+once for every surface; only the backend behind it changes.
+
+*Status: landed.* Local serving runs llama.cpp behind `llama-swap` (one OpenAI endpoint,
+on-demand model swap); LiteLLM points at it as `openai/` for the qwen family. `gemma4:26b`
+stays on Ollama temporarily (mainline llama.cpp cannot load its MXFP4-fused MoE experts until
+the converter PR lands); VRAM hand-off between the two runtimes is automated.
+
+**Dynamic Context Pruning (DCP) is complementary, not competing.** DCP does model-decided
+surgical compression of stale *interactive-session* content (keeping recent verbatim) — the
+live-session analog of what the dream loop does for durable memory. Division of labor: DCP
+owns interactive-session pruning; ElectricShepherd owns durable memory injection (mem-core
+into the compaction prompt via `experimental.session.compacting`, mem-raw capture). Both touch
+the same compaction machinery, so they must coordinate (don't both rewrite the compaction
+prompt) — test together early, since plugin-ordering interactions pass in isolation and break
+combined.
+
+*Status: adopted, combined-integration test pending.* DCP runs as a global OpenCode plugin
+(`@tarquinen/opencode-dcp`); ElectricShepherd's compaction injection lives in `turn-guard`.
+The two have not yet been exercised together through a real compaction to confirm they don't
+both rewrite the prompt.

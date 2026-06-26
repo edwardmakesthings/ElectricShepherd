@@ -19,6 +19,17 @@ export type MemgraphToolMap = {
   kgAdd: string;
   kgInvalidate: string;
   search: string;
+  listDrawers: string;
+  getDrawer: string;
+};
+
+export type RawMemoryWorkItem = {
+  drawer_id: string;
+  wing?: string;
+  room?: string;
+  desc?: string;
+  filed_at?: string;
+  content?: string;
 };
 
 // Short base names — no prefix. MemPalace natively exposes these as `mempalace_<base>`.
@@ -42,7 +53,9 @@ const TOOL_BASE_NAMES: MemgraphToolMap = {
   updateDrawer: "update_drawer",
   kgAdd: "kg_add",
   kgInvalidate: "kg_invalidate",
-  search: "search"
+  search: "search",
+  listDrawers: "list_drawers",
+  getDrawer: "get_drawer",
 };
 
 const DEFAULT_TOOL_PREFIX = "mempalace_";
@@ -84,6 +97,77 @@ export class MemgraphClient {
 
   private async call(name: keyof MemgraphToolMap, args?: JsonMap): Promise<JsonMap> {
     return this.callTool(this.tools[name], args || {});
+  }
+
+  private asObject(value: unknown): JsonMap {
+    return value && typeof value === "object" ? (value as JsonMap) : {};
+  }
+
+  private asArray(value: unknown): unknown[] {
+    return Array.isArray(value) ? value : [];
+  }
+
+  private asString(value: unknown): string {
+    return typeof value === "string" ? value : "";
+  }
+
+  private parseRawMemoryItems(payload: unknown): RawMemoryWorkItem[] {
+    const root = this.asObject(payload);
+    const pools = [
+      ...this.asArray(root.drawers),
+      ...this.asArray(root.results),
+      ...this.asArray(root.items),
+      ...this.asArray(root.nodes),
+      ...this.asArray(root.data),
+    ];
+
+    const out: RawMemoryWorkItem[] = [];
+    const seen = new Set<string>();
+
+    for (const raw of pools) {
+      const row = this.asObject(raw);
+      const drawer_id = this.asString(row.drawer_id || row.node_id || row.id).trim();
+      if (!drawer_id || seen.has(drawer_id)) continue;
+
+      const nodeKind = this.asString(row.node_kind || row.kind || row.type).trim().toLowerCase();
+      const labels = this.asArray(row.labels).map((v) => this.asString(v).toLowerCase());
+      const isSynthesis =
+        nodeKind === "synthesis" ||
+        labels.includes("synthesis") ||
+        labels.includes("mem-synth") ||
+        labels.includes("node_kind:synthesis");
+      if (isSynthesis) continue;
+
+      seen.add(drawer_id);
+      out.push({
+        drawer_id,
+        wing: this.asString(row.wing || row.closet || row.namespace).trim() || undefined,
+        room: this.asString(row.room).trim() || undefined,
+        desc: this.asString(row.desc || row.title || row.summary).trim() || undefined,
+        filed_at: this.asString(row.filed_at || row.created_at).trim() || undefined,
+        content: this.asString(row.content || row.text).trim() || undefined,
+      });
+    }
+
+    return out;
+  }
+
+  private parseDescendantIds(payload: unknown): string[] {
+    const root = this.asObject(payload);
+    const pools = [
+      ...this.asArray(root.descendants),
+      ...this.asArray(root.nodes),
+      ...this.asArray(root.results),
+      ...this.asArray(root.items),
+      ...this.asArray(root.data),
+    ];
+    const out: string[] = [];
+    for (const raw of pools) {
+      const row = this.asObject(raw);
+      const id = this.asString(row.node_id || row.drawer_id || row.id).trim();
+      if (id) out.push(id);
+    }
+    return [...new Set(out)];
   }
 
   createSynthesisNode(args: {
@@ -215,6 +299,62 @@ export class MemgraphClient {
 
   search(query: string, limit = 5, wing?: string, room?: string) {
     return this.call("search", { query, limit, wing, room });
+  }
+
+  listDrawers(args: {
+    wing?: string;
+    room?: string;
+    limit?: number;
+    offset?: number;
+  }) {
+    return this.call("listDrawers", args as unknown as JsonMap);
+  }
+
+  getDrawer(args: {
+    drawer_id: string;
+  }) {
+    return this.call("getDrawer", args as unknown as JsonMap);
+  }
+
+  async listRawMemoriesByScope(args: {
+    wing?: string;
+    room?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<RawMemoryWorkItem[]> {
+    const res = await this.listDrawers({
+      wing: args.wing,
+      room: args.room,
+      limit: args.limit,
+      offset: args.offset,
+    });
+    return this.parseRawMemoryItems(res);
+  }
+
+  async findUnsynthesizedRawMemories(args: {
+    wing?: string;
+    room?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<RawMemoryWorkItem[]> {
+    const rawItems = await this.listRawMemoriesByScope(args);
+    const out: RawMemoryWorkItem[] = [];
+
+    for (const item of rawItems) {
+      try {
+        const desc = await this.getDescendants(item.drawer_id, 1);
+        const descendantIds = this.parseDescendantIds(desc).filter((id) => id !== item.drawer_id);
+        if (descendantIds.length === 0) {
+          out.push(item);
+        }
+      } catch {
+        // Conservative fallback: if descendant traversal fails, keep the item in
+        // the worklist so consolidation does not silently miss a raw memory.
+        out.push(item);
+      }
+    }
+
+    return out;
   }
 }
 
