@@ -36,7 +36,7 @@ function usage(): string {
     "  --start-dir <path>            directory to resolve scoped memory for (default: cwd)",
     "  --workspace-root <path>       explicit workspace root (default: auto-detect via package.json/.git)",
     "  --direct-file-name <name>     direct per-directory file name (default: memory.md)",
-    "  --store-roots <csv>           scoped store roots (default: eshepherd/memory,memory)",
+    "  --store-roots <csv>           scoped store roots (default: .electric-shepherd/memory)",
     "  --max-scopes <n>              max number of scopes from nearest ancestors (default: all)",
     "  --format <json|markdown>      output format (default: json)",
     "  --strict                      exit non-zero if no memory files are found",

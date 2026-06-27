@@ -36,13 +36,13 @@ sid="${ESHEPHERD_SESSION_ID:-}"
 event_type="${ESHEPHERD_EVENT_TYPE:-unknown}"
 
 if [[ -z "$sid" ]]; then
-  echo "capture-memraw: ESHEPHERD_SESSION_ID is required" >&2
+  echo "capture-source-transcripts: ESHEPHERD_SESSION_ID is required" >&2
   exit 2
 fi
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
-  echo "capture-memraw: missing required command: $1" >&2
+  echo "capture-source-transcripts: missing required command: $1" >&2
   exit 3
   fi
 }
@@ -52,7 +52,7 @@ require_cmd python
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 tmp_root="${TMPDIR:-/tmp}"
-tmpfile="$tmp_root/eshepherd_memraw_${sid}_${event_type}_${timestamp}.json"
+tmpfile="$tmp_root/eshepherd_source_capture_${sid}_${event_type}_${timestamp}.json"
 
 # Keep a local copy only when explicitly requested. MemPalace is the primary sink.
 capture_keep_local="${ESHEPHERD_CAPTURE_KEEP_LOCAL:-false}"
@@ -63,17 +63,17 @@ mcp_api_key="${MEMPALACE_MCP_API_KEY:-}"
 mcp_auth_header="${MEMPALACE_MCP_AUTH_HEADER:-Authorization}"
 mcp_auth_scheme="${MEMPALACE_MCP_AUTH_SCHEME:-}"
 mcp_headers_json="${MEMPALACE_MCP_HEADERS_JSON:-}"
-memraw_tool_prefix="${ESHEPHERD_MEMRAW_TOOL_PREFIX:-${MEMGRAPH_TOOL_PREFIX:-mempalace_}}"
-memraw_dedup_enabled="${ESHEPHERD_MEMRAW_DEDUP_ENABLED:-false}"
+source_capture_tool_prefix="${ESHEPHERD_SOURCE_CAPTURE_TOOL_PREFIX:-${MEMGRAPH_TOOL_PREFIX:-mempalace_}}"
+source_capture_dedup_enabled="${ESHEPHERD_SOURCE_CAPTURE_DEDUP_ENABLED:-false}"
 
 if [[ -z "$mcp_url" ]]; then
-  echo "capture-memraw: set MEMPALACE_MCP_URL (full MCP endpoint URL)" >&2
+  echo "capture-source-transcripts: set MEMPALACE_MCP_URL (full MCP endpoint URL)" >&2
   exit 5
 fi
 
-wing="${ESHEPHERD_MEMRAW_WING:-${ESHEPHERD_PROJECT_WING:-opencode}}"
-room="${ESHEPHERD_MEMRAW_ROOM:-mem-raw}"
-added_by="${ESHEPHERD_MEMRAW_ADDED_BY:-electric-shepherd-capture}"
+wing="${ESHEPHERD_SOURCE_CAPTURE_WING:-${ESHEPHERD_PROJECT_WING:-opencode}}"
+room="${ESHEPHERD_SOURCE_CAPTURE_ROOM:-source-transcripts}"
+added_by="${ESHEPHERD_SOURCE_CAPTURE_ADDED_BY:-electric-shepherd-capture}"
 source_file="opencode://session/${sid}/${event_type}/${timestamp}"
 
 cleanup() {
@@ -85,11 +85,11 @@ trap cleanup EXIT
 opencode --pure export "$sid" > "$tmpfile" 2>/dev/null
 
 if [[ ! -s "$tmpfile" ]]; then
-  echo "capture-memraw: export produced empty payload for session $sid" >&2
+  echo "capture-source-transcripts: export produced empty payload for session $sid" >&2
   exit 4
 fi
 
-python - "$tmpfile" "$mcp_url" "$mcp_api_key" "$wing" "$room" "$added_by" "$source_file" "$mcp_auth_header" "$mcp_auth_scheme" "$mcp_headers_json" "$memraw_tool_prefix" "$memraw_dedup_enabled" <<'PY'
+python - "$tmpfile" "$mcp_url" "$mcp_api_key" "$wing" "$room" "$added_by" "$source_file" "$mcp_auth_header" "$mcp_auth_scheme" "$mcp_headers_json" "$source_capture_tool_prefix" "$source_capture_dedup_enabled" <<'PY'
 import json
 import re
 import sys
@@ -215,7 +215,7 @@ with open(payload_path, "r", encoding="utf-8") as fh:
   content = fh.read().strip()
 
 if not content:
-  raise SystemExit("capture-memraw: exported payload is empty")
+  raise SystemExit("capture-source-transcripts: exported payload is empty")
 
 maybe_initialize()
 
@@ -254,7 +254,7 @@ add_resp = tool_call(
 )
 
 if add_resp.get("error"):
-  raise SystemExit(f"capture-memraw: add_drawer failed: {add_resp['error']}")
+  raise SystemExit(f"capture-source-transcripts: add_drawer failed: {add_resp['error']}")
 
 print(json.dumps({"status": "stored", "wing": wing, "room": room, "source_file": source_file}))
 PY

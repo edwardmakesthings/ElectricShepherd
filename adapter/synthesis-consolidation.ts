@@ -26,12 +26,14 @@ export type SynthesisConsolidationOptions = {
   query: string;
   targetWing: string;
   targetRoom: string;
+  targetHall?: string;
   searchLimit?: number;
   minimumDistinctSources?: number;
   minimumContentCharacters?: number;
   minimumPopulatedSections?: number;
   minimumMapperConfidence?: ConsolidationConfidence;
   labels?: string[];
+  writeDurableFactsToKg?: boolean;
   applyWrites?: boolean;
   mapperSummaries?: TranscriptInsightSummary[];
   rawEntries?: Array<{ id: string; text: string }>;
@@ -49,14 +51,14 @@ export type InflationGuardResult = {
  * Result produced by synthesis consolidation.
  */
 export type SynthesisConsolidationResult = {
-  phase: "synthesis-consolidation";
+  phase: "source-derived-consolidation";
   query: string;
   usedProvidedMapperSummaries: boolean;
   mapperSummaryCount: number;
   includedSummaryIds: string[];
   droppedSummaryIds: string[];
   sourceDrawerIds: string[];
-  synthesisDraft: {
+  consolidationDraft: {
     title: string;
     content: string;
     contentCharacters: number;
@@ -64,8 +66,21 @@ export type SynthesisConsolidationResult = {
     labels: string[];
   };
   inflationGuard: InflationGuardResult;
+  selectedHall?: string;
+  kgWrites?: {
+    attempted: number;
+    succeeded: number;
+    failed: number;
+    errors: string[];
+  };
   createdNodeId?: string;
   createResult?: Record<string, unknown>;
+};
+
+type DurableFactTriple = {
+  subject: string;
+  predicate: string;
+  object: string;
 };
 
 type GenericObject = Record<string, unknown>;
@@ -238,13 +253,106 @@ function confidenceAllows(confidence: ConsolidationConfidence, floor: Consolidat
   return CONFIDENCE_SCORE[confidence] >= CONFIDENCE_SCORE[floor];
 }
 
+function normalizeHall(value: string | undefined): string | undefined {
+  const raw = (value || "").trim().toLowerCase();
+  if (!raw) return undefined;
+  const allowed = new Set([
+    "hall_facts",
+    "hall_events",
+    "hall_discoveries",
+    "hall_preferences",
+    "hall_advice",
+  ]);
+  if (allowed.has(raw)) return raw;
+  return undefined;
+}
+
+function inferHallFromSummary(summary: TranscriptInsightSummary): string {
+  const lines = [
+    ...summary.durableFacts,
+    ...summary.decisions,
+    ...summary.rootCausesAndWorkedExamples,
+    ...summary.subsystemsAndFiles,
+    ...summary.openItems,
+  ].join("\n").toLowerCase();
+
+  if (/\b(prefer|preference|like|avoid|habit|style)\b/.test(lines)) return "hall_preferences";
+  if (/\b(should|must|recommend|advice|best practice|tip)\b/.test(lines)) return "hall_advice";
+  if (/\b(root cause|because|fixed|regression|incident|learned)\b/.test(lines)) return "hall_discoveries";
+  if (/\b(today|yesterday|timeline|happened|occurred|session|run)\b/.test(lines)) return "hall_events";
+  return "hall_facts";
+}
+
+function selectTargetHall(args: {
+  summaries: TranscriptInsightSummary[];
+  labels?: string[];
+  targetHall?: string;
+}): string {
+  const explicitTarget = normalizeHall(args.targetHall);
+  if (explicitTarget) return explicitTarget;
+  const explicit = (args.labels || []).map((label) => normalizeHall(label)).find(Boolean);
+  if (explicit) return explicit;
+
+  const counts = new Map<string, number>();
+  for (const summary of args.summaries) {
+    const hall = inferHallFromSummary(summary);
+    counts.set(hall, (counts.get(hall) || 0) + 1);
+  }
+  if (counts.size === 0) return "hall_discoveries";
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0][0];
+}
+
+function normalizePredicate(raw: string): string {
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "is" || normalized === "are" || normalized === "was" || normalized === "were") return "is";
+  if (normalized === "has" || normalized === "have") return "has";
+  if (normalized === "uses" || normalized === "use") return "uses";
+  if (normalized === "supports" || normalized === "support") return "supports";
+  if (normalized === "requires" || normalized === "require") return "requires";
+  if (normalized === "prefers" || normalized === "prefer") return "prefers";
+  if (normalized === "must" || normalized === "should" || normalized === "will") return "policy";
+  return normalized.replace(/\s+/g, "-");
+}
+
+function extractDurableFactTriples(summaries: TranscriptInsightSummary[], fallbackSubject: string): DurableFactTriple[] {
+  const out: DurableFactTriple[] = [];
+  const seen = new Set<string>();
+
+  for (const summary of summaries) {
+    for (const fact of summary.durableFacts) {
+      const text = fact.trim().replace(/[\s]+/g, " ");
+      if (!text) continue;
+
+      const simple = text.match(/^(.+?)\s+(is|are|was|were|has|have|uses|supports|requires|prefers|must|should|will)\s+(.+)$/i);
+      const triple: DurableFactTriple = simple
+        ? {
+            subject: simple[1].trim(),
+            predicate: normalizePredicate(simple[2]),
+            object: simple[3].trim().replace(/[.]+$/, ""),
+          }
+        : {
+            subject: fallbackSubject,
+            predicate: "durable-fact",
+            object: text,
+          };
+
+      const key = `${triple.subject}|${triple.predicate}|${triple.object}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(triple);
+    }
+  }
+
+  return out;
+}
+
 function chooseTitle(decisions: string[], durableFacts: string[], query: string): string {
   const first = decisions[0] || durableFacts[0] || query;
   const trimmed = first.replace(/\s+/g, " ").trim();
   return trimmed.length <= 140 ? trimmed : `${trimmed.slice(0, 137)}...`;
 }
 
-function buildSynthesisDraft(args: {
+function buildConsolidationDraft(args: {
   query: string;
   summaries: TranscriptInsightSummary[];
 }): {
@@ -263,7 +371,7 @@ function buildSynthesisDraft(args: {
   const title = chooseTitle(decisions, durableFacts, args.query);
 
   const content = [
-    `# Synthesis: ${title}`,
+    `# Consolidation: ${title}`,
     "",
     `Query focus: ${args.query}`,
     "",
@@ -304,10 +412,10 @@ function evaluateInflationGuard(args: {
     reasons.push(`requires at least ${args.minimumDistinctSources} distinct source drawers`);
   }
   if (args.contentCharacters < args.minimumContentCharacters) {
-    reasons.push(`requires synthesis content length >= ${args.minimumContentCharacters} chars`);
+    reasons.push(`requires consolidation content length >= ${args.minimumContentCharacters} chars`);
   }
   if (args.populatedSectionCount < args.minimumPopulatedSections) {
-    reasons.push(`requires at least ${args.minimumPopulatedSections} populated synthesis sections`);
+    reasons.push(`requires at least ${args.minimumPopulatedSections} populated consolidation sections`);
   }
   return {
     passed: reasons.length === 0,
@@ -340,6 +448,7 @@ export async function runSynthesisConsolidation(
   const minimumContentCharacters = Math.max(120, Number(options.minimumContentCharacters ?? 220));
   const minimumPopulatedSections = Math.max(2, Number(options.minimumPopulatedSections ?? 3));
   const applyWrites = Boolean(options.applyWrites);
+  const writeDurableFactsToKg = options.writeDurableFactsToKg ?? true;
 
   let summaries: TranscriptInsightSummary[] = [];
   let usedProvidedMapperSummaries = false;
@@ -359,12 +468,12 @@ export async function runSynthesisConsolidation(
   const dropped = summaries.filter((summary) => !confidenceAllows(summary.confidence, confidenceFloor));
 
   const sourceDrawerIds = uniqSorted(included.map((summary) => summary.transcriptId));
-  const synthesisDraft = buildSynthesisDraft({ query, summaries: included });
+  const consolidationDraft = buildConsolidationDraft({ query, summaries: included });
 
   const inflationGuard = evaluateInflationGuard({
     sourceDrawerIds,
-    contentCharacters: synthesisDraft.contentCharacters,
-    populatedSectionCount: synthesisDraft.populatedSectionCount,
+    contentCharacters: consolidationDraft.contentCharacters,
+    populatedSectionCount: consolidationDraft.populatedSectionCount,
     minimumDistinctSources,
     minimumContentCharacters,
     minimumPopulatedSections,
@@ -372,14 +481,16 @@ export async function runSynthesisConsolidation(
 
   let createdNodeId: string | undefined;
   let createResult: Record<string, unknown> | undefined;
+  let selectedHall: string | undefined;
+  let kgWrites: SynthesisConsolidationResult["kgWrites"];
 
   if (applyWrites && inflationGuard.passed) {
-    const create = await client.createSynthesisNode({
+    const create = await client.createDerivedDrawer({
       wing: targetWing,
       room: targetRoom,
-      content: synthesisDraft.content,
+      content: consolidationDraft.content,
       source_drawer_ids: sourceDrawerIds,
-      desc: synthesisDraft.title,
+      desc: consolidationDraft.title,
       labels: options.labels || [],
       added_by: "electric-shepherd-consolidation",
     });
@@ -387,25 +498,89 @@ export async function runSynthesisConsolidation(
 
     const createObj = asObject(create);
     const id = asString(createObj.node_id || createObj.drawer_id || createObj.id).trim();
-    if (id) createdNodeId = id;
+    if (id) {
+      createdNodeId = id;
+      selectedHall = selectTargetHall({
+        summaries: included,
+        labels: options.labels,
+        targetHall: options.targetHall,
+      });
+
+      const writes: Array<{ subject: string; predicate: string; object: string; source_closet?: string; valid_from?: string }> = [];
+      const writeErrors: string[] = [];
+      let writeSuccess = 0;
+
+      writes.push({
+        subject: id,
+        predicate: "in-hall",
+        object: selectedHall,
+        source_closet: id,
+      });
+
+      for (const summary of included) {
+        const hall = inferHallFromSummary(summary);
+        writes.push({
+          subject: summary.transcriptId,
+          predicate: "in-hall",
+          object: hall,
+          source_closet: id,
+        });
+      }
+
+      if (writeDurableFactsToKg) {
+        const now = new Date().toISOString().slice(0, 10);
+        for (const triple of extractDurableFactTriples(included, id)) {
+          writes.push({
+            subject: triple.subject,
+            predicate: triple.predicate,
+            object: triple.object,
+            source_closet: id,
+            valid_from: now,
+          });
+        }
+      }
+
+      const dedup = new Set<string>();
+      for (const write of writes) {
+        const key = `${write.subject}|${write.predicate}|${write.object}`;
+        if (dedup.has(key)) continue;
+        dedup.add(key);
+
+        try {
+          await client.kgAdd(write);
+          writeSuccess += 1;
+        } catch (err) {
+          writeErrors.push(String(err));
+        }
+      }
+
+      kgWrites = {
+        attempted: dedup.size,
+        succeeded: writeSuccess,
+        failed: dedup.size - writeSuccess,
+        errors: writeErrors,
+      };
+    }
   }
 
   return {
-    phase: "synthesis-consolidation",
+    phase: "source-derived-consolidation",
     query,
     usedProvidedMapperSummaries,
     mapperSummaryCount: summaries.length,
     includedSummaryIds: included.map((summary) => summary.transcriptId),
     droppedSummaryIds: dropped.map((summary) => summary.transcriptId),
     sourceDrawerIds,
-    synthesisDraft: {
-      title: synthesisDraft.title,
-      content: synthesisDraft.content,
-      contentCharacters: synthesisDraft.contentCharacters,
-      populatedSectionCount: synthesisDraft.populatedSectionCount,
+    consolidationDraft: {
+      title: consolidationDraft.title,
+      content: consolidationDraft.content,
+      contentCharacters: consolidationDraft.contentCharacters,
+      populatedSectionCount: consolidationDraft.populatedSectionCount,
       labels: options.labels || [],
     },
     inflationGuard,
+    selectedHall,
+    kgWrites,
     createdNodeId,
     createResult,
   };

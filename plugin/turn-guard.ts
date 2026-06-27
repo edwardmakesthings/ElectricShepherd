@@ -39,11 +39,11 @@ import {
   buildCommandExecutionPlan,
   clipText,
   computeMemcoreSignature,
-  decideAutoSynth,
+  decideAutoConsolidation,
   decideMemcoreInjection,
-  pruneAutoSynthTracking,
+  pruneAutoConsolidationTracking,
 } from "../adapter/turn-guard-helpers.ts"
-import type { AutoSynthTrigger, MemcoreInjectionRecord } from "../adapter/turn-guard-helpers.ts"
+import type { AutoConsolidationTrigger, MemcoreInjectionRecord } from "../adapter/turn-guard-helpers.ts"
 import { loadPackagedAssets, mergeWithoutOverride, loadInstructionPaths, dedupeAppendInstructions } from "../adapter/asset-loader.ts"
 import deleteDrawersTool from "../tools/delete_drawers.ts"
 
@@ -61,32 +61,32 @@ const START_BANNER = "[turn-guard] START"
 const MAX_RETRIES_PER_PARENT = 2
 const STATUS_DIR = ".electric-shepherd"
 const STATUS_FILE = "turn-guard-status.json"
-const AUTOSYNTH_LOG_FILE = "auto-synth.log"
+const AUTOCONSOLIDATION_LOG_FILE = "auto-consolidation.log"
 const DEFAULT_MEMCORE_MAX_CHARS = 12000
 const DEFAULT_MEMCORE_MAX_SCOPES = 6
 const DEFAULT_INJECTION_COOLDOWN_MS = 15000
 const DEFAULT_RETRY_ENABLED = false
-const DEFAULT_ALLOWED_SYNTH_WRITERS = ["dreamer", "dream-consolidator"]
-const SYNTH_WRITE_TOOL_NAMES = ["create_synthesis_node", "apply_merge"]
+const DEFAULT_ALLOWED_CONSOLIDATION_WRITERS = ["dreamer", "dream-consolidator"]
+const CONSOLIDATION_WRITE_TOOL_NAMES = ["add_drawer", "update_drawer", "kg_add", "kg_invalidate", "apply_merge"]
 
-// Automatic synthesis ("count-sheep in the background"): OPT-IN. When enabled,
+// Automatic consolidation ("count-sheep in the background"): OPT-IN. When enabled,
 // the plugin runs the deterministic consolidation script after the session has
 // either gone quiet for a delay (idle-timer) or accumulated enough new turns
 // (volume-threshold), and on compaction. The idle-timer is overridable: any new
 // message clears the pending timer so consolidation only runs once the session
 // has actually stayed quiet for the full delay.
-const DEFAULT_AUTOSYNTH_IDLE_DELAY_MS = 120000 // 2 minutes of quiet before idle-triggered synthesis
-const DEFAULT_AUTOSYNTH_MESSAGE_THRESHOLD = 12 // new assistant turns that force a synthesis pass
-const DEFAULT_AUTOSYNTH_COOLDOWN_MS = 600000 // 10 minutes minimum between auto-synth runs
-const DEFAULT_AUTOSYNTH_TIMEOUT_MS = 300000 // 5 minutes before a hung run is killed (also the lock staleness window)
-const AUTOSYNTH_LOCK_FILE = "auto-synth.lock"
-const DEFAULT_MEMRAW_CAPTURE_TIMEOUT_MS = 20000 // blocking capture call ceiling so a hung script can't freeze the session
+const DEFAULT_AUTOCONSOLIDATION_IDLE_DELAY_MS = 120000 // 2 minutes of quiet before idle-triggered consolidation
+const DEFAULT_AUTOCONSOLIDATION_MESSAGE_THRESHOLD = 12 // new assistant turns that force a consolidation pass
+const DEFAULT_AUTOCONSOLIDATION_COOLDOWN_MS = 600000 // 10 minutes minimum between auto-consolidation runs
+const DEFAULT_AUTOCONSOLIDATION_TIMEOUT_MS = 300000 // 5 minutes before a hung run is killed (also the lock staleness window)
+const AUTOCONSOLIDATION_LOCK_FILE = "auto-consolidation.lock"
+const DEFAULT_SOURCE_CAPTURE_TIMEOUT_MS = 20000 // blocking capture call ceiling so a hung script can't freeze the session
 const DEFAULT_MEMCORE_LOADER_TIMEOUT_MS = 15000 // blocking loader call ceiling
-// Bound the per-session auto-synth tracking maps so a long-lived process that
+// Bound the per-session auto-consolidation tracking maps so a long-lived process that
 // touches thousands of sessions cannot leak memory. Oldest (least-recently
 // inserted) sessions are evicted first; evicting a still-active session is
 // harmless (it is simply re-tracked on its next turn as if newly seen).
-const DEFAULT_AUTOSYNTH_MAX_TRACKED_SESSIONS = 512
+const DEFAULT_AUTOCONSOLIDATION_MAX_TRACKED_SESSIONS = 512
 
 // Checkpoint gating: only after real work, only in agents that learn durable facts.
 const MIN_TERMINAL_MESSAGES_BEFORE_CHECKPOINT = 4
@@ -224,31 +224,31 @@ function writeStatusFile(projectRoot: string, payload: Record<string, unknown>):
   }
 }
 
-function appendAutoSynthLog(projectRoot: string, line: string): void {
+function appendAutoConsolidationLog(projectRoot: string, line: string): void {
   try {
     const statusDir = join(projectRoot, STATUS_DIR)
     mkdirSync(statusDir, { recursive: true })
-    const logPath = join(statusDir, AUTOSYNTH_LOG_FILE)
+    const logPath = join(statusDir, AUTOCONSOLIDATION_LOG_FILE)
     appendFileSync(logPath, `${line}\n`, "utf8")
   } catch (err) {
-    console.error("[turn-guard] failed writing auto-synth log:", err)
+    console.error("[turn-guard] failed writing auto-consolidation log:", err)
   }
 }
 
 /**
- * Cross-process / orphan guard for auto-synth. A lockfile carries the owning pid
+ * Cross-process / orphan guard for auto-consolidation. A lockfile carries the owning pid
  * and a start timestamp; it is treated as stale once `staleMs` has elapsed, which
  * self-heals the case where a previous run was orphaned (e.g. OpenCode exited
  * before the background process finished) and never released the lock.
  *
- * Fails open on lock-I/O errors: synthesis should not be permanently blocked by a
+ * Fails open on lock-I/O errors: consolidation should not be permanently blocked by a
  * filesystem hiccup, and the in-process guard still prevents same-process overlap.
  */
-function acquireAutoSynthLock(projectRoot: string, payload: Record<string, unknown>, staleMs: number): boolean {
+function acquireAutoConsolidationLock(projectRoot: string, payload: Record<string, unknown>, staleMs: number): boolean {
   try {
     const dir = join(projectRoot, STATUS_DIR)
     mkdirSync(dir, { recursive: true })
-    const lockPath = join(dir, AUTOSYNTH_LOCK_FILE)
+    const lockPath = join(dir, AUTOCONSOLIDATION_LOCK_FILE)
     if (existsSync(lockPath)) {
       try {
         const raw = JSON.parse(readFileSync(lockPath, "utf8"))
@@ -267,23 +267,23 @@ function acquireAutoSynthLock(projectRoot: string, payload: Record<string, unkno
     )
     return true
   } catch (err) {
-    console.error("[turn-guard] auto-synth lock acquire failed (failing open):", err)
+    console.error("[turn-guard] auto-consolidation lock acquire failed (failing open):", err)
     return true
   }
 }
 
-function releaseAutoSynthLock(projectRoot: string): void {
+function releaseAutoConsolidationLock(projectRoot: string): void {
   try {
-    const lockPath = join(projectRoot, STATUS_DIR, AUTOSYNTH_LOCK_FILE)
+    const lockPath = join(projectRoot, STATUS_DIR, AUTOCONSOLIDATION_LOCK_FILE)
     if (existsSync(lockPath)) unlinkSync(lockPath)
   } catch (err) {
-    console.error("[turn-guard] auto-synth lock release failed:", err)
+    console.error("[turn-guard] auto-consolidation lock release failed:", err)
   }
 }
 
 /**
  * Kill a background run *and any children it spawned*. `child.kill()` only signals
- * the direct child, so a shell-wrapped `ESHEPHERD_AUTO_SYNTH_CMD` (or a runner that
+ * the direct child, so a shell-wrapped `ESHEPHERD_AUTO_CONSOLIDATION_CMD` (or a runner that
  * forks a grandchild) could be orphaned. On Windows we use `taskkill /T` to kill
  * the whole tree; on POSIX we signal the process group (the runs are spawned with
  * `detached: true` so the child is a group leader). Either path falls back to a
@@ -302,12 +302,12 @@ function killProcessTree(child: { pid?: number; kill: (signal?: string) => boole
       return
     }
   } catch (err) {
-    console.error("[turn-guard] auto-synth tree-kill failed; falling back to direct kill:", err)
+    console.error("[turn-guard] auto-consolidation tree-kill failed; falling back to direct kill:", err)
   }
   try {
     child.kill("SIGKILL")
   } catch (err) {
-    console.error("[turn-guard] auto-synth direct kill failed:", err)
+    console.error("[turn-guard] auto-consolidation direct kill failed:", err)
   }
 }
 
@@ -319,7 +319,7 @@ function loadMemcoreMarkdown(projectRoot: string, scopeDir: string): { markdown:
 
   const maxScopes = String(getNumberEnv("ESHEPHERD_MEMCORE_MAX_SCOPES", DEFAULT_MEMCORE_MAX_SCOPES))
   const directFileName = String(process?.env?.ESHEPHERD_MEMCORE_DIRECT_FILE || "memory.md")
-  const storeRoots = parseCSV(process?.env?.ESHEPHERD_MEMCORE_STORE_ROOTS || "eshepherd/memory,memory")
+  const storeRoots = parseCSV(process?.env?.ESHEPHERD_MEMCORE_STORE_ROOTS || ".electric-shepherd/memory")
 
   const args = [
     "--experimental-strip-types",
@@ -380,10 +380,10 @@ function getToolNames(msg: MessageWithParts): string[] {
   return names
 }
 
-function containsSynthWriteTool(toolNames: string[]): boolean {
+function containsConsolidationWriteTool(toolNames: string[]): boolean {
   return toolNames.some((name) => {
     const normalized = name.toLowerCase()
-    return SYNTH_WRITE_TOOL_NAMES.some((tail) => normalized.endsWith(tail))
+    return CONSOLIDATION_WRITE_TOOL_NAMES.some((tail) => normalized.endsWith(tail))
   })
 }
 
@@ -392,10 +392,10 @@ function getAgentIdentity(msg: MessageWithParts | null | undefined): string {
   return fromInfo
 }
 
-function runMemrawCaptureCommand(projectRoot: string, sid: string, eventType: string): { attempted: boolean; ok: boolean; output?: string; error?: string } {
-  const configured = String(process?.env?.ESHEPHERD_MEMRAW_CAPTURE_CMD || "").trim()
-  const defaultScript = join(projectRoot, "scripts", "capture-memraw.sh")
-  const command = configured || (existsSync(defaultScript) ? "bash ./scripts/capture-memraw.sh" : "")
+function runSourceCaptureCommand(projectRoot: string, sid: string, eventType: string): { attempted: boolean; ok: boolean; output?: string; error?: string } {
+  const configured = String(process?.env?.ESHEPHERD_SOURCE_CAPTURE_CMD || "").trim()
+  const defaultScript = join(projectRoot, "scripts", "capture-source-transcripts.sh")
+  const command = configured || (existsSync(defaultScript) ? "bash ./scripts/capture-source-transcripts.sh" : "")
   if (!command) {
     return { attempted: false, ok: false, error: "capture command not set and default script missing" }
   }
@@ -406,7 +406,7 @@ function runMemrawCaptureCommand(projectRoot: string, sid: string, eventType: st
       encoding: "utf8",
       maxBuffer: 2 * 1024 * 1024,
       stdio: ["ignore", "pipe", "pipe"],
-      timeout: getNumberEnv("ESHEPHERD_MEMRAW_CAPTURE_TIMEOUT_MS", DEFAULT_MEMRAW_CAPTURE_TIMEOUT_MS),
+      timeout: getNumberEnv("ESHEPHERD_SOURCE_CAPTURE_TIMEOUT_MS", DEFAULT_SOURCE_CAPTURE_TIMEOUT_MS),
       killSignal: "SIGKILL",
       env: {
         ...process.env,
@@ -590,25 +590,25 @@ export const TurnGuard = async ({ client, directory }: any) => {
   const retryEnabled = getBoolEnv("ESHEPHERD_RETRY_ENABLED", DEFAULT_RETRY_ENABLED)
   const retryDisabledAgents = toLowerSet(parseCSV(process?.env?.ESHEPHERD_RETRY_DISABLED_AGENTS))
   const retryDisabledModes = toLowerSet(parseCSV(process?.env?.ESHEPHERD_RETRY_DISABLED_MODES))
-  const synthWriteGuardEnabled = getBoolEnv("ESHEPHERD_SYNTH_WRITE_GUARD_ENABLED", true)
-  const memrawVerifyEnabled = getBoolEnv("ESHEPHERD_MEMRAW_VERIFY_ENABLED", true)
-  // Automatic synthesis is OFF unless explicitly opted in — it triggers memory
+  const consolidationWriteGuardEnabled = getBoolEnv("ESHEPHERD_CONSOLIDATION_WRITE_GUARD_ENABLED", true)
+  const sourceCaptureVerifyEnabled = getBoolEnv("ESHEPHERD_SOURCE_CAPTURE_VERIFY_ENABLED", true)
+  // Automatic consolidation is OFF unless explicitly opted in — it triggers memory
   // writes in the background, so callers must enable it deliberately.
-  const autoSynthEnabled = getBoolEnv("ESHEPHERD_AUTO_SYNTH_ENABLED", false)
-  const autoSynthOnIdle = getBoolEnv("ESHEPHERD_AUTO_SYNTH_ON_IDLE", true)
-  const autoSynthOnCompact = getBoolEnv("ESHEPHERD_AUTO_SYNTH_ON_COMPACT", true)
-  const autoSynthIdleDelayMs = getNumberEnv("ESHEPHERD_AUTO_SYNTH_IDLE_DELAY_MS", DEFAULT_AUTOSYNTH_IDLE_DELAY_MS)
-  const autoSynthMessageThreshold = getNumberEnv("ESHEPHERD_AUTO_SYNTH_MESSAGE_THRESHOLD", DEFAULT_AUTOSYNTH_MESSAGE_THRESHOLD)
-  const autoSynthCooldownMs = getNumberEnv("ESHEPHERD_AUTO_SYNTH_COOLDOWN_MS", DEFAULT_AUTOSYNTH_COOLDOWN_MS)
-  const autoSynthTimeoutMs = getNumberEnv("ESHEPHERD_AUTO_SYNTH_TIMEOUT_MS", DEFAULT_AUTOSYNTH_TIMEOUT_MS)
-  const autoSynthMaxTrackedSessions = getNumberEnv(
-    "ESHEPHERD_AUTO_SYNTH_MAX_TRACKED_SESSIONS",
-    DEFAULT_AUTOSYNTH_MAX_TRACKED_SESSIONS,
+  const autoConsolidationEnabled = getBoolEnv("ESHEPHERD_AUTO_CONSOLIDATION_ENABLED", false)
+  const autoConsolidationOnIdle = getBoolEnv("ESHEPHERD_AUTO_CONSOLIDATION_ON_IDLE", true)
+  const autoConsolidationOnCompact = getBoolEnv("ESHEPHERD_AUTO_CONSOLIDATION_ON_COMPACT", true)
+  const autoConsolidationIdleDelayMs = getNumberEnv("ESHEPHERD_AUTO_CONSOLIDATION_IDLE_DELAY_MS", DEFAULT_AUTOCONSOLIDATION_IDLE_DELAY_MS)
+  const autoConsolidationMessageThreshold = getNumberEnv("ESHEPHERD_AUTO_CONSOLIDATION_MESSAGE_THRESHOLD", DEFAULT_AUTOCONSOLIDATION_MESSAGE_THRESHOLD)
+  const autoConsolidationCooldownMs = getNumberEnv("ESHEPHERD_AUTO_CONSOLIDATION_COOLDOWN_MS", DEFAULT_AUTOCONSOLIDATION_COOLDOWN_MS)
+  const autoConsolidationTimeoutMs = getNumberEnv("ESHEPHERD_AUTO_CONSOLIDATION_TIMEOUT_MS", DEFAULT_AUTOCONSOLIDATION_TIMEOUT_MS)
+  const autoConsolidationMaxTrackedSessions = getNumberEnv(
+    "ESHEPHERD_AUTO_CONSOLIDATION_MAX_TRACKED_SESSIONS",
+    DEFAULT_AUTOCONSOLIDATION_MAX_TRACKED_SESSIONS,
   )
-  const allowedSynthWriters = new Set(
-    parseCSV(process?.env?.ESHEPHERD_ALLOWED_SYNTH_WRITERS).length > 0
-      ? parseCSV(process?.env?.ESHEPHERD_ALLOWED_SYNTH_WRITERS).map((item) => item.toLowerCase())
-      : DEFAULT_ALLOWED_SYNTH_WRITERS,
+  const allowedConsolidationWriters = new Set(
+    parseCSV(process?.env?.ESHEPHERD_ALLOWED_CONSOLIDATION_WRITERS).length > 0
+      ? parseCSV(process?.env?.ESHEPHERD_ALLOWED_CONSOLIDATION_WRITERS).map((item) => item.toLowerCase())
+      : DEFAULT_ALLOWED_CONSOLIDATION_WRITERS,
   )
 
   // --- retry state ---
@@ -624,22 +624,22 @@ export const TurnGuard = async ({ client, directory }: any) => {
   // single reply satisfies the "real work" gate within the first turn.
   const terminalCountBySession = new Map<string, number>()
   const memcoreInjectionBySession = new Map<string, { signature: string; at: number; scopeDir: string }>()
-  const warnedSynthWriteMessageIDs = new Set<string>()
-  const memrawCaptureBySession = new Map<string, { totalEvents: number; lastEvent: string; lastAt: string; lastSuccess: boolean }>()
+  const warnedConsolidationWriteMessageIDs = new Set<string>()
+  const sourceCaptureBySession = new Map<string, { totalEvents: number; lastEvent: string; lastAt: string; lastSuccess: boolean }>()
   // Tracks which compaction path actually ran for each session: "pre-compact-hook"
   // means the experimental.session.compacting hook fired before the summarizer;
   // "post-compact-fallback" means only the session.compacted event fired.
   const compactionPathBySession = new Map<string, { path: "pre-compact-hook" | "post-compact-fallback"; at: string }>()
 
-  // --- auto-synth state ---
+  // --- auto-consolidation state ---
   // Pending idle-delay timers (cleared/overridden when a new message arrives),
   // last-run timestamps for the cooldown throttle, and a count of new assistant
   // turns since the last run for the volume trigger. A single in-flight flag
   // prevents overlapping background consolidations across all sessions.
-  const autoSynthPendingTimer = new Map<string, ReturnType<typeof setTimeout>>()
-  const autoSynthLastRunAt = new Map<string, number>()
-  const autoSynthMessagesSinceRun = new Map<string, number>()
-  let autoSynthInFlight = false
+  const autoConsolidationPendingTimer = new Map<string, ReturnType<typeof setTimeout>>()
+  const autoConsolidationLastRunAt = new Map<string, number>()
+  const autoConsolidationMessagesSinceRun = new Map<string, number>()
+  let autoConsolidationInFlight = false
 
   function statusSnapshot(extra: Record<string, unknown> = {}): Record<string, unknown> {
     return {
@@ -653,20 +653,20 @@ export const TurnGuard = async ({ client, directory }: any) => {
       retryEnabled,
       retryDisabledAgents: [...retryDisabledAgents],
       retryDisabledModes: [...retryDisabledModes],
-      synthWriteGuardEnabled,
-      memrawVerifyEnabled,
-      autoSynthEnabled,
-      autoSynthOnIdle,
-      autoSynthOnCompact,
-      autoSynthIdleDelayMs,
-      autoSynthMessageThreshold,
-      autoSynthCooldownMs,
-      autoSynthTimeoutMs,
-      allowedSynthWriters: [...allowedSynthWriters],
+      consolidationWriteGuardEnabled,
+      sourceCaptureVerifyEnabled,
+      autoConsolidationEnabled,
+      autoConsolidationOnIdle,
+      autoConsolidationOnCompact,
+      autoConsolidationIdleDelayMs,
+      autoConsolidationMessageThreshold,
+      autoConsolidationCooldownMs,
+      autoConsolidationTimeoutMs,
+      allowedConsolidationWriters: [...allowedConsolidationWriters],
       sessions: {
         checkpointed: checkpointedSessions.size,
         memcoreInjected: memcoreInjectionBySession.size,
-        memrawCaptureTracked: memrawCaptureBySession.size,
+        sourceCaptureTracked: sourceCaptureBySession.size,
       },
       lastCompactionPath: compactionPathBySession.size > 0
         ? Object.fromEntries([...compactionPathBySession.entries()].slice(-10))
@@ -735,7 +735,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
             text:
               `${MEMCORE_REINJECT_MARKER} Refreshing scoped mem-core for this session (reason=${args.reason}). ` +
               `Use this as the currently active resident memory for scope: ${scopeDir}. ` +
-              "This is derived render output from mem-synth; do not hand-edit mem-core files.\n\n" +
+              "This is derived render output from derived memory; do not hand-edit mem-core files.\n\n" +
               clipped,
           },
         ],
@@ -777,19 +777,19 @@ export const TurnGuard = async ({ client, directory }: any) => {
   }
 
   async function maybeWarnWriteAuthority(sid: string, msg: MessageWithParts): Promise<boolean> {
-    if (!synthWriteGuardEnabled) return false
+    if (!consolidationWriteGuardEnabled) return false
 
     const msgID = String(msg?.info?.id ?? "")
-    if (msgID && warnedSynthWriteMessageIDs.has(msgID)) return false
+    if (msgID && warnedConsolidationWriteMessageIDs.has(msgID)) return false
 
     const toolNames = getToolNames(msg)
-    if (toolNames.length === 0 || !containsSynthWriteTool(toolNames)) return false
+    if (toolNames.length === 0 || !containsConsolidationWriteTool(toolNames)) return false
 
     const actor = getAgentIdentity(msg)
-    const authorized = allowedSynthWriters.has(actor)
+    const authorized = allowedConsolidationWriters.has(actor)
     if (authorized) return false
 
-    if (msgID) warnedSynthWriteMessageIDs.add(msgID)
+    if (msgID) warnedConsolidationWriteMessageIDs.add(msgID)
     const namesJoined = toolNames.join(", ")
     console.log(`[turn-guard] write-authority alert sid=${sid} actor=${actor || "unknown"} tools=${namesJoined}`)
 
@@ -809,11 +809,11 @@ export const TurnGuard = async ({ client, directory }: any) => {
           {
             type: "text",
             text:
-              `${WRITE_AUTHORITY_MARKER} mem-synth write tools are restricted to dreamer agents (` +
-              `${[...allowedSynthWriters].join(", ")}). ` +
+              `${WRITE_AUTHORITY_MARKER} derived memory write tools are restricted to dreamer agents (` +
+              `${[...allowedConsolidationWriters].join(", ")}). ` +
               `This turn attempted: ${namesJoined}. ` +
-              "Do not call create_synthesis_node/apply_merge from interactive build/plan flows. " +
-              "Use diary/add_drawer/kg writes for raw findings and defer synthesis-node writes to the dreamer.",
+              "Do not call add_drawer/update_drawer/kg_add/kg_invalidate/apply_merge from interactive build/plan flows unless this is an explicit consolidation pass. " +
+              "Use diary_write for ordinary findings and reserve derived-memory writes for dreamer consolidation.",
           },
         ],
       }
@@ -831,21 +831,21 @@ export const TurnGuard = async ({ client, directory }: any) => {
     return true
   }
 
-  function verifyMemrawCapture(sid: string, eventType: string): void {
-    if (!memrawVerifyEnabled) return
+  function verifySourceCapture(sid: string, eventType: string): void {
+    if (!sourceCaptureVerifyEnabled) return
 
-    const result = runMemrawCaptureCommand(projectRoot, sid, eventType)
-    const prev = memrawCaptureBySession.get(sid)
+    const result = runSourceCaptureCommand(projectRoot, sid, eventType)
+    const prev = sourceCaptureBySession.get(sid)
     const next = {
       totalEvents: Number(prev?.totalEvents || 0) + 1,
       lastEvent: eventType,
       lastAt: new Date().toISOString(),
       lastSuccess: result.ok,
     }
-    memrawCaptureBySession.set(sid, next)
+    sourceCaptureBySession.set(sid, next)
 
     writeStatusFile(projectRoot, statusSnapshot({
-      type: "memraw-capture-verify",
+      type: "source-capture-verify",
       sid,
       eventType,
       capture: result,
@@ -853,28 +853,28 @@ export const TurnGuard = async ({ client, directory }: any) => {
     }))
 
     if (!result.attempted) {
-      console.log("[turn-guard] mem-raw capture verification: command not configured and default script not found")
+      console.log("[turn-guard] source transcript capture verification: command not configured and default script not found")
     }
   }
 
   // Spawn the deterministic consolidation script in the background. Deterministic
   // (no live mapper) so it never forces a model load. The caller has already set
-  // autoSynthInFlight and acquired the cross-process lock; this function owns the
+  // autoConsolidationInFlight and acquired the cross-process lock; this function owns the
   // process lifecycle and is the SOLE place that clears both, via settle().
   //
   // Robustness:
   //   - The default path spawns `node` directly (no shell) so the watchdog can
   //     actually kill the process tree; a user-provided command is free-form and
   //     needs a shell.
-  //   - A watchdog kills a run that exceeds autoSynthTimeoutMs, so a hung MCP
+  //   - A watchdog kills a run that exceeds autoConsolidationTimeoutMs, so a hung MCP
   //     endpoint can never wedge the in-flight flag permanently.
   //   - settle() is idempotent, so exit/error/timeout racing each other only
   //     clears state once.
   function runConsolidationCommand(sid: string, trigger: string, onStartFailure?: () => void): void {
-    const configured = String(process?.env?.ESHEPHERD_AUTO_SYNTH_CMD || "").trim()
+    const configured = String(process?.env?.ESHEPHERD_AUTO_CONSOLIDATION_CMD || "").trim()
     const startedAt = new Date().toISOString()
-    console.log(`[turn-guard] auto-synth start sid=${sid} trigger=${trigger}`)
-    writeStatusFile(projectRoot, statusSnapshot({ type: "auto-synth-start", sid, trigger, startedAt }))
+    console.log(`[turn-guard] auto-consolidation start sid=${sid} trigger=${trigger}`)
+    writeStatusFile(projectRoot, statusSnapshot({ type: "auto-consolidation-start", sid, trigger, startedAt }))
 
     let settled = false
     let watchdog: ReturnType<typeof setTimeout> | null = null
@@ -885,8 +885,8 @@ export const TurnGuard = async ({ client, directory }: any) => {
         clearTimeout(watchdog)
         watchdog = null
       }
-      autoSynthInFlight = false
-      releaseAutoSynthLock(projectRoot)
+      autoConsolidationInFlight = false
+      releaseAutoConsolidationLock(projectRoot)
       // A run that never actually started should not consume the cooldown, so a
       // later trigger can retry promptly. A run that started and then failed/timed
       // out keeps the cooldown (anti-thrash).
@@ -894,11 +894,11 @@ export const TurnGuard = async ({ client, directory }: any) => {
         try {
           onStartFailure?.()
         } catch (err) {
-          console.error("[turn-guard] auto-synth start-failure rollback failed:", err)
+          console.error("[turn-guard] auto-consolidation start-failure rollback failed:", err)
         }
       }
       writeStatusFile(projectRoot, statusSnapshot({ ...status, finishedAt: new Date().toISOString() }))
-      appendAutoSynthLog(
+      appendAutoConsolidationLog(
         projectRoot,
         `${new Date().toISOString()} [finish] sid=${sid} trigger=${trigger} status=${JSON.stringify(status)}`,
       )
@@ -908,12 +908,12 @@ export const TurnGuard = async ({ client, directory }: any) => {
       const childEnv = {
         ...process.env,
         ESHEPHERD_SESSION_ID: sid,
-        ESHEPHERD_EVENT_TYPE: `auto-synth:${trigger}`,
+        ESHEPHERD_EVENT_TYPE: `auto-consolidation:${trigger}`,
         // The plugin already holds the shared lock; tell the child runner not to
         // re-acquire (or release) it so the plugin->script handoff doesn't
         // deadlock against itself. Standalone cron/n8n runs lack this flag and
         // take the lock themselves.
-        ESHEPHERD_SYNTH_LOCK_INHERITED: "1",
+        ESHEPHERD_CONSOLIDATION_LOCK_INHERITED: "1",
       }
       // detached:true makes the child a process-group leader on POSIX so the
       // watchdog can kill the entire tree (see killProcessTree); harmless on
@@ -922,17 +922,17 @@ export const TurnGuard = async ({ client, directory }: any) => {
       const plan = buildCommandExecutionPlan({
         configured,
         projectRoot,
-        defaultScript: join(projectRoot, "scripts", "capture-memraw.sh"),
+        defaultScript: join(projectRoot, "scripts", "capture-source-transcripts.sh"),
       })
 
       if (plan.mode === "rejected") {
-        console.error(`[turn-guard] auto-synth rejected unsafe command: ${plan.reason}`)
-        settle({ type: "auto-synth-rejected", sid, trigger, reason: plan.reason }, true)
+        console.error(`[turn-guard] auto-consolidation rejected unsafe command: ${plan.reason}`)
+        settle({ type: "auto-consolidation-rejected", sid, trigger, reason: plan.reason }, true)
         return
       }
 
-      const logPath = join(projectRoot, STATUS_DIR, AUTOSYNTH_LOG_FILE)
-      appendAutoSynthLog(
+      const logPath = join(projectRoot, STATUS_DIR, AUTOCONSOLIDATION_LOG_FILE)
+      appendAutoConsolidationLog(
         projectRoot,
         `${new Date().toISOString()} [start] sid=${sid} trigger=${trigger} command=${plan.command} args=${JSON.stringify(plan.args)} logPath=${logPath}`,
       )
@@ -948,35 +948,35 @@ export const TurnGuard = async ({ client, directory }: any) => {
       child.stdout?.on("data", (chunk: Buffer | string) => {
         const text = String(chunk ?? "").trim()
         if (!text) return
-        appendAutoSynthLog(projectRoot, `${new Date().toISOString()} [stdout] sid=${sid} ${text}`)
+        appendAutoConsolidationLog(projectRoot, `${new Date().toISOString()} [stdout] sid=${sid} ${text}`)
       })
       child.stderr?.on("data", (chunk: Buffer | string) => {
         const text = String(chunk ?? "").trim()
         if (!text) return
-        appendAutoSynthLog(projectRoot, `${new Date().toISOString()} [stderr] sid=${sid} ${text}`)
+        appendAutoConsolidationLog(projectRoot, `${new Date().toISOString()} [stderr] sid=${sid} ${text}`)
       })
 
       watchdog = setTimeout(() => {
         console.error(
-          `[turn-guard] auto-synth timeout sid=${sid} trigger=${trigger} after ${autoSynthTimeoutMs}ms; killing`,
+          `[turn-guard] auto-consolidation timeout sid=${sid} trigger=${trigger} after ${autoConsolidationTimeoutMs}ms; killing`,
         )
         killProcessTree(child)
-        settle({ type: "auto-synth-timeout", sid, trigger, timeoutMs: autoSynthTimeoutMs })
-      }, autoSynthTimeoutMs)
+        settle({ type: "auto-consolidation-timeout", sid, trigger, timeoutMs: autoConsolidationTimeoutMs })
+      }, autoConsolidationTimeoutMs)
       watchdog.unref?.()
 
       child.on("error", (err: unknown) => {
-        console.error("[turn-guard] auto-synth spawn error:", err)
-        settle({ type: "auto-synth-error", sid, trigger, error: String(err) }, true)
+        console.error("[turn-guard] auto-consolidation spawn error:", err)
+        settle({ type: "auto-consolidation-error", sid, trigger, error: String(err) }, true)
       })
       child.on("exit", (code: number | null) => {
-        console.log(`[turn-guard] auto-synth finished sid=${sid} trigger=${trigger} code=${String(code)}`)
-        settle({ type: "auto-synth-finish", sid, trigger, exitCode: code })
+        console.log(`[turn-guard] auto-consolidation finished sid=${sid} trigger=${trigger} code=${String(code)}`)
+        settle({ type: "auto-consolidation-finish", sid, trigger, exitCode: code })
       })
       child.unref?.()
     } catch (err) {
-      console.error("[turn-guard] auto-synth failed to start:", err)
-      settle({ type: "auto-synth-error", sid, trigger, error: String(err) }, true)
+      console.error("[turn-guard] auto-consolidation failed to start:", err)
+      settle({ type: "auto-consolidation-error", sid, trigger, error: String(err) }, true)
     }
   }
 
@@ -984,23 +984,23 @@ export const TurnGuard = async ({ client, directory }: any) => {
   // cross-process lock and start a run. State (cooldown stamp, message reset,
   // in-flight) is only stamped once the lock is held, so a run blocked by another
   // process/instance can still fire on a later trigger.
-  function evaluateAutoSynth(sid: string, trigger: AutoSynthTrigger): void {
-    const messagesSinceRun = autoSynthMessagesSinceRun.get(sid) ?? 0
-    const decision = decideAutoSynth({
-      enabled: autoSynthEnabled,
+  function evaluateAutoConsolidation(sid: string, trigger: AutoConsolidationTrigger): void {
+    const messagesSinceRun = autoConsolidationMessagesSinceRun.get(sid) ?? 0
+    const decision = decideAutoConsolidation({
+      enabled: autoConsolidationEnabled,
       now: Date.now(),
-      lastRunAt: autoSynthLastRunAt.get(sid) ?? null,
-      cooldownMs: autoSynthCooldownMs,
+      lastRunAt: autoConsolidationLastRunAt.get(sid) ?? null,
+      cooldownMs: autoConsolidationCooldownMs,
       messagesSinceRun,
-      messageThreshold: autoSynthMessageThreshold,
+      messageThreshold: autoConsolidationMessageThreshold,
       trigger,
-      inFlight: autoSynthInFlight,
+      inFlight: autoConsolidationInFlight,
     })
 
     if (!decision.shouldRun) {
-      if (autoSynthEnabled) {
+      if (autoConsolidationEnabled) {
         console.log(
-          `[turn-guard] auto-synth skip sid=${sid} trigger=${trigger} reason=${decision.reason} msgsSince=${messagesSinceRun}`,
+          `[turn-guard] auto-consolidation skip sid=${sid} trigger=${trigger} reason=${decision.reason} msgsSince=${messagesSinceRun}`,
         )
       }
       return
@@ -1009,55 +1009,55 @@ export const TurnGuard = async ({ client, directory }: any) => {
     // Claim the cross-process lock before stamping any state. If another instance
     // (or n8n/cron) is mid-run, skip without consuming the cooldown so a later
     // trigger can retry.
-    if (!acquireAutoSynthLock(projectRoot, { sid, trigger: decision.reason }, autoSynthTimeoutMs)) {
-      console.log(`[turn-guard] auto-synth skip sid=${sid} trigger=${trigger} reason=locked`)
-      writeStatusFile(projectRoot, statusSnapshot({ type: "auto-synth-skip", sid, trigger, reason: "locked" }))
+    if (!acquireAutoConsolidationLock(projectRoot, { sid, trigger: decision.reason }, autoConsolidationTimeoutMs)) {
+      console.log(`[turn-guard] auto-consolidation skip sid=${sid} trigger=${trigger} reason=locked`)
+      writeStatusFile(projectRoot, statusSnapshot({ type: "auto-consolidation-skip", sid, trigger, reason: "locked" }))
       return
     }
 
-    autoSynthInFlight = true
-    const previousLastRunAt = autoSynthLastRunAt.get(sid) ?? null
-    autoSynthLastRunAt.set(sid, Date.now())
-    autoSynthMessagesSinceRun.set(sid, 0)
-    pruneAutoSynthTracking(autoSynthMessagesSinceRun, autoSynthLastRunAt, autoSynthMaxTrackedSessions)
+    autoConsolidationInFlight = true
+    const previousLastRunAt = autoConsolidationLastRunAt.get(sid) ?? null
+    autoConsolidationLastRunAt.set(sid, Date.now())
+    autoConsolidationMessagesSinceRun.set(sid, 0)
+    pruneAutoConsolidationTracking(autoConsolidationMessagesSinceRun, autoConsolidationLastRunAt, autoConsolidationMaxTrackedSessions)
     // If the run never actually starts, undo the cooldown stamp so the next
     // trigger can retry immediately instead of waiting out a phantom cooldown.
     runConsolidationCommand(sid, decision.reason, () => {
-      if (previousLastRunAt === null) autoSynthLastRunAt.delete(sid)
-      else autoSynthLastRunAt.set(sid, previousLastRunAt)
+      if (previousLastRunAt === null) autoConsolidationLastRunAt.delete(sid)
+      else autoConsolidationLastRunAt.set(sid, previousLastRunAt)
     })
   }
 
   // Arm/replace the idle-delay timer. The timer represents \"stayed quiet for the
   // full delay\"; a new message clears it (see onMessageUpdated) so it is the
   // overridable delay rather than a fixed schedule.
-  function armAutoSynthIdleTimer(sid: string): void {
-    if (!autoSynthEnabled || !autoSynthOnIdle) return
-    const existing = autoSynthPendingTimer.get(sid)
+  function armAutoConsolidationIdleTimer(sid: string): void {
+    if (!autoConsolidationEnabled || !autoConsolidationOnIdle) return
+    const existing = autoConsolidationPendingTimer.get(sid)
     if (existing) clearTimeout(existing)
     const timer = setTimeout(() => {
-      autoSynthPendingTimer.delete(sid)
-      evaluateAutoSynth(sid, "idle-timer")
-    }, autoSynthIdleDelayMs)
+      autoConsolidationPendingTimer.delete(sid)
+      evaluateAutoConsolidation(sid, "idle-timer")
+    }, autoConsolidationIdleDelayMs)
     timer.unref?.()
-    autoSynthPendingTimer.set(sid, timer)
-    writeStatusFile(projectRoot, statusSnapshot({ type: "auto-synth-armed", sid, idleDelayMs: autoSynthIdleDelayMs }))
+    autoConsolidationPendingTimer.set(sid, timer)
+    writeStatusFile(projectRoot, statusSnapshot({ type: "auto-consolidation-armed", sid, idleDelayMs: autoConsolidationIdleDelayMs }))
   }
 
   // A new message means the session is active again: cancel any pending
   // idle-triggered run and, for terminal assistant turns, advance the volume
   // counter and eagerly evaluate the volume trigger.
-  function noteAutoSynthActivity(sid: string, info: any): void {
-    if (!autoSynthEnabled) return
-    const pending = autoSynthPendingTimer.get(sid)
+  function noteAutoConsolidationActivity(sid: string, info: any): void {
+    if (!autoConsolidationEnabled) return
+    const pending = autoConsolidationPendingTimer.get(sid)
     if (pending) {
       clearTimeout(pending)
-      autoSynthPendingTimer.delete(sid)
+      autoConsolidationPendingTimer.delete(sid)
     }
     if (info?.role === "assistant" && info?.finish) {
-      autoSynthMessagesSinceRun.set(sid, (autoSynthMessagesSinceRun.get(sid) ?? 0) + 1)
-      pruneAutoSynthTracking(autoSynthMessagesSinceRun, autoSynthLastRunAt, autoSynthMaxTrackedSessions)
-      evaluateAutoSynth(sid, "volume")
+      autoConsolidationMessagesSinceRun.set(sid, (autoConsolidationMessagesSinceRun.get(sid) ?? 0) + 1)
+      pruneAutoConsolidationTracking(autoConsolidationMessagesSinceRun, autoConsolidationLastRunAt, autoConsolidationMaxTrackedSessions)
+      evaluateAutoConsolidation(sid, "volume")
     }
   }
 
@@ -1247,12 +1247,12 @@ export const TurnGuard = async ({ client, directory }: any) => {
               `- project-state — architecture, active work, or a major decision changed?\n` +
               `- active-conventions — a naming/style/structural/tooling rule changed?\n` +
               `- user-preferences — a new durable preference was stated?\n` +
-              `For each durable STATE change, write/update the corresponding mem-synth fact using ` +
-              `add_drawer, kg_add, or create_synthesis_node (the same durable layer used in PART 2).\n` +
-              `mem-core is a deterministic file-only render regenerated by the consolidation runtime from mem-synth. ` +
+              `For each durable STATE change, write/update the corresponding derived memory fact using ` +
+              `add_drawer plus kg_add lineage/fact edges (the same durable layer used in PART 2).\n` +
+              `mem-core is a deterministic file-only render regenerated by the consolidation runtime from derived memory. ` +
               `Do NOT hand-edit mem-core files and do NOT write any context-blocks drawer for mem-core.\n\n` +
               `PART 2 — was substantive WORK done or something LEARNED? (diary / worked example)\n` +
-              `This applies EVEN IF no block changed. Save a synthesized entry if any happened:\n` +
+              `This applies EVEN IF no block changed. Save a derived entry if any happened:\n` +
               `- a feature/fix was implemented (what was built, where, key choices),\n` +
               `- a bug's root cause was found (the cause, not just the fix),\n` +
               `- a non-obvious "how/why this works" was discovered,\n` +
@@ -1309,9 +1309,9 @@ export const TurnGuard = async ({ client, directory }: any) => {
       terminalCountBySession.set(sid, (terminalCountBySession.get(sid) ?? 0) + 1)
     }
 
-    // Auto-synth: a new message cancels any pending idle run and advances the
-    // volume counter; harmless no-op when auto-synth is disabled.
-    noteAutoSynthActivity(sid, info)
+    // Auto-consolidation: a new message cancels any pending idle run and advances the
+    // volume counter; harmless no-op when auto-consolidation is disabled.
+    noteAutoConsolidationActivity(sid, info)
 
     try {
       const messageID = String(info?.id ?? "")
@@ -1333,7 +1333,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
       // When retry is disabled, skip parent fetch and all heuristic evaluation —
       // zero extra overhead per message.
       if (!retryEnabled) {
-        verifyMemrawCapture(sid, "message.stop")
+        verifySourceCapture(sid, "message.stop")
         return
       }
 
@@ -1345,7 +1345,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
         query: { directory },
       })
       const parent = unwrapMessageResult(parentRes)
-      verifyMemrawCapture(sid, "message.stop")
+      verifySourceCapture(sid, "message.stop")
 
       // message.updated only handles retries; checkpoint is idle-only.
       await issueRetry(sid, current, parent)
@@ -1394,7 +1394,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
 
       // Arm the overridable idle-delay timer: consolidation fires only if the
       // session stays quiet for the full delay (a new message cancels it).
-      armAutoSynthIdleTimer(sid)
+      armAutoConsolidationIdleTimer(sid)
     } catch (err) {
       console.error("[turn-guard] failed:", err)
     }
@@ -1404,7 +1404,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
     const sid = String(event?.properties?.sessionID ?? findSessionID(event))
     if (!sid) return
 
-    verifyMemrawCapture(sid, "session.compacted")
+    verifySourceCapture(sid, "session.compacted")
 
     // PRIMARY mem-core injection is the experimental.session.compacting pre-hook.
     // This handler is a post-compaction fallback: re-inject only when the pre-hook
@@ -1423,9 +1423,9 @@ export const TurnGuard = async ({ client, directory }: any) => {
       console.log(`[turn-guard] post-compact event: pre-compact hook already ran for sid=${sid}, skipping re-injection`)
     }
 
-    // Compaction is a natural consolidation point; run auto-synth if enabled.
-    if (autoSynthOnCompact) {
-      evaluateAutoSynth(sid, "compacted")
+    // Compaction is a natural consolidation point; run auto-consolidation if enabled.
+    if (autoConsolidationOnCompact) {
+      evaluateAutoConsolidation(sid, "compacted")
     }
   }
 

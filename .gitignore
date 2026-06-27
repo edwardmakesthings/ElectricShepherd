@@ -222,8 +222,8 @@ __marimo__/
 .electric-shepherd/
 .electric-shepherd-cadence-state.json
 # Rendered mem-core output only (synthesized personal memory — never commit).
-# Note: this does NOT ignore the entire /eshepherd tree.
-/eshepherd/memory/
+# Note: this does NOT ignore the entire .electric-shepherd tree.
+.electric-shepherd/memory/
 /memory/
 node_modules/
 .serena/

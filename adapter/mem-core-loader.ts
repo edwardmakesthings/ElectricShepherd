@@ -88,7 +88,7 @@ export function loadMemcoreForDirectory(options: MemcoreLoadOptions): MemcoreLoa
   const directFileName = options.directFileName || "memory.md";
   const storeRoots = (options.storeRoots && options.storeRoots.length > 0
     ? options.storeRoots
-    : ["eshepherd/memory", "memory"]
+    : [".electric-shepherd/memory"]
   ).map((root) => toAbsoluteStoreRoot(workspaceRoot, root));
   const maxScopes = Math.max(0, Number(options.maxScopes ?? 0));
 

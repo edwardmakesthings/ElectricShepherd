@@ -32,7 +32,7 @@ test("buildCommandExecutionPlan preserves a safe exec-only command", () => {
   const plan = buildCommandExecutionPlan({
     configured: "node scripts/run-policy-cycle.ts",
     projectRoot: "/tmp/repo",
-    defaultScript: "/tmp/repo/scripts/capture-memraw.sh",
+    defaultScript: "/tmp/repo/scripts/capture-source-transcripts.sh",
   });
 
   assert.equal(plan.mode, "exec");
@@ -42,9 +42,9 @@ test("buildCommandExecutionPlan preserves a safe exec-only command", () => {
 
 test("buildCommandExecutionPlan rejects a shell string with unsafe content", () => {
   const plan = buildCommandExecutionPlan({
-    configured: "bash ./scripts/capture-memraw.sh && echo hi",
+    configured: "bash ./scripts/capture-source-transcripts.sh && echo hi",
     projectRoot: "/tmp/repo",
-    defaultScript: "/tmp/repo/scripts/capture-memraw.sh",
+    defaultScript: "/tmp/repo/scripts/capture-source-transcripts.sh",
   });
 
   assert.equal(plan.mode, "rejected");

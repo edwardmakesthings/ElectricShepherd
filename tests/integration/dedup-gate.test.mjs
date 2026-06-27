@@ -4,10 +4,10 @@ import test, { after, before } from "node:test";
 import { createTestRoom, isIntegrationEnabled } from "../helpers/mempalace-room-fixture.mjs";
 
 /**
- * Integration coverage for the mem_raw dedup CAPTURE GATE contract.
+ * Integration coverage for the source transcript dedup CAPTURE GATE contract.
  *
- * `scripts/capture-memraw.sh` makes a simple, important decision before every
- * mem_raw write: when dedup is enabled it asks MemPalace `check_duplicate` and
+ * `scripts/capture-source-transcripts.sh` makes a simple, important decision before every
+ * source transcript write: when dedup is enabled it asks MemPalace `check_duplicate` and
  * skips the write if the content is a duplicate; when dedup is disabled it
  * always appends. This test pins that gate behavior against a real endpoint by
  * mirroring the script's decision in `decideCapture`, so a regression in the
@@ -39,7 +39,7 @@ after(async () => {
 });
 
 /**
- * Mirror of the capture-memraw.sh decision: when dedup is enabled, consult
+ * Mirror of the capture-source-transcripts.sh decision: when dedup is enabled, consult
  * `check_duplicate` and skip on a hit; otherwise (or on a miss) append.
  */
 async function decideCapture(fixture, content, dedupEnabled) {
@@ -55,7 +55,7 @@ async function decideCapture(fixture, content, dedupEnabled) {
 
 test("dedup gate skips duplicates when enabled and appends when disabled", { skip: !runIntegration }, async () => {
   const content =
-    "ElectricShepherd dedup-gate fixture: capture-memraw must skip identical mem_raw " +
+    "ElectricShepherd dedup-gate fixture: capture-source-transcripts must skip identical source transcript " +
     "content when dedup is enabled and append it when dedup is disabled.";
 
   // Seed an identical baseline so the same text is a genuine duplicate.

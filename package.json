@@ -34,7 +34,7 @@
     "policy:cadence": "node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts --run-cadence --cadence-mode plan",
     "policy:cadence:execute": "node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts --run-cadence --cadence-mode execute",
     "policy:mem-core:load": "node --experimental-strip-types scripts/run-mem-core-loader.ts",
-    "policy:mem-core:rebuild": "node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts --all --mem-core-file eshepherd/memory/memory.md",
+    "policy:mem-core:rebuild": "node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts --all --mem-core-file .electric-shepherd/memory/memory.md",
     "sheep:count": "node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts --apply",
     "sheep:herd": "node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts --run-cadence --cadence-mode plan",
     "sheep:lucid-dream": "node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts --run-cadence --cadence-mode execute --apply --apply-merges",

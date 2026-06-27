@@ -1,13 +1,13 @@
 ---
 name: eshepherd
-description: MemPalace MCP tool reference for Electric Shepherd. Use when doing memory-intensive work — the dreamer, retrieval expansion, synthesis nodes, or any session that reads or writes to the memory palace. Covers all 46 tools across palace read/write, knowledge graph, synthesis DAG, navigation, diary, and system operations.
+description: MemPalace MCP tool reference for Electric Shepherd. Use when doing memory-intensive work — the dreamer, retrieval expansion, derived-drawer lineage, or any session that reads or writes to the memory palace. Covers all core tools across palace read/write, knowledge graph, lineage/merge operations, navigation, diary, and system operations.
 ---
 
 # MemPalace Tool Reference — Electric Shepherd
 
-Complete reference for all 46 MemPalace MCP tools, with Electric Shepherd–specific policy
+Complete reference for MemPalace MCP tools, with Electric Shepherd–specific policy
 guidance. Load this file in `instructions` when doing memory-intensive work (the dreamer,
-retrieval expansion, or any session that reads or writes synthesis nodes).
+retrieval expansion, or any session that reads or writes derived drawers).
 
 ---
 
@@ -66,21 +66,21 @@ consult this table first.
 | Chronological timeline of an entity | `mempalace_kg_timeline` |
 | KG overview (entity/triple counts) | `mempalace_kg_stats` |
 
-### Synthesis Graph (mem-synth DAG)
+### Synthesis Graph (native drawer + KG lineage)
 
 | What you want to do | Tool |
 |---|---|
-| Create a synthesis node from ≥2 source drawers | `mempalace_create_synthesis_node` |
-| Walk a node's sources (upward toward raw) | `mempalace_get_ancestors` |
-| Walk nodes built from this one (downward) | `mempalace_get_descendants` |
+| Create a synthesized summary from ≥2 source drawers | `mempalace_add_drawer` + `mempalace_kg_add` (`synthesized-from`) |
+| Walk a node's sources (upward toward raw) | `mempalace_kg_query` (`predicate=synthesized-from`, `direction=outgoing`, `recurse=true`) |
+| Walk nodes built from this one (downward) | `mempalace_kg_query` (`predicate=synthesized-from`, `direction=incoming`, `recurse=true`) |
 | Compute a node's DAG height | `mempalace_get_height` |
 | Follow the merged-into chain to canonical | `mempalace_resolve_canonical` |
 | Surface merge candidates | `mempalace_find_merge_candidates` |
 | Execute a merge decision | `mempalace_apply_merge` |
-| Find structurally broken nodes | `mempalace_find_orphan_synthesis_nodes` |
-| Find scoped synthesis nodes (for mem-core rendering) | `mempalace_find_scoped_synthesis_nodes` |
-| Replace or clear a node's labels | `mempalace_set_synthesis_labels` |
-| Inspect allowed label policy | `mempalace_get_label_policy` |
+| Find structurally broken nodes | `mempalace_find_closet_lineage_issues` |
+| Build scoped synthesis sets (for mem-core rendering) | `mempalace_search` + recursive `mempalace_kg_query` expansion |
+| Replace or clear hall labels | `mempalace_kg_invalidate` + `mempalace_kg_add` (`predicate=in-hall`) |
+| Known hall values | `hall_facts`, `hall_events`, `hall_discoveries`, `hall_preferences`, `hall_advice` |
 
 ### Navigation (Tunnels & Hallways)
 
@@ -117,7 +117,7 @@ consult this table first.
 
 Choose by intent, not by similarity of names:
 
-1. Building synthesis memory from multiple sources → `mempalace_create_synthesis_node`
+1. Building synthesis memory from multiple sources → `mempalace_add_drawer` + `mempalace_kg_add` (`synthesized-from`)
 2. Linking factual entities or time-bound facts → `mempalace_kg_add`
 3. Creating cross-wing navigation bridges → `mempalace_create_tunnel`
 4. Saving a full session atomically → `mempalace_checkpoint` (not separate add+diary calls)
@@ -126,10 +126,10 @@ Do not mix these roles.
 
 | Intent | Correct tool | Wrong tool to avoid |
 |---|---|---|
-| Synthesis lineage (mem-synth DAG) | `mempalace_create_synthesis_node` | `mempalace_create_tunnel` |
-| Merge duplicate synthesis nodes | `mempalace_find_merge_candidates` → `mempalace_apply_merge` | Manual `kg_add` for merge edges |
+| Synthesis lineage (drawer+KG) | `mempalace_add_drawer` + `mempalace_kg_add` | `mempalace_create_tunnel` |
+| Merge duplicate derived drawers | `mempalace_find_merge_candidates` → `mempalace_apply_merge` | Manual `kg_add` for merge edges |
 | Entity/fact assertion | `mempalace_kg_add` | `mempalace_create_tunnel` |
-| Cross-project/room navigation | `mempalace_create_tunnel` | `mempalace_create_synthesis_node` |
+| Cross-project/room navigation | `mempalace_create_tunnel` | `mempalace_add_drawer` + `mempalace_kg_add` (lineage creation) |
 | Batch session save | `mempalace_checkpoint` | Many separate `add_drawer` + `diary_write` calls |
 
 Hard rule: `mempalace_create_tunnel` is for navigation only. It does not create
@@ -138,23 +138,22 @@ or scoped synthesis retrieval.
 
 ---
 
-## Synthesis node creation — required fields
+## Synthesis summary creation — required fields
 
-`mempalace_create_synthesis_node` will be rejected unless ALL of these are present:
+For synthesized summaries, enforce these fields before writing:
 
 | Field | Type | Notes |
 |---|---|---|
-| `wing` | string | Wing to file the node in |
-| `room` | string | Room to file the node in |
-| `content` | string | Verbatim synthesis text — the full content of the node |
-| `source_drawer_ids` | array | **≥2** distinct drawer IDs this node synthesizes from |
-| `desc` | string | One-line description stored in metadata; makes the node discoverable |
+| `wing` | string | Wing to file the summary in (`add_drawer`) |
+| `room` | string | Room to file the summary in (`add_drawer`) |
+| `content` | string | Verbatim summary text |
+| `source_drawer_ids` | array | **≥2** distinct drawer IDs this summary synthesizes from (used to emit `kg_add` lineage edges) |
+| `desc` | string | One-line description in summary content/metadata for discoverability |
 
-Optional but useful: `height` (override if you know it's higher than computed), `added_by`,
-and `labels` (generic tags; labels may be restricted by an owner allowlist).
+Optional but useful: `added_by` and hall tags via `kg_add` (`predicate=in-hall`).
 
-Do NOT call this tool without `source_drawer_ids` and `desc`. It will error. If you don't
-have at least two source IDs, you are not creating a synthesis node — use `add_drawer` instead.
+Do NOT create a synthesized summary without `source_drawer_ids` and `desc`. If you don't
+have at least two source IDs, you are not creating a synthesis summary — use `add_drawer` as a normal note.
 
 ---
 
@@ -173,22 +172,18 @@ a no-op. After merge, use `mempalace_resolve_canonical` to verify the chain.
 
 ---
 
-## Scoped retrieval + labels
+## Scoped retrieval + hall tags
 
-Use scoped lineage query for mem-core rendering and policy ranking:
+Use scoped lineage query for mem-core rendering and policy ranking via:
 
-- `mempalace_find_scoped_synthesis_nodes`
-	- required: `scope_room`
-	- optional scope filters: `scope_wing`, `wing`, `room`
-	- label filters: `match_labels` + `match_mode` (`any`/`all`) + `labeled_only`
-	- traversal/paging: `include_merged`, `max_depth`, `limit`, `offset`
-	- returns deterministic ranking signals (`height`, `retrieval_count`,
-		`connection_degree`) so policy can rank without re-deriving.
+- `mempalace_search` for seed set
+- recursive `mempalace_kg_query` for neighborhood expansion
+- `mempalace_get_height` + retrieval counters for deterministic ranking signals.
 
-Manage labels as generic tags (policy meaning stays outside substrate):
+Manage hall labels as KG facts:
 
-- `mempalace_set_synthesis_labels` — replace a node's full label set (`labels: []` clears).
-- `mempalace_get_label_policy` — discover owner allowlist and limits before writing labels.
+- `mempalace_kg_add` with `predicate=in-hall`
+- `mempalace_kg_invalidate` to clear/reassign hall tags.
 
 Convention: treat `pinned` as a policy label value when you need "always include"
 behavior; do not assume substrate has special pin logic.
@@ -209,15 +204,15 @@ ones (e.g. when a source is superseded).
 
 ---
 
-## Memory tiers — where to write
+## Memory layers — where to write
 
 | Tier | Room convention | Tool |
 |---|---|---|
-| mem-raw | diary (tagged by session) | Never write — append-only source |
-| mem-synth | any wing, any room except context-blocks | `add_drawer`, `create_synthesis_node`, `diary_write`, `kg_add` |
-| mem-core | directory-scoped runtime-rendered files (`eshepherd/memory` or `memory`) | none directly; runtime render pipeline |
+| raw transcripts | diary (tagged by session) | Never write — append-only source |
+| summaries + facts | any wing, any room except context-blocks | `add_drawer`, `diary_write`, `kg_add`, `kg_invalidate` |
+| mem-core | directory-scoped runtime-rendered files (`.electric-shepherd/memory`) | none directly; runtime render pipeline |
 
-The runtime regenerates mem-core outputs from mem-synth. mem-core is file-only and loaded by
+The runtime regenerates mem-core outputs from consolidated summaries/facts. mem-core is file-only and loaded by
 directory scope; agents do not write mem-core directly, and it is not mirrored into MemPalace drawers.
 
 ---
@@ -230,8 +225,8 @@ Start broad, then narrow:
 mempalace_search query="<topic>" limit=10
 ```
 
-If you find a relevant node, expand with `mempalace_get_ancestors` (what sources it drew
-from) or `mempalace_get_descendants` (what was synthesized from it). This is the
+If you find a relevant node, expand with recursive `mempalace_kg_query` over `synthesized-from`
+for outgoing/incoming traversal. This is the
 probabilistic-entry / deterministic-expansion pattern from the design doc.
 
 Use `mempalace_check_duplicate` before filing new content — identical content gets a

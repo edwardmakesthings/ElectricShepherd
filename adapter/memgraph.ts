@@ -3,17 +3,12 @@ export type JsonMap = Record<string, unknown>;
 export type ToolCaller = (name: string, args?: JsonMap) => Promise<JsonMap>;
 
 export type MemgraphToolMap = {
-  createSynthesisNode: string;
   applyMerge: string;
   resolveCanonical: string;
-  getAncestors: string;
-  getDescendants: string;
+  kgQuery: string;
   getHeight: string;
   findMergeCandidates: string;
-  findOrphanSynthesisNodes: string;
-  findScopedSynthesisNodes: string;
-  setSynthesisLabels: string;
-  getLabelPolicy: string;
+  findClosetLineageIssues: string;
   addDrawer: string;
   updateDrawer: string;
   kgAdd: string;
@@ -23,7 +18,7 @@ export type MemgraphToolMap = {
   getDrawer: string;
 };
 
-export type RawMemoryWorkItem = {
+export type SourceDrawerWorkItem = {
   drawer_id: string;
   wing?: string;
   room?: string;
@@ -38,17 +33,12 @@ export type RawMemoryWorkItem = {
 //   Namespaced gateway:      prefix = "<namespace>mempalace_"
 // The prefix is resolved once (constructor option > MEMGRAPH_TOOL_PREFIX env var > default).
 const TOOL_BASE_NAMES: MemgraphToolMap = {
-  createSynthesisNode: "create_synthesis_node",
   applyMerge: "apply_merge",
   resolveCanonical: "resolve_canonical",
-  getAncestors: "get_ancestors",
-  getDescendants: "get_descendants",
+  kgQuery: "kg_query",
   getHeight: "get_height",
   findMergeCandidates: "find_merge_candidates",
-  findOrphanSynthesisNodes: "find_orphan_synthesis_nodes",
-  findScopedSynthesisNodes: "find_scoped_synthesis_nodes",
-  setSynthesisLabels: "set_synthesis_labels",
-  getLabelPolicy: "get_label_policy",
+  findClosetLineageIssues: "find_closet_lineage_issues",
   addDrawer: "add_drawer",
   updateDrawer: "update_drawer",
   kgAdd: "kg_add",
@@ -111,7 +101,27 @@ export class MemgraphClient {
     return typeof value === "string" ? value : "";
   }
 
-  private parseRawMemoryItems(payload: unknown): RawMemoryWorkItem[] {
+  private asNumber(value: unknown, fallback = 0): number {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+  }
+
+  private asBoolean(value: unknown, fallback = false): boolean {
+    if (typeof value === "boolean") return value;
+    if (typeof value === "string") {
+      const v = value.trim().toLowerCase();
+      if (v === "true" || v === "1" || v === "yes" || v === "on") return true;
+      if (v === "false" || v === "0" || v === "no" || v === "off") return false;
+    }
+    if (typeof value === "number") return value !== 0;
+    return fallback;
+  }
+
+  private uniq(values: string[]): string[] {
+    return [...new Set(values.map((v) => v.trim()).filter(Boolean))];
+  }
+
+  private parseDrawerRows(payload: unknown): JsonMap[] {
     const root = this.asObject(payload);
     const pools = [
       ...this.asArray(root.drawers),
@@ -120,23 +130,40 @@ export class MemgraphClient {
       ...this.asArray(root.nodes),
       ...this.asArray(root.data),
     ];
+    return pools.map((row) => this.asObject(row)).filter((row) => Object.keys(row).length > 0);
+  }
 
-    const out: RawMemoryWorkItem[] = [];
+  private parseKgFacts(payload: unknown): JsonMap[] {
+    const root = this.asObject(payload);
+    const facts = this.asArray(root.facts);
+    return facts.map((fact) => this.asObject(fact)).filter((fact) => Object.keys(fact).length > 0);
+  }
+
+  private uniqueFromFactsByDirection(facts: JsonMap[], direction: "incoming" | "outgoing"): string[] {
+    const values: string[] = [];
+    for (const fact of facts) {
+      const current = this.asBoolean(fact.current, true);
+      if (!current) continue;
+      const next =
+        direction === "incoming"
+          ? this.asString(fact.subject || fact.node_id || fact.drawer_id || fact.id)
+          : this.asString(fact.object || fact.node_id || fact.drawer_id || fact.id);
+      const id = next.trim();
+      if (id) values.push(id);
+    }
+    return this.uniq(values);
+  }
+
+  private parseRawMemoryItems(payload: unknown): SourceDrawerWorkItem[] {
+    const pools = this.parseDrawerRows(payload);
+
+    const out: SourceDrawerWorkItem[] = [];
     const seen = new Set<string>();
 
     for (const raw of pools) {
       const row = this.asObject(raw);
       const drawer_id = this.asString(row.drawer_id || row.node_id || row.id).trim();
       if (!drawer_id || seen.has(drawer_id)) continue;
-
-      const nodeKind = this.asString(row.node_kind || row.kind || row.type).trim().toLowerCase();
-      const labels = this.asArray(row.labels).map((v) => this.asString(v).toLowerCase());
-      const isSynthesis =
-        nodeKind === "synthesis" ||
-        labels.includes("synthesis") ||
-        labels.includes("mem-synth") ||
-        labels.includes("node_kind:synthesis");
-      if (isSynthesis) continue;
 
       seen.add(drawer_id);
       out.push({
@@ -152,25 +179,7 @@ export class MemgraphClient {
     return out;
   }
 
-  private parseDescendantIds(payload: unknown): string[] {
-    const root = this.asObject(payload);
-    const pools = [
-      ...this.asArray(root.descendants),
-      ...this.asArray(root.nodes),
-      ...this.asArray(root.results),
-      ...this.asArray(root.items),
-      ...this.asArray(root.data),
-    ];
-    const out: string[] = [];
-    for (const raw of pools) {
-      const row = this.asObject(raw);
-      const id = this.asString(row.node_id || row.drawer_id || row.id).trim();
-      if (id) out.push(id);
-    }
-    return [...new Set(out)];
-  }
-
-  createSynthesisNode(args: {
+  async createDerivedDrawer(args: {
     wing: string;
     room: string;
     content: string;
@@ -181,7 +190,47 @@ export class MemgraphClient {
     added_by?: string;
     labels?: string[];
   }) {
-    return this.call("createSynthesisNode", args as unknown as JsonMap);
+    const sourceDrawerIds = this.uniq(args.source_drawer_ids || []);
+    const addResult = await this.addDrawer({
+      wing: args.wing,
+      room: args.room,
+      content: args.content,
+      source_file: args.source_file,
+      added_by: args.added_by,
+    });
+    const id = this.asString(addResult.drawer_id || addResult.node_id || addResult.id).trim();
+    if (!id) {
+      return {
+        success: false,
+        error: "createDerivedDrawer: add_drawer returned no drawer id",
+        add_result: addResult,
+      };
+    }
+
+    const lineageErrors: string[] = [];
+    let lineageEdgesAdded = 0;
+    for (const sourceId of sourceDrawerIds) {
+      try {
+        await this.kgAdd({
+          subject: id,
+          predicate: "synthesized-from",
+          object: sourceId,
+          source_closet: id,
+        });
+        lineageEdgesAdded += 1;
+      } catch (err) {
+        lineageErrors.push(String(err));
+      }
+    }
+
+    return {
+      success: lineageErrors.length === 0,
+      node_id: id,
+      drawer_id: id,
+      lineage_edges_added: lineageEdgesAdded,
+      lineage_errors: lineageErrors,
+      add_result: addResult,
+    };
   }
 
   applyMerge(args: {
@@ -197,12 +246,53 @@ export class MemgraphClient {
     return this.call("resolveCanonical", { node_id: nodeId, max_hops: maxHops });
   }
 
-  getAncestors(nodeId: string, maxDepth = 20) {
-    return this.call("getAncestors", { node_id: nodeId, max_depth: maxDepth });
+  kgQuery(args: {
+    entity: string;
+    as_of?: string;
+    direction?: "incoming" | "outgoing" | "both";
+    predicate?: string;
+    recurse?: boolean;
+    max_depth?: number;
+  }) {
+    return this.call("kgQuery", args as unknown as JsonMap);
   }
 
-  getDescendants(nodeId: string, maxDepth = 20) {
-    return this.call("getDescendants", { node_id: nodeId, max_depth: maxDepth });
+  async getLineageSources(nodeId: string, maxDepth = 20) {
+    const result = await this.kgQuery({
+      entity: nodeId,
+      direction: "outgoing",
+      predicate: "synthesized-from",
+      recurse: true,
+      max_depth: maxDepth,
+    });
+    const ancestorIds = this.uniqueFromFactsByDirection(this.parseKgFacts(result), "outgoing").filter((id) => id !== nodeId);
+    return {
+      node_id: nodeId,
+      max_depth: maxDepth,
+      ancestors: ancestorIds.map((id) => ({ node_id: id })),
+      count: ancestorIds.length,
+      facts: result.facts,
+    };
+  }
+
+  async getLineageDerivatives(nodeId: string, maxDepth = 20) {
+    const result = await this.kgQuery({
+      entity: nodeId,
+      direction: "incoming",
+      predicate: "synthesized-from",
+      recurse: true,
+      max_depth: maxDepth,
+    });
+    const descendantIds = this
+      .uniqueFromFactsByDirection(this.parseKgFacts(result), "incoming")
+      .filter((id) => id !== nodeId);
+    return {
+      node_id: nodeId,
+      max_depth: maxDepth,
+      descendants: descendantIds.map((id) => ({ node_id: id })),
+      count: descendantIds.length,
+      facts: result.facts,
+    };
   }
 
   getHeight(nodeId: string) {
@@ -222,17 +312,37 @@ export class MemgraphClient {
     return this.call("findMergeCandidates", args as unknown as JsonMap);
   }
 
-  findOrphanSynthesisNodes(args: {
+  findClosetLineageIssues(args: {
     wing?: string;
     room?: string;
     include_merged?: boolean;
     limit?: number;
     offset?: number;
   }) {
-    return this.call("findOrphanSynthesisNodes", args as unknown as JsonMap);
+    return this.call("findClosetLineageIssues", args as unknown as JsonMap);
   }
 
-  findScopedSynthesisNodes(args: {
+  async getLineageIssues(args: {
+    wing?: string;
+    room?: string;
+    include_merged?: boolean;
+    limit?: number;
+    offset?: number;
+  }) {
+    const result = await this.findClosetLineageIssues(args);
+    const rows = this.asArray((result as JsonMap).orphans).map((row) => this.asObject(row));
+    const normalized = rows.map((row) => ({
+      node_id: this.asString(row.node_id || row.drawer_id || row.id),
+      reasons: this.asArray(row.reasons).map((reason) => this.asString(reason)).filter(Boolean),
+      ...row,
+    }));
+    return {
+      ...result,
+      orphans: normalized,
+    };
+  }
+
+  async listScopedDerivedDrawers(args: {
     scope_room: string;
     scope_wing?: string;
     wing?: string;
@@ -245,18 +355,162 @@ export class MemgraphClient {
     limit?: number;
     offset?: number;
   }) {
-    return this.call("findScopedSynthesisNodes", args as unknown as JsonMap);
+    const scopeRoom = args.scope_room?.trim();
+    const scopeWing = args.scope_wing?.trim();
+    const roomFilter = args.room?.trim() || scopeRoom;
+    const wingFilter = args.wing?.trim() || scopeWing;
+    const limit = Math.max(1, Number(args.limit ?? 50));
+    const offset = Math.max(0, Number(args.offset ?? 0));
+    const maxDepth = Math.max(1, Number(args.max_depth ?? 20));
+
+    const listed = await this.listDrawers({
+      wing: wingFilter,
+      room: roomFilter,
+      limit,
+      offset,
+    });
+
+    const requestedLabels = this.uniq((args.match_labels || []).map((label) => this.asString(label).toLowerCase()));
+    const matchMode: "any" | "all" = args.match_mode === "all" ? "all" : "any";
+    const labeledOnly = Boolean(args.labeled_only);
+    const includeMerged = Boolean(args.include_merged);
+
+    const nodes: JsonMap[] = [];
+    for (const row of this.parseDrawerRows(listed)) {
+      const nodeId = this.asString(row.drawer_id || row.node_id || row.id).trim();
+      if (!nodeId) continue;
+
+      const rowWing = this.asString(row.wing || row.closet || row.namespace).trim();
+      const rowRoom = this.asString(row.room).trim();
+      if (scopeWing && rowWing && rowWing !== scopeWing) continue;
+      if (scopeRoom && rowRoom && rowRoom !== scopeRoom) continue;
+
+      let canonicalNodeId = nodeId;
+      if (!includeMerged) {
+        const resolved = this.asObject(await this.resolveCanonical(nodeId).catch(() => ({ canonical_node_id: nodeId })));
+        canonicalNodeId = this.asString(resolved.canonical_node_id || nodeId).trim() || nodeId;
+        if (canonicalNodeId !== nodeId) continue;
+      }
+
+      const outgoingSynth = this.asObject(
+        await this.kgQuery({
+          entity: nodeId,
+          direction: "outgoing",
+          predicate: "synthesized-from",
+          recurse: false,
+          max_depth: 1,
+        }).catch(() => ({})),
+      );
+      const sourceIds = this.uniqueFromFactsByDirection(this.parseKgFacts(outgoingSynth), "outgoing");
+      if (sourceIds.length === 0) continue;
+
+      const hallFacts = this.asObject(
+        await this.kgQuery({
+          entity: nodeId,
+          direction: "outgoing",
+          predicate: "in-hall",
+          recurse: false,
+          max_depth: 1,
+        }).catch(() => ({})),
+      );
+
+      const labels = this.uniqueFromFactsByDirection(this.parseKgFacts(hallFacts), "outgoing").map((v) => v.toLowerCase());
+      if (labeledOnly && labels.length === 0) continue;
+      if (requestedLabels.length > 0) {
+        const matchCount = labels.filter((label) => requestedLabels.includes(label)).length;
+        const passes = matchMode === "all" ? matchCount === requestedLabels.length : matchCount > 0;
+        if (!passes) continue;
+      }
+
+      const heightRes = this.asObject(await this.getHeight(nodeId).catch(() => ({ height: 0 })));
+      const graphFacts = this.asObject(
+        await this.kgQuery({
+          entity: nodeId,
+          direction: "both",
+          recurse: false,
+          max_depth: maxDepth,
+        }).catch(() => ({})),
+      );
+      const graphFactCount = this.parseKgFacts(graphFacts).filter((fact) => this.asBoolean(fact.current, true)).length;
+
+      nodes.push({
+        node_id: nodeId,
+        canonical_node_id: canonicalNodeId,
+        wing: rowWing || undefined,
+        room: rowRoom || undefined,
+        desc: this.asString(row.desc || row.title || row.summary).trim() || undefined,
+        labels,
+        height: this.asNumber(heightRes.height, 0),
+        retrieval_count: this.asNumber(row.retrieval_count || this.asObject(row.metadata).retrieval_count, 0),
+        connection_degree: graphFactCount,
+        lineage_match_count: sourceIds.length,
+      });
+    }
+
+    return {
+      nodes,
+      count: nodes.length,
+      limit,
+      offset,
+      scope_room: scopeRoom,
+      scope_wing: scopeWing,
+    };
   }
 
-  setSynthesisLabels(args: {
+  async setHallLabels(args: {
     node_id: string;
     labels?: string[];
   }) {
-    return this.call("setSynthesisLabels", args as unknown as JsonMap);
+    const labels = this.uniq((args.labels || []).map((label) => this.asString(label).toLowerCase()));
+    const current = await this.kgQuery({
+      entity: args.node_id,
+      direction: "outgoing",
+      predicate: "in-hall",
+      recurse: false,
+      max_depth: 1,
+    }).catch(() => ({}));
+
+    const currentLabels = this.uniqueFromFactsByDirection(this.parseKgFacts(current), "outgoing");
+    const toRemove = currentLabels.filter((label) => !labels.includes(label.toLowerCase()));
+    const toAdd = labels.filter((label) => !currentLabels.map((v) => v.toLowerCase()).includes(label));
+
+    for (const label of toRemove) {
+      await this.kgInvalidate({
+        subject: args.node_id,
+        predicate: "in-hall",
+        object: label,
+      }).catch(() => ({}));
+    }
+
+    for (const label of toAdd) {
+      await this.kgAdd({
+        subject: args.node_id,
+        predicate: "in-hall",
+        object: label,
+        source_closet: args.node_id,
+      }).catch(() => ({}));
+    }
+
+    return {
+      success: true,
+      node_id: args.node_id,
+      labels,
+      invalidated_labels: toRemove,
+      added_labels: toAdd,
+    };
   }
 
-  getLabelPolicy() {
-    return this.call("getLabelPolicy", {});
+  async getHallPolicy() {
+    return {
+      enforced: false,
+      allowed_labels: [
+        "hall_facts",
+        "hall_events",
+        "hall_discoveries",
+        "hall_preferences",
+        "hall_advice",
+      ],
+    };
   }
 
   addDrawer(args: {
@@ -316,35 +570,64 @@ export class MemgraphClient {
     return this.call("getDrawer", args as unknown as JsonMap);
   }
 
-  async listRawMemoriesByScope(args: {
+  async listSourceDrawersByScope(args: {
     wing?: string;
     room?: string;
     limit?: number;
     offset?: number;
-  }): Promise<RawMemoryWorkItem[]> {
+  }): Promise<SourceDrawerWorkItem[]> {
     const res = await this.listDrawers({
       wing: args.wing,
       room: args.room,
       limit: args.limit,
       offset: args.offset,
     });
-    return this.parseRawMemoryItems(res);
+    const candidates = this.parseRawMemoryItems(res);
+    const out: SourceDrawerWorkItem[] = [];
+
+    for (const item of candidates) {
+      try {
+        const outgoing = await this.kgQuery({
+          entity: item.drawer_id,
+          direction: "outgoing",
+          predicate: "synthesized-from",
+          recurse: false,
+          max_depth: 1,
+        });
+        const sourceIds = this.uniqueFromFactsByDirection(this.parseKgFacts(outgoing), "outgoing");
+        if (sourceIds.length === 0) {
+          out.push(item);
+        }
+      } catch {
+        // Conservative fallback: if lineage inspection fails, keep the item in
+        // the raw worklist so consolidation does not silently miss evidence.
+        out.push(item);
+      }
+    }
+
+    return out;
   }
 
-  async findUnsynthesizedRawMemories(args: {
+  async findUnconsolidatedSourceDrawers(args: {
     wing?: string;
     room?: string;
     limit?: number;
     offset?: number;
-  }): Promise<RawMemoryWorkItem[]> {
-    const rawItems = await this.listRawMemoriesByScope(args);
-    const out: RawMemoryWorkItem[] = [];
+  }): Promise<SourceDrawerWorkItem[]> {
+    const rawItems = await this.listSourceDrawersByScope(args);
+    const out: SourceDrawerWorkItem[] = [];
 
     for (const item of rawItems) {
       try {
-        const desc = await this.getDescendants(item.drawer_id, 1);
-        const descendantIds = this.parseDescendantIds(desc).filter((id) => id !== item.drawer_id);
-        if (descendantIds.length === 0) {
+        const incoming = await this.kgQuery({
+          entity: item.drawer_id,
+          direction: "incoming",
+          predicate: "synthesized-from",
+          recurse: false,
+          max_depth: 1,
+        });
+        const incomingSynth = this.uniqueFromFactsByDirection(this.parseKgFacts(incoming), "incoming");
+        if (incomingSynth.length === 0) {
           out.push(item);
         }
       } catch {

@@ -5,7 +5,7 @@ import { runSynthesisConsolidation } from "../../adapter/synthesis-consolidation
 
 /**
  * Unit coverage for the synthesis consolidation contract — the deterministic
- * core of mem_raw -> mem_synth conversion.
+ * core of source-drawer -> derived-drawer consolidation.
  *
  * These tests drive the adapter with PROVIDED mapper summaries (so no MCP
  * search happens) and `applyWrites: false` by default (so no MCP write
@@ -24,8 +24,8 @@ function richSummaries() {
       transcriptId: "raw-001",
       confidence: "high",
       durableFacts: ["ElectricShepherd is the policy layer", "MemPalace is the substrate"],
-      decisions: ["Use append-only mem_raw", "Synthesis requires two distinct sources"],
-      rootCausesAndWorkedExamples: ["Gateway blocked find_scoped_synthesis_nodes via allow-list"],
+      decisions: ["Use append-only source drawers", "Consolidation requires two distinct sources"],
+      rootCausesAndWorkedExamples: ["Gateway blocked scoped lineage listing via allow-list"],
       subsystemsAndFiles: ["adapter/synthesis-consolidation.ts", "plugin/turn-guard.ts"],
       openItems: ["Add an end-to-end retrieval test"],
     },
@@ -35,7 +35,7 @@ function richSummaries() {
       durableFacts: ["The inflation guard blocks weak syntheses"],
       decisions: ["Keep the dedup gate configurable"],
       rootCausesAndWorkedExamples: ["check_duplicate uses cosine similarity at 0.9"],
-      subsystemsAndFiles: ["scripts/capture-memraw.sh"],
+      subsystemsAndFiles: ["scripts/capture-source-transcripts.sh"],
       openItems: ["Document the mem-core render contract"],
     },
   ];
@@ -47,9 +47,10 @@ function stubClient(overrides = {}) {
     search: async () => {
       throw new Error("search must not be called when mapperSummaries are provided");
     },
-    createSynthesisNode: async () => {
-      throw new Error("createSynthesisNode must not be called when applyWrites is false");
+    createDerivedDrawer: async () => {
+      throw new Error("createDerivedDrawer must not be called when applyWrites is false");
     },
+    kgAdd: async () => ({ success: true }),
     ...overrides,
   };
 }
@@ -108,22 +109,27 @@ test("inflation guard passes for well-formed, multi-source evidence and builds a
   assert.equal(result.inflationGuard.passed, true, JSON.stringify(result.inflationGuard.reasons));
   assert.ok(result.sourceDrawerIds.length >= 2, "expected >= 2 distinct source drawer ids");
   assert.ok(
-    result.synthesisDraft.populatedSectionCount >= 3,
-    `expected >= 3 populated sections, got ${result.synthesisDraft.populatedSectionCount}`
+    result.consolidationDraft.populatedSectionCount >= 3,
+    `expected >= 3 populated sections, got ${result.consolidationDraft.populatedSectionCount}`
   );
-  assert.ok(result.synthesisDraft.contentCharacters >= 220);
-  assert.match(result.synthesisDraft.content, /## Durable Facts/);
-  assert.match(result.synthesisDraft.content, /## Decisions/);
+  assert.ok(result.consolidationDraft.contentCharacters >= 220);
+  assert.match(result.consolidationDraft.content, /## Durable Facts/);
+  assert.match(result.consolidationDraft.content, /## Decisions/);
   // applyWrites defaults off, so nothing is persisted.
   assert.equal(result.createdNodeId, undefined);
 });
 
-test("applyWrites persists a synthesis node only when the guard passes", async () => {
+test("applyWrites persists a derived drawer only when the guard passes", async () => {
   const calls = [];
+  const kgCalls = [];
   const client = stubClient({
-    createSynthesisNode: async (args) => {
+    createDerivedDrawer: async (args) => {
       calls.push(args);
       return { node_id: "synth-xyz" };
+    },
+    kgAdd: async (args) => {
+      kgCalls.push(args);
+      return { success: true };
     },
   });
 
@@ -142,12 +148,14 @@ test("applyWrites persists a synthesis node only when the guard passes", async (
   assert.deepEqual(calls[0].source_drawer_ids.sort(), ["raw-001", "raw-002"]);
   assert.deepEqual(calls[0].labels, ["pinned"]);
   assert.ok(calls[0].content.includes("## Decisions"));
+  assert.ok(kgCalls.length > 0, "expected hall/fact KG writes during applyWrites");
+  assert.ok(kgCalls.some((call) => call.predicate === "in-hall"));
 });
 
 test("applyWrites does NOT persist when the inflation guard fails", async () => {
   let called = false;
   const client = stubClient({
-    createSynthesisNode: async () => {
+    createDerivedDrawer: async () => {
       called = true;
       return { node_id: "should-not-happen" };
     },
@@ -160,6 +168,6 @@ test("applyWrites does NOT persist when the inflation guard fails", async () => 
   });
 
   assert.equal(result.inflationGuard.passed, false);
-  assert.equal(called, false, "createSynthesisNode must not run when the guard fails");
+  assert.equal(called, false, "createDerivedDrawer must not run when the guard fails");
   assert.equal(result.createdNodeId, undefined);
 });

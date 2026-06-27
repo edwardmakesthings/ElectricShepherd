@@ -228,7 +228,7 @@ function computeNodeScore(args: {
  * B1: probabilistic entry + deterministic expansion.
  *
  * Entry uses semantic search to find seeds, then expansion deterministically walks
- * canonical/ancestor/descendant neighborhoods and ranks scoped synthesis nodes with
+ * canonical lineage neighborhoods and ranks scoped derived drawers with
  * stable tie-breaks.
  */
 export async function expandScopedRetrieval(
@@ -258,7 +258,7 @@ export async function expandScopedRetrieval(
   const labeledOnly = Boolean(options.labeled_only);
   const includeMerged = Boolean(options.include_merged);
 
-  const policyResult = asObject(await client.getLabelPolicy().catch(() => ({})));
+  const policyResult = asObject(await client.getHallPolicy().catch(() => ({})));
   const allowedLabels = normalizeLabelList(policyResult.allowed_labels);
   const enforced = Boolean(policyResult.enforced);
 
@@ -284,14 +284,14 @@ export async function expandScopedRetrieval(
   for (const canonicalID of canonicalSeedSet) {
     neighborhoodSet.add(canonicalID);
     const [ancestors, descendants] = await Promise.all([
-      client.getAncestors(canonicalID, expansionDepth).catch(() => ({})),
-      client.getDescendants(canonicalID, expansionDepth).catch(() => ({})),
+      client.getLineageSources(canonicalID, expansionDepth).catch(() => ({})),
+      client.getLineageDerivatives(canonicalID, expansionDepth).catch(() => ({})),
     ]);
     for (const id of extractNeighborIDs(ancestors)) neighborhoodSet.add(id);
     for (const id of extractNeighborIDs(descendants)) neighborhoodSet.add(id);
   }
 
-  const scopedResult = await client.findScopedSynthesisNodes({
+  const scopedResult = await client.listScopedDerivedDrawers({
     scope_room,
     scope_wing: options.scope_wing,
     wing: options.wing,

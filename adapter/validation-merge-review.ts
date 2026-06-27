@@ -23,7 +23,7 @@ export type ValidationMergeReviewOptions = {
 };
 
 /**
- * Downward validation result for one synthesis node.
+ * Downward validation result for one derived summary node.
  */
 export type DownwardSupportReview = {
   nodeId: string;
@@ -201,8 +201,25 @@ export async function runValidationMergeReview(
   const automaticMergeScore = Number(options.automaticMergeScore ?? 0.92);
 
   let nodeIds = uniq(options.candidateNodeIds || []);
+
+  const lineageIssuesResult = await client.findClosetLineageIssues({
+    wing: options.filterWing,
+    room: options.filterRoom,
+    include_merged: options.includeMergedNodes ?? false,
+    limit: validationLimit,
+    offset: 0,
+  }).catch(() => ({}));
+  const lineageIssuesRows = asArray(asObject(lineageIssuesResult).orphans).map((row) => asObject(row));
+  const lineageIssueByNode = new Map<string, string[]>();
+  for (const row of lineageIssuesRows) {
+    const nodeId = asString(row.node_id || row.drawer_id || row.id).trim();
+    if (!nodeId) continue;
+    const reasons = asArray(row.reasons).map((reason) => asString(reason)).filter(Boolean);
+    lineageIssueByNode.set(nodeId, reasons.length > 0 ? reasons : ["lineage issue reported"]);
+  }
+
   if (nodeIds.length === 0) {
-    const scoped = await client.findScopedSynthesisNodes({
+    const scoped = await client.listScopedDerivedDrawers({
       scope_room: scopeRoom,
       scope_wing: options.scopeWing,
       wing: options.filterWing,
@@ -213,6 +230,9 @@ export async function runValidationMergeReview(
       max_depth: validationDepth,
     });
     nodeIds = parseNodeIdsFromScoped(scoped);
+    if (nodeIds.length === 0 && lineageIssueByNode.size > 0) {
+      nodeIds = [...lineageIssueByNode.keys()];
+    }
   }
 
   const downwardValidation: DownwardSupportReview[] = [];
@@ -220,7 +240,7 @@ export async function runValidationMergeReview(
   const escalationReasons = new Set<string>();
 
   for (const nodeId of nodeIds) {
-    const ancestors = await client.getAncestors(nodeId, validationDepth).catch(() => ({}));
+    const ancestors = await client.getLineageSources(nodeId, validationDepth).catch(() => ({}));
     const ancestorIds = parseAncestorIds(ancestors);
 
     const reasons: string[] = [];
@@ -231,6 +251,14 @@ export async function runValidationMergeReview(
       reasons.push("downward-check: synthesis has fewer than 2 ancestor/source nodes");
       escalationNodeIds.add(nodeId);
       escalationReasons.add("downward validation failed: insufficient source support");
+    }
+
+    const lineageReasons = lineageIssueByNode.get(nodeId) || [];
+    if (lineageReasons.length > 0) {
+      verdict = "revise";
+      reasons.push(...lineageReasons.map((reason) => `lineage-check: ${reason}`));
+      escalationNodeIds.add(nodeId);
+      escalationReasons.add("closet lineage issues detected");
     }
 
     downwardValidation.push({

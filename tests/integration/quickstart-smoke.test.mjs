@@ -15,7 +15,7 @@ function runScript(scriptPath, scriptArgs) {
     {
       cwd: repoRoot,
       encoding: "utf8",
-      env: { ...process.env, ESHEPHERD_SYNTH_LOCK_DISABLED: "1" },
+      env: { ...process.env, ESHEPHERD_CONSOLIDATION_LOCK_DISABLED: "1" },
     }
   );
   return JSON.parse(stdout);
@@ -56,7 +56,7 @@ test("quickstart consolidation and cadence return expected envelopes", { skip: !
   ]);
 
   assert.equal(consolidate.mode, "full-pipeline");
-  assert.equal(consolidate.consolidation.phase, "synthesis-consolidation");
+  assert.equal(consolidate.consolidation.phase, "source-derived-consolidation");
   assert.equal(consolidate.validationMergeReview.phase, "validation-merge-review");
   assert.equal(typeof consolidate.memCoreApply.applied, "boolean");
 

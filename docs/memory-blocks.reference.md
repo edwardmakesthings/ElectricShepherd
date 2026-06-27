@@ -2,21 +2,21 @@
 
 This file is a **reference artifact** that shows the expected shape of scoped mem-core
 renders. Live mem-core is loaded from runtime-rendered `memory.md` files under
-`eshepherd/memory` (or `memory`) rather than being injected from `instructions/`.
+`.electric-shepherd/memory` rather than being injected from `instructions/`.
 It is derived, never hand-authored.
 
 ## Storage convention
 
-- Durable facts are written to **mem-synth** (drawers, kg facts, synthesis nodes).
-- mem-core files are deterministic renders generated under `eshepherd/memory`
-  (or `memory`) as layered `memory.md` outputs.
+- Durable facts are written to **derived memory** (drawers, kg facts, synthesis nodes).
+- mem-core files are deterministic renders generated under `.electric-shepherd/memory`
+  as layered `memory.md` outputs.
 - This file is a representative scope render example, not a template that agents maintain.
 - Keep each block to a few hundred tokens. If a block outgrows that, it is too detailed —
   move specifics to a normal drawer/diary entry and keep only the durable summary here.
 - mem-core does not round-trip into MemPalace drawers.
 
 The blocks below are illustrative of render output for this scope. Agents should write
-durable state to mem-synth and let runtime regeneration update mem-core automatically.
+durable state to derived memory and let runtime regeneration update mem-core automatically.
 
 ---
 
@@ -25,7 +25,7 @@ durable state to mem-synth and let runtime regeneration update mem-core automati
 - Electric Shepherd is the policy layer for memory consolidation (Dreamer orchestration,
   mapper/auditor coordination, drift review, and scheduling).
 - MemPalace is the substrate layer for durable storage and graph mechanics (drawers,
-  synthesis-node creation, traversal, canonical resolution, merge/orphan queries, KG).
+  derived-drawer creation, traversal, canonical resolution, merge/orphan queries, KG).
 - Raw transcripts remain append-only source-of-truth; Dreamer writes synthesized outputs and
   auto-refreshes mem-core renders for always-loaded context.
 

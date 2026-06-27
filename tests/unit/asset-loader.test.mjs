@@ -151,9 +151,9 @@ test("loadInstructionPaths skips names that do not exist", () => {
 test("dedupeAppendInstructions appends without duplicating existing entries", () => {
   const result = dedupeAppendInstructions(["CONTRIBUTING.md", "/abs/agent-discipline.md"], [
     "/abs/agent-discipline.md",
-    "/abs/eshepherd/memory/memory.md",
+    "/abs/.electric-shepherd/memory/memory.md",
   ]);
-  assert.deepEqual(result, ["CONTRIBUTING.md", "/abs/agent-discipline.md", "/abs/eshepherd/memory/memory.md"]);
+  assert.deepEqual(result, ["CONTRIBUTING.md", "/abs/agent-discipline.md", "/abs/.electric-shepherd/memory/memory.md"]);
 });
 
 test("dedupeAppendInstructions tolerates an undefined existing array", () => {

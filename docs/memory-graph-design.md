@@ -21,10 +21,10 @@ The whole system splits into two projects along one principled line:
 
 > **MemPalace is a memory *substrate*; the dreamer is a memory *policy*.**
 
-Substrate is **mechanism** — store a synthesis node, record an edge, traverse the graph,
+Substrate is **mechanism** — store a derived memory, record an edge, traverse the graph,
 count retrievals. Policy is **judgment** — *when* to consolidate, *what* to merge, *how* to
 synthesize, *whether* something is durable. A substrate is policy-free: it exposes verbs
-(`create_synthesis_node`, `link`, `get_height`, `resolve_canonical`) without deciding when
+(`add_drawer`, `link`, `get_height`, `resolve_canonical`) without deciding when
 they're called. The dreamer is nothing *but* policy — the opinionated process that decides
 what to do with those verbs.
 
@@ -41,10 +41,11 @@ Developed in a **fork of MemPalace** with a PR open for upstreaming. Everything 
 additive — raw drawers, the mining flow, and existing tools are untouched — which is what
 makes it PR-able (maintainers accept substrate primitives; they reject opinionated policy).
 
-- Synthesis-node drawer kind (§4).
-- Reserved KG predicates + deterministic traversal/height/canonical-resolution (§4, §5).
+- Reserved KG predicates + recursive traversal/height/canonical-resolution (§4, §5).
 - Store-stamped `last_retrieved` / `retrieval_count` on the read path (§6).
-- Schema-enforced creation of synthesis nodes (§7).
+- Thin gating helper for derived-memory (closet) creation (§7).
+- (Largely obviated: the standalone synthesis-node drawer kind — summaries/arcs use native
+  closets, durable facts use native KG triples, categories use native halls.)
 
 If upstreamed, the fork shrinks to nothing and you rebase onto it. If not, carry the
 small additive diff that rebases cleanly across MemPalace updates. ElectricShepherd is
@@ -87,29 +88,65 @@ Irreducibly-probabilistic steps determinism must not try to reach: the semantic 
 retrieval entry, the synthesis act itself, and the final pairwise adjudications (same
 conclusion? / is this parent supported?). Everything else is structure.
 
-## 2. The core idea — a synthesis-height DAG over verbatim memory
+## 2. The core idea — memory types are mutability contracts, mapped onto native MemPalace layers
 
-Memory is a **synthesis-height DAG**. Raw drawers (verbatim, exactly as MemPalace stores
-them) sit at height 0. Each consolidation pass produces *synthesis nodes* one level up that
-express connections not visible in any single lower node. An area discussed twice has a
-shallow tree (max height ~2); a major project a deep one (height 8). **Height is the
-organizing dimension, and it emerges from activity** rather than being imposed.
+Memory is **one graph whose nodes have different types, and a node's type determines what
+operations are legal on it.** This replaces an earlier framing (a strict synthesis-height
+tier ladder of "marked drawers"). The earlier model collapsed two orthogonal properties —
+*origin* (verbatim / authored / derived) and *refinement* (how much consolidation has been
+applied) — into one vertical ladder, which broke down as soon as real memory turned out to be
+blended (transcripts, summaries, durable facts, arcs, mixed-in notes all coexisting). The
+honest model separates them: type is the mutability contract; refinement is a continuous
+property of position in the lineage.
 
-One structure subsumes five otherwise-separate features:
+Each type maps onto a layer MemPalace **already provides** — the typology is not imposed on
+top of MemPalace, it *is* MemPalace's native structure used deliberately:
 
-| Concern | How the height-DAG handles it |
+| Type (role) | Mutability contract | Native MemPalace home |
+|---|---|---|
+| **Raw transcript** | content frozen; dedup-mergeable by identity | **Drawer** (verbatim stored text) |
+| **Summary / arc** | revisable, replaceable, mergeable; re-derivable | **Closet** (native summary layer, points to source) |
+| **Durable fact** | supersedable *with history* (changelog) | **KG triple** (`valid_from`/`valid_to` + `kg_invalidate`) |
+| **Category** | re-assignable | **Hall** (`facts`/`events`/`discoveries`/`preferences`/`advice`) |
+| **Resident working set** | derived render, never authored | **mem-core** (file-only render) |
+
+Orthogonal axes (kept separate from type): **wing** = project/person (scope), **room** =
+topic within a wing (sub-scope). Wing-per-project powers cross-project connection.
+
+**Refinement (formerly "height") survives, with sharper meaning.** Height is *depth in the
+synthesis lineage* — a node synthesized from other syntheses is more refined than one
+synthesized from raw drawers. It is no longer "the organizing dimension imposed by marked
+drawers"; it is a property *computed from recursive traversal* of `synthesized-from` edges,
+and it is still consumed by two things: mem-core ranking (importance = refinement × retrieval
+× connection × pin) and selective forgetting (low-refinement AND cold AND unmodified = a
+forgetting candidate). The thing that changed is the framing (one graph, typed nodes), not the
+operations.
+
+One structure still subsumes several otherwise-separate features:
+
+| Concern | How the typed graph handles it |
 |---|---|
-| Replay-based consolidation | Active areas accumulate height-0 nodes, cross a threshold, get re-synthesized upward. Height *is* replay count. |
-| Selective forgetting | Shallow + cold nodes (low height, not retrieved, not modified) are the forgettable ones. Falls out of structure. |
-| Evidence strength | A node's support = the lineage beneath it. Height-5 over 12 sources is strong; height-2 over 1 is thin. Readable from position. |
+| Replay-based consolidation | Active areas accumulate raw drawers, cross a threshold, get synthesized into closets. Refinement rises with re-synthesis. |
+| Selective forgetting | Type-aware: forget cold closets freely, archive (never delete) stale drawers, supersede (never drop) durable facts, let arcs re-derive. |
+| Evidence strength | A node's support = the lineage beneath it (recursive traversal). Many distinct sources = strong; one source = thin. |
 | Confidence (relocated) | Trust lives in graph position, not model introspection. |
-| Visualization | The DAG renders as a node graph (Obsidian-style) for human audit. |
+| Visualization | The graph renders as a node graph (Obsidian-style) for human audit. |
 
-**Respecting MemPalace's verbatim invariant.** MemPalace's thesis is "never summarize or
-paraphrase stored content." The synthesis layer does *not* violate this: raw drawers are
-never altered. A synthesis node is a *new* drawer whose verbatim content happens to be a
-synthesis, and the relationship to its sources lives in the KG. You add a layer; you never
-rewrite the store. Philosophically compatible, not in tension.
+**The verbatim invariant, resolved properly.** MemPalace's thesis is "never summarize or
+paraphrase stored content." This was in *apparent* tension with a synthesis layer; the
+typology resolves it cleanly: **immutability applies only to the `raw` type (drawers).**
+Summaries/arcs are closets (natively a revisable, non-verbatim layer) and durable facts are KG
+triples (natively supersedable) — neither was ever bound by the verbatim invariant, because
+the invariant was only ever about verbatim *source* content. ElectricShepherd never alters a
+drawer's content; it creates closets, adds KG triples, and annotates. Compatible by
+construction, not by working around the invariant.
+
+**A consequence worth stating: ElectricShepherd is non-invasive.** Because every artifact it
+creates is a native MemPalace object (closet, KG triple, hall assignment, retrieval metadata),
+it works against whatever state a palace is already in, and removing it leaves the palace fully
+intact and functional — just less organized. The one behavioral hook (retrieval counters)
+lives in the substrate fork and degrades gracefully (existing counts persist, they simply stop
+updating on upstream). Nothing depends on ElectricShepherd continuing to run.
 
 ## 3. The non-negotiable invariant: local edges only
 
@@ -126,29 +163,40 @@ feed three distant higher-level connections (an auth bug informs "error handling
 the cross-cutting connections synthesis exists to surface. A node's height is
 `max(parent heights) + 1`, computed by longest path from any height-0 source.
 
-## 4. Edges are KG triples; synthesis nodes are drawers (use what exists)
+## 4. Edges are KG triples; derived memory uses native layers (use what exists)
 
 The big realization from the source: **MemPalace's KG is already the edge layer.** `kg_add`
 is `subject → predicate → object` with `valid_from`/`valid_to` temporal windows AND a
 `source_drawer_id` provenance link. That is an edge store — temporal, provenance-linked,
-with `kg_invalidate` for superseding. We don't build one.
+with `kg_invalidate` for superseding. We don't build one. And MemPalace already has the
+*derived* layers too, so we don't build those either:
 
-- **Synthesis nodes are drawers** marked `node_kind=synthesis` with `height` metadata. Content
-  is verbatim like any drawer (just generated, not mined), so the verbatim invariant holds.
-  Raw mem-raw drawers are unmarked and untouched — the mining flow doesn't change.
+- **Summaries and arcs are closets**, not specially-marked drawers. Closets are MemPalace's
+  native summary layer (compact, revisable, point back to source) — exactly the mutability
+  contract a summary/arc needs. Raw source transcript drawers stay unmarked and untouched; the
+  mining flow doesn't change.
+- **Durable facts are KG triples** with validity windows. When a fact changes: `kg_invalidate`
+  the old triple, `kg_add` the new one — the changelog/supersession behavior is native and
+  free. This is where "durable fact as changelog" lives.
+- **Categories are halls** (`facts`/`events`/`discoveries`/`preferences`/`advice`). The
+  categorize step assigns a hall; it is re-assignable.
 - **Edges are reserved KG predicates:** `synthesized-from` (B → A means B synthesized from A)
-  and `merged-into` (§5). The DAG is these triples; traversal is KG traversal.
-- **Deterministic traversal lives in MemPalace** (substrate, mechanical): `get_ancestors`,
-  `get_descendants`, `get_height`, `resolve_canonical`, orphan/candidate detection — a
-  read-side companion to the KG, computing over its triples and the synthesis-node drawers.
-  It lives where the data lives (so it's natively traversing, not reconstructing the graph
-  from query results outside), is unit-tested there, and keeps ElectricShepherd thin. ElectricShepherd
-  calls `mempalace_get_height(node_id)` and trusts it.
+  and `merged-into` (§5). The lineage graph is these triples; traversal is KG traversal.
+- **Recursive traversal lives in MemPalace** (substrate, mechanical). Native `kg_query` is
+  one-hop (entity → its direct relations, no depth); the substrate fork adds recursive
+  traversal over a predicate, from which `get_ancestors`/`get_descendants`/`get_height`
+  (longest path) / `resolve_canonical` (merge-chain head) / orphan + candidate detection
+  follow. It lives where the data lives (natively traversing, not reconstructing the graph
+  outside MemPalace), is unit-tested there, and keeps ElectricShepherd thin.
 
-This collapses most of what an earlier draft of this doc planned to build. No invented edge
-store, no list-valued drawer metadata (ChromaDB metadata is scalar-only anyway — the reason
-`add_drawer` writes only flat fields). Edges → KG. Nodes → drawers. Traversal → a substrate
-read API over both.
+This collapses most of what an earlier draft of this doc planned to build, and then collapses
+it *further* than the first revision did: there is no invented edge store, no list-valued
+drawer metadata (ChromaDB metadata is scalar-only anyway), **and no parallel
+`node_kind=synthesis` drawer subsystem** — summaries/arcs → closets, durable facts → KG
+triples, categories → halls, edges → KG, recursive traversal → a substrate read API. The
+substrate PR shrinks accordingly (see the PR-rescope plan): retrieval counters and recursive
+traversal survive as the genuinely-missing primitives; the synthesis-node machinery is largely
+obviated by closets.
 
 ## 5. Merge: symlink via KG, not delete (preserve convergence as signal)
 
@@ -187,17 +235,19 @@ as the seed for the near-but-distant query that serves both merge-candidates and
 missed-connection candidates (entries semantically near but with no common ancestor — a
 deterministic graph query over the KG).
 
-## 7. Schema-enforced synthesis-node creation (substrate; the gap the reviews flag)
+## 7. Schema-enforced derived-memory creation (substrate; the gap the reviews flag)
 
-MemPalace's reviewers note "no write gating." The fork gates **synthesis-node creation**
-(not raw drawers — those stay as-is to preserve mining): creating a synthesis node *requires*
-a `DESC` and validated `synthesized-from` edges to real existing nodes. A creation missing
-them is rejected at the tool boundary — the model retries deterministically, every time,
-instead of a validator catching malformed structure later. Structural violations become
-*unrepresentable*; validators (§8) then handle only *judgment* errors.
+MemPalace's reviewers note "no write gating." The fork gates **derived-memory creation** (not
+raw drawers — those stay as-is to preserve mining): creating a derived node (a closet
+synthesis) *requires* a `DESC` and validated `synthesized-from` edges to real existing
+sources. A creation missing them is rejected at the tool boundary — the model retries
+deterministically, every time, instead of a validator catching malformed structure later.
+Structural violations become *unrepresentable*; validators (§8) then handle only *judgment*
+errors. (With the native-semantics rescope this gate is a thin helper over closet creation +
+edge linking, not a whole synthesis-node subsystem.)
 
-Also enforced here: the **empty-inflation guard**. A new height level is created *only when
-it connects things not connected before* — never when it merely abstracts what's below.
+Also enforced here: the **empty-inflation guard**. A new refinement level is created *only
+when it connects things not connected before* — never when it merely abstracts what's below.
 Deterministic pre-gate (structurally: does this draw from ≥2 distinct lower nodes not already
 sharing a parent?), then model judgment (is the content a genuine insight?). Cheap
 deterministic filter first.
@@ -238,12 +288,12 @@ neighborhood out.
 
 ## 9a. mem-core: resident memory as a deterministic, scoped render
 
-The three memory tiers: **mem-raw** (append-only verbatim transcripts, source of truth),
-**mem-synth** (the synthesis-height DAG — searchable, retrieved on demand), and **mem-core**
+The three memory tiers: **source transcript** (append-only verbatim transcripts, source of truth),
+**derived memory** (the synthesis-height DAG — searchable, retrieved on demand), and **mem-core**
 (the small always-resident working set, in context every turn without a retrieval decision).
 
 **mem-core is not a place or a
-separate store. It is a *rendered view* of mem-synth.** There is one memory graph; mem-core
+separate store. It is a *rendered view* of derived memory.** There is one memory graph; mem-core
 is a deterministic markdown render of "the most load-bearing synth nodes for a given scope."
 Global mem-core is one render; a project's mem-core is another render of the same graph
 through a different scope filter. One renderer, scope as a parameter, output path as a
@@ -258,11 +308,11 @@ stops being retrieved, it drops out of the next render automatically.
 ### Scope is a graph-connection query, not separate storage
 
 A render's scope is defined by *what the graph connects to*, not by putting nodes in a
-project box. If a synth node's lineage (its `synthesized-from` chain down to mem-raw) reaches
+project box. If a synth node's lineage (its `synthesized-from` chain down to source transcript) reaches
 a specific project room, it is related to that project — the graph already knows this. Scoping is therefore
 a **traversal query**: "synth nodes whose lineage reaches scope X." A node touching three
 projects appears in all three renders, correctly, with one stored copy — which is why this is
-not duplication of mem-synth. It is the same single graph viewed through a connection filter.
+not duplication of derived memory. It is the same single graph viewed through a connection filter.
 
 Default scope = lineage reaches a room/path. An **optional per-scope tag config**
 (ElectricShepherd-side) refines it: "also include nodes tagged `X`" or "only nodes tagged
@@ -288,7 +338,7 @@ with no tension.
 The deterministic policy runtime (`scripts/run-policy-cycle.ts`,
 `scripts/run-memory-consolidation-and-validation.ts`, and adapter modules)
 produces scoped selection/ranking plus automatic mem-core markdown renders. The runtime
-materializes memory files under `eshepherd/memory/` (or `memory/` when present) so mem-core
+materializes memory files under `.electric-shepherd/memory/` so mem-core
 behaves like dynamic config instead of a human-maintained prompt artifact.
 
 ### Nesting is permitted and nearly free
@@ -361,9 +411,9 @@ at the right moment lags. The fixes are event-triggered plugins, not more prompt
 
 | Tier | Boundary | Status |
 |---|---|---|
-| **mem-raw** | transcripts pushed in, append-only | **Mechanical** (hooks fire on Stop/PreCompact → `mempalace mine`; append-only enforced substrate-side). One wiring check: confirm it fires on the *OpenCode* harness, not only the Claude Code/Codex/Cursor hooks it was built for. |
-| **mem-synth** | only well-formed nodes exist | **Mechanical** (substrate gates `create_synthesis_node` on DESC + ≥2 validated sources; inflation guard blocks weak syntheses before write). |
-| **mem-synth** | *only the dreamer writes it* | **Convention** — nothing stops an interactive agent from calling `create_synthesis_node` if it holds the tool. Gap #3. |
+| **source transcript** | transcripts pushed in, append-only | **Mechanical** (hooks fire on Stop/PreCompact → `mempalace mine`; append-only enforced substrate-side). One wiring check: confirm it fires on the *OpenCode* harness, not only the Claude Code/Codex/Cursor hooks it was built for. |
+| **derived memory** | only well-formed nodes exist | **Mechanical** (substrate gates `add_drawer` on DESC + ≥2 validated sources; inflation guard blocks weak syntheses before write). |
+| **derived memory** | *only the dreamer writes it* | **Convention** — nothing stops an interactive agent from calling `add_drawer` if it holds the tool. Gap #3. |
 | **mem-core** | derived render, file-only, never round-trips | **Mechanical** (post-audit: render is deterministic, file-only). |
 | **mem-core** | *right render present in context, at compaction not just session start* | **Mechanical in OpenCode plugin path** — `turn-guard` re-resolves and reinjects scoped mem-core on `session.started`, `session.idle`, and `session.compacted` (remaining risk is harness/tooling drift, not missing mechanism). |
 
@@ -387,7 +437,7 @@ earlier turn-guard approach of injecting mem-core as a synthetic user message (w
 the summarizer's mercy). The fix: turn-guard implements `experimental.session.compacting` to
 inject the freshly-resolved scoped mem-core into the compaction prompt, guaranteeing it
 survives into the post-compaction context. Mirrors the existing PreCompact *push* (transcripts
-out to mem-raw) with a *pull* (mem-core in).
+out to source transcript) with a *pull* (mem-core in).
 
 Two cautions: the hook is `experimental.` (an active proposal, #4317, would stabilize
 `/compact` and the compaction API), so isolate it behind a thin wrapper — same adapter
@@ -410,23 +460,23 @@ but not plumbed. Fix: a mechanism (plugin watching the active working directory,
 re-resolve at session-start/compaction) that makes injection consult the loader rather than a
 static list. Until then, the scoping designed in §9a is inert.
 
-### Gap #3 — enforce "only the dreamer writes mem-synth" (if it's a real invariant)
+### Gap #3 — enforce "only the dreamer writes derived memory" (if it's a real invariant)
 
-The design says only the dreamer creates mem-synth, but that is currently a convention — an
-interactive `build`/`plan` agent with the synthesis tools in scope could call them mid-session.
+The design says only the dreamer creates derived memory, but that is currently a convention — an
+interactive `build`/`plan` agent with the derived-memory write tools in scope could call them mid-session.
 If the invariant is real, enforce it the same way Serena's memory tools were gated: tool-scope
-`create_synthesis_node` / `apply_merge` to the dreamer agent only, deny them to interactive
+`add_drawer` / `apply_merge` to the dreamer agent only, deny them to interactive
 agents. Cheap, closes the gap, and keeps the substrate/policy boundary honest (interactive
 agents write *raw* via the capture path; the dreamer is the sole synthesizer). Note this is
 distinct from §6/§7's *write-quality* gating (which is mechanical and stays) — this is
 *write-authority* gating.
 
-### Gap #4 — verify mem-raw capture fires on OpenCode
+### Gap #4 — verify source transcript capture fires on OpenCode
 
 The capture hooks (`mempal_save_hook.sh`, `mempal_precompact_hook.sh`) were written for the
 Claude Code / Codex / Cursor hook protocols. The active harness is OpenCode. Confirm the
 OpenCode equivalent (a compaction plugin or Stop-equivalent) actually fires the
-`mempalace mine`, because if it doesn't, mem-raw silently stops capturing and the failure is
+`mempalace mine`, because if it doesn't, source transcript silently stops capturing and the failure is
 invisible until a dreamer run comes up empty. Design is sound; this is a wiring-verification
 item.
 
@@ -451,19 +501,19 @@ Current plugin/runtime state now closes these with deterministic wiring:
 - Gap #2: reinjection resolves scope from session/event metadata and recent file paths, then
   loads broad→narrow scoped renders through the loader.
 - Gap #3: `turn-guard` enforces write-authority as an event-time guard by detecting
-  unauthorized `create_synthesis_node` / `apply_merge` calls and issuing deterministic
+  unauthorized `add_drawer` / `apply_merge` calls and issuing deterministic
   correction prompts (authoritative hard denial still belongs in harness/tool-scope policy).
-- Gap #4: `turn-guard` emits OpenCode mem-raw capture verification heartbeats and optional
+- Gap #4: `turn-guard` emits OpenCode source transcript capture verification heartbeats and optional
   capture-command execution status to `./.electric-shepherd/turn-guard-status.json`.
 - Operator control surface: slash commands in `command/` (`/count-sheep`, `/herd`,
   `/lucid-dream`, `/wake-up`, `/headcount`) provide explicit consolidation actions;
   memory-mutating commands run as isolated subtasks, while `/wake-up` intentionally
   runs in-session to refresh the active context.
-- Auto-synthesis hardening: idle/volume/compaction triggers are now guarded by
+- Auto-consolidation hardening: idle/volume/compaction triggers are now guarded by
   cooldown + timeout watchdog + cross-process lockfile + process-tree kill +
   bounded tracking maps + start-failure cooldown rollback.
 - Standalone scheduler safety: `scripts/run-memory-consolidation-and-validation.ts`
-  now uses shared lock primitives in `scripts/synth-lock.ts` so cron/n8n runs do
+  now uses shared lock primitives in `scripts/consolidation-lock.ts` so cron/n8n runs do
   not overlap plugin-triggered synthesis runs.
 
 
@@ -515,7 +565,7 @@ while the component that's *best* at it (a script) sat idle as an occasionally-c
 was upside down. The fix is to give the loop to the script.
 
 **The loop (script-owned, resume-safe):**
-1. **Worklist (deterministic, no model):** query for mem-raw drawers with no
+1. **Worklist (deterministic, no model):** query for source transcript drawers with no
    `synthesized-from` edge — i.e. unsynthesized. That's a graph query; it's the worklist.
    Triggerable by a `/count-sheep`-style command that runs the *script*, not an agent.
 2. **Per-item judgment (model as stateless function):** for each raw memory, one **bounded,
@@ -526,7 +576,7 @@ was upside down. The fix is to give the loop to the script.
    resumable: on restart the loop skips items that already have a journal entry. The model
    **never accumulates** across items; each call is stateless; the *script* holds loop state
    externally, so nothing fills a context and nothing compacts.
-3. **Promote then clear:** a judgment is an **annotation on its mem-raw drawer** (not a synth
+3. **Promote then clear:** a judgment is an **annotation on its source transcript drawer** (not a synth
    node — see §12b), committed once journaled. Clear each journal file only *after* its
    annotation is confirmed committed (per-item, not all-at-once) — a write-ahead-log
    discipline: the annotation is authoritative once written; the journal is the rebuildable
@@ -554,7 +604,7 @@ at the source for the *interactive* path; the dream loop is immune regardless.)
 ### 12b. A judgment is an annotation, not a synth node
 
 A **synth node connects ≥2 memories**; a **judgment annotates one memory**. They are
-different kinds of thing, so a per-memory judgment is stored as metadata *on the mem-raw
+different kinds of thing, so a per-memory judgment is stored as metadata *on the source transcript
 drawer* (e.g. a `judgment` field + a `judged` status), never as a synth node. The
 synth-creation step then queries "judged-but-unsynthesized" drawers. This keeps the synth
 graph meaning what it says (connections), and keeps judgments queryable as the worklist
@@ -580,7 +630,7 @@ a smell that orchestration leaked back into the model.
 
 Safety: the script revises synth nodes and re-renders mem-core, never edits raw-drawer
 *content* (only appends annotations), never touches code. Human audit concentrates on
-mem-synth anomalies (inconsistency, bad merge candidates, drift), not on approving every
+derived memory anomalies (inconsistency, bad merge candidates, drift), not on approving every
 mem-core refresh.
 
 ## 13. The honest risk, and what bounds it
@@ -609,13 +659,13 @@ this grows beside it. Build the substrate (Project A, in the fork) first; build 
 
 ### Project A — MemPalace fork (substrate; open PR)
 
-**A1 — synthesis-node drawer kind + retrieval counters.** *(Done.)* Added `node_kind=synthesis` + `height`
+**A1 — derived-drawer drawer kind + retrieval counters.** *(Done.)* Added `node_kind=synthesis` + `height`
 metadata to drawers; `last_retrieved`/`retrieval_count` stamped on the read path.
 Pure additive metadata + a read-side counter. Implements §4 (nodes), §6.
 
 **A2 — synthesis edges + traversal API.** *(Done.)* Reserved `synthesized-from`/`merged-into` predicates;
 added the deterministic traversal read-API (`get_ancestors`/`get_descendants`/`get_height`/
-`resolve_canonical`/candidate-detection) over the KG + synthesis nodes, as new MCP tools.
+`resolve_canonical`/candidate-detection) over the KG + derived drawers, as new MCP tools.
 Reuses `check_duplicate` as the candidate seed. Implements §3, §4 (edges/traversal), §5
 (resolution), §6 (candidates). Visual graph render extends the existing exporter.
 
@@ -642,7 +692,7 @@ tool names. Build first so everything else in policy code is insulated from subs
 via the adapter. Immediately useful; exercises the A2 traversal API.
 
 **Policy step 3 — synthesis consolidation (map-reduce) + inflation guard.** §12, §7
-(content-judgment half). Creates synthesis nodes via the substrate.
+(content-judgment half). Creates derived drawers via the substrate.
 
 **Policy step 4 — bidirectional validation + merge adjudication + escalation.** §8, §5
 (adjudication half). The context-isolated validator subagent, conditional frontier escalation,
@@ -655,8 +705,8 @@ the three tiers *operationally* reliable rather than only structurally sound. In
 order: (a) compaction-aware mem-core re-injection plugin — pull-on-compact mirroring the
 existing push-on-compact (load-bearing, not deferrable); (b) scope-aware injection wiring so
 the loader actually drives what's injected for the current working directory; (c) tool-scope
-`create_synthesis_node`/`apply_merge` to the dreamer only (write-authority gating); (d) verify
-mem-raw capture fires on the OpenCode harness. All are event-triggered plumbing + one tool-
+`add_drawer`/`apply_merge` to the dreamer only (write-authority gating); (d) verify
+source transcript capture fires on the OpenCode harness. All are event-triggered plumbing + one tool-
 scope denial — no prompts. Build this **before** the graph-view inspection surface
 (operational reliability precedes inspection).
 
@@ -675,8 +725,8 @@ scope denial — no prompts. Build this **before** the graph-view inspection sur
   hard substrate enforcement — see scorecard).
 - **§12 factory inversion — partial / divergent.** The consolidation pass *is* a script that
   owns the loop (`scripts/run-memory-consolidation-and-validation.ts`: worklist-first,
-  batch-chunked, cross-process lock via `scripts/synth-lock.ts`, triggered by `/count-sheep`
-  and auto-synth-on-compact — not an agent-in-charge). But its *internal mechanics* still
+  batch-chunked, cross-process lock via `scripts/consolidation-lock.ts`, triggered by `/count-sheep`
+  and auto-consolidation-on-compact — not an agent-in-charge). But its *internal mechanics* still
   diverge from §12a–c: it talks to MemPalace over **MCP** (not as a library), uses **live
   subagent mappers/auditors** (not per-item bounded **no-tools** direct model calls), and has
   **no `eshepherd/cache/` crash-safe judgment journal** or `judged`-status drawer-annotation
@@ -719,7 +769,7 @@ the converter PR lands); VRAM hand-off between the two runtimes is automated.
 surgical compression of stale *interactive-session* content (keeping recent verbatim) — the
 live-session analog of what the dream loop does for durable memory. Division of labor: DCP
 owns interactive-session pruning; ElectricShepherd owns durable memory injection (mem-core
-into the compaction prompt via `experimental.session.compacting`, mem-raw capture). Both touch
+into the compaction prompt via `experimental.session.compacting`, source transcript capture). Both touch
 the same compaction machinery, so they must coordinate (don't both rewrite the compaction
 prompt) — test together early, since plugin-ordering interactions pass in isolation and break
 combined.

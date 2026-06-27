@@ -37,7 +37,7 @@ test("composes direct + store-root memory broad-to-narrow in scope order", () =>
 
   // Broad scope: a direct memory.md at the root plus a store-root render.
   writeFileSync(join(root, "memory.md"), "ROOT DIRECT", "utf8");
-  writeFileEnsuring(join(root, "eshepherd", "memory", "memory.md"), "ROOT STORE");
+  writeFileEnsuring(join(root, ".electric-shepherd", "memory", "memory.md"), "ROOT STORE");
   // Narrow scope: a direct memory.md in the start directory.
   writeFileSync(join(sub, "memory.md"), "SUB DIRECT", "utf8");
 
@@ -110,7 +110,7 @@ test("returns an empty composition when no memory files exist", () => {
 test("honors a custom store-root location", () => {
   const root = makeWorkspace();
 
-  // Custom store root instead of the default eshepherd/memory or memory.
+  // Custom store root instead of the default .electric-shepherd/memory.
   writeFileEnsuring(join(root, "custom-store", "memory.md"), "CUSTOM STORE ROOT");
 
   const result = loadMemcoreForDirectory({

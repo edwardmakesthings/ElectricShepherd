@@ -1,4 +1,4 @@
-import { createMemgraphClient, type RawMemoryWorkItem } from "../adapter/memgraph.ts";
+import { createMemgraphClient, type SourceDrawerWorkItem } from "../adapter/memgraph.ts";
 import { MCPHttpClient, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-client.ts";
 // @ts-expect-error runtime script package does not include node typings
 import { execFileSync } from "node:child_process";
@@ -24,7 +24,7 @@ import {
   type CadenceOrchestratorResult,
 } from "../adapter/cadence-orchestrator.ts";
 import { loadRuntimeEnv } from "./runtime-env.ts";
-import { acquireSynthLock, releaseSynthLock } from "./synth-lock.ts";
+import { acquireConsolidationLock, releaseConsolidationLock } from "./consolidation-lock.ts";
 
 declare const process: {
   argv: string[];
@@ -36,10 +36,10 @@ declare const process: {
   exit: (code: number) => never;
 };
 
-// Project root whose shared synth-lock this process currently holds (null when it
+// Project root whose shared consolidation lock this process currently holds (null when it
 // does not hold one, e.g. the lock was inherited from the spawning plugin). Used
 // so both the success path and the top-level catch can release it.
-let heldSynthLockRoot: string | null = null;
+let heldConsolidationLockRoot: string | null = null;
 
 function isTruthyFlag(value: string | undefined): boolean {
   if (!value) return false;
@@ -66,7 +66,7 @@ type CadenceState = {
   areas: Record<string, { lastCandidateCount: number; lastTriggeredISO?: string }>;
 };
 
-type WorklistMode = "unsynthesized" | "all";
+type WorklistMode = "unconsolidated" | "all";
 
 type WorklistOptions = {
   mode: WorklistMode;
@@ -251,10 +251,9 @@ function resolveMemcoreFilePath(args: {
   }
 
   const configured = args.explicitBaseDir ? resolve(args.explicitBaseDir) : undefined;
-  const candidates = [configured, resolve("eshepherd/memory"), resolve("memory")].filter(Boolean) as string[];
+  const candidates = [configured, resolve(".electric-shepherd/memory")].filter(Boolean) as string[];
   const existing = candidates.find((dir) => existsSync(dir));
-  const base = existing || resolve("eshepherd/memory");
-
+  const base = existing || resolve(".electric-shepherd/memory");
   const scopeDir = resolve(args.scopeDir || process.cwd());
   const workspaceRoot = findWorkspaceRoot(scopeDir);
   const relScope = relative(workspaceRoot, scopeDir);
@@ -343,7 +342,7 @@ async function callSubagentAuditor(args: {
   opencodeBin: string;
 }): Promise<AuditorEnvelope> {
   const taskPrompt = [
-    "Audit synthesis consolidation and validation outputs.",
+    "Audit consolidation and validation outputs.",
     "Return ONLY valid JSON object shaped as:",
     "{ verdict: pass|revise|escalate, findings: string[], recommendedActions: string[] }",
     "Consolidation result:",
@@ -441,12 +440,14 @@ function parseConsolidationOptions(argv: string[]): SynthesisConsolidationOption
     query,
     targetWing,
     targetRoom,
+    targetHall: getArg(argv, "--target-hall") || getArg(argv, "--hall") || undefined,
     searchLimit: Number(getArg(argv, "--search-limit") || "12"),
     minimumDistinctSources: Number(getArg(argv, "--min-sources") || "2"),
     minimumContentCharacters: Number(getArg(argv, "--min-content-chars") || "220"),
     minimumPopulatedSections: Number(getArg(argv, "--min-section-count") || "3"),
     minimumMapperConfidence: (getArg(argv, "--mapper-confidence-floor") as "high" | "medium" | "low" | undefined) || "medium",
     labels: parseCSV(getArg(argv, "--labels")),
+    writeDurableFactsToKg: !hasFlag(argv, "--no-kg-durable-facts"),
     applyWrites: hasFlag(argv, "--apply"),
     mapperSummaries,
   };
@@ -457,7 +458,7 @@ function parseWorklistOptions(argv: string[]): WorklistOptions {
   const limit = Number(getArg(argv, "--worklist-limit") || getArg(argv, "--search-limit") || "200");
   const batchSize = Math.max(1, Number(getArg(argv, "--batch-size") || "25"));
   return {
-    mode: allMode ? "all" : "unsynthesized",
+    mode: allMode ? "all" : "unconsolidated",
     limit: Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 200,
     batchSize,
   };
@@ -472,7 +473,7 @@ function chunkItems<T>(items: T[], size: number): T[][] {
   return out;
 }
 
-function parseDrawerPayload(raw: unknown): RawMemoryWorkItem | null {
+function parseDrawerPayload(raw: unknown): SourceDrawerWorkItem | null {
   const root = asObject(raw);
   const candidates = [
     asObject(root.drawer),
@@ -497,7 +498,7 @@ function parseDrawerPayload(raw: unknown): RawMemoryWorkItem | null {
 
 async function ensureRawEntriesForChunk(
   client: ReturnType<typeof createMemgraphClient>,
-  items: RawMemoryWorkItem[],
+  items: SourceDrawerWorkItem[],
 ): Promise<Array<{ id: string; text: string }>> {
   const out: Array<{ id: string; text: string }> = [];
   for (const item of items) {
@@ -599,7 +600,7 @@ function buildMemcoreMarkdown(args: {
     "# Labeled memory blocks (always in context)",
     "",
     "## [project-state]",
-    `- Latest synthesis title: ${args.consolidation.synthesisDraft.title}`,
+    `- Latest consolidation title: ${args.consolidation.consolidationDraft.title}`,
     `- Consolidation query: ${args.query}`,
     auditorLine,
     "",
@@ -623,7 +624,7 @@ function usage(): string {
     "Usage:",
     "  node scripts/run-memory-consolidation-and-validation.ts [--query <text>] [--wing <wing>] [--room <room>] [flags]",
     "",
-    "Synthesis Consolidation flags:",
+    "Consolidation flags:",
     "  --search-limit <n>",
     "  --min-sources <n>",
     "  --min-content-chars <n>",
@@ -632,11 +633,11 @@ function usage(): string {
     "  --mapper-summaries-file <path-to-json-array>",
     "  --use-live-mapper                (invoke dream-mapper via task tool)",
     "  --mapper-agent <name>            (default: dream-mapper)",
-    "  --all | --full-scope             (worklist mode: reprocess all raw memories in scope)",
-    "  --batch-size <n>                 (chunk worklist into batch synthesis calls; default: 25)",
-    "  --worklist-limit <n>             (max raw drawers enumerated; default: 200)",
+    "  --all | --full-scope             (worklist mode: reprocess all source drawers in scope)",
+    "  --batch-size <n>                 (chunk worklist into batch consolidation calls; default: 25)",
+    "  --worklist-limit <n>             (max source drawers enumerated; default: 200)",
     "  --labels <csv>",
-    "  --apply                          (creates synthesis node if checks pass; default is dry-run)",
+    "  --apply                          (creates derived drawers if checks pass; default is dry-run)",
     "",
     "Validation + Merge Review flags:",
     "  --scope-room <room>",
@@ -655,7 +656,7 @@ function usage(): string {
     "Mem-core apply flags:",
     "  --apply-mem-core                 (legacy explicit flag; mem-core auto write is on by default)",
     "  --no-mem-core-auto               (disable automatic mem-core file output)",
-    "  --mem-core-dir <path>            (base dir; default: ./eshepherd/memory or ./memory)",
+    "  --mem-core-dir <path>            (base dir; default: ./.electric-shepherd/memory)",
     "  --mem-core-scope-dir <path>      (scope directory used to place layered memory.md under the base dir)",
     "  --mem-core-file <path>           (full override path for one output file)",
     "",
@@ -676,7 +677,7 @@ function usage(): string {
     "  JSON envelope: { worklist, worklistMode, consolidation, validationMergeReview, mapper?, auditor?, memCoreApply?, cadence?, cadenceState? }",
     "",
     "Read-only defaults:",
-    "  Without --apply and --apply-merges, the run proposes synthesis/merge decisions but does not write them to MemPalace.",
+    "  Without --apply and --apply-merges, the run proposes consolidation/merge decisions but does not write them to MemPalace.",
     "  mem-core render remains enabled by default and writes local files only.",
   ].join("\n");
 }
@@ -691,22 +692,22 @@ async function main(): Promise<void> {
   }
 
   // Cross-process lock so a plugin-triggered run, a cron run, and an n8n run can
-  // never overlap. The turn-guard plugin sets ESHEPHERD_SYNTH_LOCK_INHERITED when
+  // never overlap. The turn-guard plugin sets ESHEPHERD_CONSOLIDATION_LOCK_INHERITED when
   // it spawns us (it already holds the lock), so we skip acquire/release in that
   // case to avoid deadlocking against the parent. --no-lock /
-  // ESHEPHERD_SYNTH_LOCK_DISABLED bypass it for tests.
+  // ESHEPHERD_CONSOLIDATION_LOCK_DISABLED bypass it for tests.
   const lockInherited =
-    isTruthyFlag(process.env.ESHEPHERD_SYNTH_LOCK_INHERITED) ||
-    isTruthyFlag(process.env.ESHEPHERD_SYNTH_LOCK_DISABLED) ||
+    isTruthyFlag(process.env.ESHEPHERD_CONSOLIDATION_LOCK_INHERITED) ||
+    isTruthyFlag(process.env.ESHEPHERD_CONSOLIDATION_LOCK_DISABLED) ||
     hasFlag(argv, "--no-lock");
   if (!lockInherited) {
-    const staleMs = Number(process.env.ESHEPHERD_AUTO_SYNTH_TIMEOUT_MS) || 300000;
+    const staleMs = Number(process.env.ESHEPHERD_AUTO_CONSOLIDATION_TIMEOUT_MS) || 300000;
     const lockRoot = process.cwd();
-    if (!acquireSynthLock(lockRoot, { source: "run-memory-consolidation-and-validation" }, staleMs)) {
-      process.stdout.write(`${JSON.stringify({ skipped: true, reason: "synth-lock-held" }, null, 2)}\n`);
+    if (!acquireConsolidationLock(lockRoot, { source: "run-memory-consolidation-and-validation" }, staleMs)) {
+      process.stdout.write(`${JSON.stringify({ skipped: true, reason: "consolidation-lock-held" }, null, 2)}\n`);
       return;
     }
-    heldSynthLockRoot = lockRoot;
+    heldConsolidationLockRoot = lockRoot;
   }
 
   const consolidationOptions = parseConsolidationOptions(argv);
@@ -741,15 +742,15 @@ async function main(): Promise<void> {
   let validationSkippedReason: string | undefined;
 
   const enumerateAll = worklistOptions.mode === "all";
-  let worklist: RawMemoryWorkItem[] = [];
+  let worklist: SourceDrawerWorkItem[] = [];
   if (includeBasePipeline) {
     worklist = enumerateAll
-      ? await client.listRawMemoriesByScope({
+      ? await client.listSourceDrawersByScope({
           wing: consolidationOptions.targetWing,
           room: consolidationOptions.targetRoom,
           limit: worklistOptions.limit,
         })
-      : await client.findUnsynthesizedRawMemories({
+      : await client.findUnconsolidatedSourceDrawers({
           wing: consolidationOptions.targetWing,
           room: consolidationOptions.targetRoom,
           limit: worklistOptions.limit,
@@ -763,8 +764,8 @@ async function main(): Promise<void> {
     batchSize: worklistOptions.batchSize,
     note: includeBasePipeline
       ? enumerateAll
-        ? "full-scope override active: this run may reprocess already-synthesized memories"
-        : "default mode: unsynthesized raw memories only"
+        ? "full-scope override active: this run may reprocess already-consolidated source drawers"
+        : "default mode: source drawers with no incoming synthesized-from edges"
       : "cadence-only run: base worklist pipeline not executed",
     items: worklist.map((item) => ({
       drawer_id: item.drawer_id,
@@ -778,15 +779,15 @@ async function main(): Promise<void> {
   if (!enumerateAll && worklist.length === 0 && includeBasePipeline) {
     const output = {
       skipped: true,
-      reason: "nothing-unsynthesized",
+      reason: "nothing-unconsolidated",
       mode: includeBasePipeline ? "full-pipeline" : "cadence-only",
       worklistMode: worklistOptions.mode,
       worklist: worklistOutput,
     };
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
-    if (heldSynthLockRoot) {
-      releaseSynthLock(heldSynthLockRoot);
-      heldSynthLockRoot = null;
+    if (heldConsolidationLockRoot) {
+      releaseConsolidationLock(heldConsolidationLockRoot);
+      heldConsolidationLockRoot = null;
     }
     return;
   }
@@ -800,9 +801,9 @@ async function main(): Promise<void> {
       worklist: worklistOutput,
     };
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
-    if (heldSynthLockRoot) {
-      releaseSynthLock(heldSynthLockRoot);
-      heldSynthLockRoot = null;
+    if (heldConsolidationLockRoot) {
+      releaseConsolidationLock(heldConsolidationLockRoot);
+      heldConsolidationLockRoot = null;
     }
     return;
   }
@@ -973,14 +974,14 @@ async function main(): Promise<void> {
 
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
 
-  if (heldSynthLockRoot) {
-    releaseSynthLock(heldSynthLockRoot);
-    heldSynthLockRoot = null;
+  if (heldConsolidationLockRoot) {
+    releaseConsolidationLock(heldConsolidationLockRoot);
+    heldConsolidationLockRoot = null;
   }
 }
 
 main().catch((err) => {
-  if (heldSynthLockRoot) releaseSynthLock(heldSynthLockRoot);
+  if (heldConsolidationLockRoot) releaseConsolidationLock(heldConsolidationLockRoot);
   process.stderr.write(`[memory-consolidation-validation] ${String(err)}\n`);
   process.exit(1);
 });

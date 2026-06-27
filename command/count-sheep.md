@@ -41,5 +41,5 @@ Execution steps:
 
 Lock behavior:
 
-- Do not force `ESHEPHERD_SYNTH_LOCK_INHERITED` unless it is already set by the parent context.
-- Otherwise let the script acquire/release its own synth lock.
+- Do not force `ESHEPHERD_CONSOLIDATION_LOCK_INHERITED` unless it is already set by the parent context.
+- Otherwise let the script acquire/release its own consolidation lock.

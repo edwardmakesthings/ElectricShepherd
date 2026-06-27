@@ -3,7 +3,7 @@
 > *Do androids dream of electric sheep?*
 
 Electric Shepherd tends your AI memory while you sleep. It consolidates raw conversation
-transcripts into a synthesized knowledge graph, prunes what's stale, connects what's
+transcripts into closets and lineage facts, prunes what's stale, connects what's
 related, and keeps your AI coding assistant from re-deriving the same things every session.
 
 Built on [MemPalace](https://github.com/MemPalace/mempalace) as the memory substrate.
@@ -13,7 +13,7 @@ with Node against MemPalace MCP — no cloud, no API bills.
 
 Current repo status: core policy runtime is in place (plugin, commands, snippets,
 adapter, deterministic runtime scripts, and dreamer agent profiles), with
-compaction-aware scoped mem-core reinjection, opt-in auto-synthesis, and bounded
+compaction-aware scoped mem-core reinjection, opt-in auto-consolidation, and bounded
 MCP/notification timeouts wired. The runtime also now rejects unsafe shell-style
 commands for the turn-guard subprocess path.
 
@@ -24,14 +24,14 @@ commands for the turn-guard subprocess path.
 Your AI coding sessions produce raw transcripts. MemPalace already mines and stores these
 verbatim (that's its job). Electric Shepherd works *above* that layer:
 
-- **Consolidates** raw transcripts into synthesized memory nodes — durable decisions,
-  root causes, worked examples — organized into a synthesis-height graph where height
-  reflects how many times something has been refined.
+- **Consolidates** raw transcripts into derived memory — durable decisions, root causes,
+  worked examples — written as **closets** (summaries/arcs) and **KG triples** (durable facts),
+  linked back to source drawers with explicit lineage edges.
 - **Connects** related memories across sessions that were written separately, building the
   cross-session links no single session could see.
 - **Prunes** what's stale — memories that haven't been retrieved or touched fade as
   candidates for archival.
-- **Validates** that synthesized connections actually hold, bidirectionally.
+- **Validates** that lineage and merge connections actually hold, bidirectionally.
 - **Notifies** you (via ntfy or similar) when something needs human judgment rather than
   silently guessing.
 
@@ -44,15 +44,40 @@ maintained it overnight (or when idle).
 ## How it relates to MemPalace
 
 MemPalace stores verbatim content and retrieves it — it never paraphrases or transforms.
-Electric Shepherd respects that invariant completely: raw drawers are never altered.
-Synthesis nodes are *new* drawers (verbatim content, just generated rather than mined),
-and the relationships between them live in MemPalace's existing knowledge graph as
-`synthesized-from` and `merged-into` predicates. Electric Shepherd is a client of
-MemPalace, not a fork of it.
+Electric Shepherd respects that invariant completely **and builds entirely out of MemPalace's
+own native layers** rather than inventing parallel structures:
 
-> **Note:** Electric Shepherd expects MemPalace graph substrate APIs (synthesis-node support,
-> traversal API, retrieval counters, merge/canonical operations) to be present. If your
-> environment does not expose these tools yet, upgrade MemPalace before enabling automation.
+- **Raw transcripts** stay as drawers — frozen, never altered.
+- **Summaries and arcs** are written as **closets** (MemPalace's native revisable summary
+  layer that points back to source).
+- **Durable facts** are written as **KG triples** with validity windows, so a fact that
+  changes is superseded with history (`kg_invalidate` the old, `kg_add` the new) — a native
+  changelog.
+- **Categories** use the native **halls** (`facts` / `events` / `discoveries` /
+  `preferences` / `advice`).
+- **Relationships** (`synthesized-from`, `merged-into`) live in MemPalace's existing knowledge
+  graph.
+
+Electric Shepherd is a client of MemPalace, not a fork of it.
+
+### Non-invasive by design
+
+Because every artifact Electric Shepherd creates is a *native MemPalace object*, two things
+follow that most memory-augmentation tools can't promise:
+
+- **It works with whatever's already in your palace.** No migration, no schema conversion, no
+  "import your memories into our model." Point it at an existing populated palace and it starts
+  organizing from there.
+- **Removing it leaves your palace fully intact.** Stop running Electric Shepherd and MemPalace
+  carries on exactly as before — just less organized. The closets, triples, hall assignments,
+  and connections it created remain valid native MemPalace data. Nothing depends on it
+  continuing to run.
+
+> **Note:** The optional substrate fork adds two primitives MemPalace lacks natively —
+> retrieval counters (read-tracking) and recursive lineage traversal. Electric Shepherd uses
+> them when present and degrades gracefully without them (existing data stays valid; only
+> read-tracking and deep-lineage queries are affected). If you want the full feature set,
+> run the forked substrate; if not, the core organizing still works against stock MemPalace.
 
 ---
 
@@ -73,7 +98,7 @@ OpenCode resolves this package on startup. This repo currently provides:
 - Dreamer agent profiles (`dreamer`, `dream-consolidator`, `dream-mapper`, `dream-auditor`)
 - Slash commands in `command/` (`/count-sheep`, `/herd`, `/lucid-dream`, `/wake-up`, `/headcount`) for consolidation workflows
 - The `memsave` / `memload` OpenChamber snippets
-- The memory discipline instruction plus runtime-derived mem-core renders under `eshepherd/memory/`
+- The memory discipline instruction plus runtime-derived mem-core renders under `.electric-shepherd/memory/`
 
 **Policy runtime (separate — runs headless, not inside OpenCode):**
 
@@ -176,7 +201,7 @@ npm run policy:mem-core:rebuild
 
 The first command exercises the unit suite; the second confirms the mem-core loader
 path works without requiring a live model. The rebuild command writes canonical
-scoped mem-core to `eshepherd/memory/memory.md`.
+scoped mem-core to `.electric-shepherd/memory/memory.md`.
 
 ---
 
@@ -196,7 +221,7 @@ electric-shepherd/
 │   ├── herd.md                # read-only consolidation preview slash command
 │   ├── lucid-dream.md         # deep consolidation+merge slash command
 │   ├── wake-up.md             # in-session scoped mem-core refresh slash command
-│   └── headcount.md           # pending-vs-synth counts slash command
+│   └── headcount.md           # pending source-vs-derived counts slash command
 ├── instructions/
 │   ├── agent-discipline.md    # agent behavior rules and guardrails
 ├── eshepherd/
@@ -237,33 +262,33 @@ All configuration is optional — defaults work out of the box.
 | `MEMPALACE_MCP_HEADERS_JSON` | unset | Optional JSON map of additional MCP HTTP headers |
 | `MEMGRAPH_TOOL_PREFIX` | `mempalace_` | Prefix for MemPalace tools (set only if your gateway rewrites tool names) |
 | `NTFY_URL` | unset | ntfy endpoint for escalation notifications |
-| `ESHEPHERD_MEMRAW_TOOL_PREFIX` | `mempalace_` | Optional tool prefix override for mem-raw capture path |
-| `ESHEPHERD_MEMRAW_DEDUP_ENABLED` | `false` | Optional raw-capture dedupe gate (default keeps mem-raw append-only) |
+| `ESHEPHERD_SOURCE_CAPTURE_TOOL_PREFIX` | `mempalace_` | Optional tool prefix override for source-transcript capture path |
+| `ESHEPHERD_SOURCE_CAPTURE_DEDUP_ENABLED` | `false` | Optional capture dedupe gate (default keeps source-transcript capture append-only) |
 | `ESHEPHERD_MEMCORE_REINJECT_ENABLED` | `true` | Enable plugin-driven scoped mem-core reinjection |
 | `ESHEPHERD_MEMCORE_REINJECT_ON_COMPACT` | `true` | Force mem-core reload after `session.compacted` |
 | `ESHEPHERD_MEMCORE_REINJECT_ON_IDLE` | `true` | Reinject when scope/content changed during idle checks |
 | `ESHEPHERD_MEMCORE_REINJECT_ON_START` | `true` | Prime scoped mem-core when a session starts |
 | `ESHEPHERD_SCOPE_DIR` | unset | Optional fixed scope directory override for reinjection |
 | `ESHEPHERD_MEMCORE_DIRECT_FILE` | `memory.md` | Direct per-directory mem-core filename used by loader wiring |
-| `ESHEPHERD_MEMCORE_STORE_ROOTS` | `eshepherd/memory,memory` | Store roots consulted by loader wiring |
+| `ESHEPHERD_MEMCORE_STORE_ROOTS` | `.electric-shepherd/memory` | Store roots consulted by loader wiring |
 | `ESHEPHERD_MEMCORE_MAX_SCOPES` | `6` | Max broad→narrow scopes merged by reinjection loader |
 | `ESHEPHERD_MEMCORE_MAX_CHARS` | `12000` | Character cap for injected mem-core payload |
-| `ESHEPHERD_SYNTH_WRITE_GUARD_ENABLED` | `true` | Alert on non-dreamer calls to synthesis write tools |
-| `ESHEPHERD_ALLOWED_SYNTH_WRITERS` | `dreamer,dream-consolidator` | Allowed agent identities for synthesis writes |
-| `ESHEPHERD_MEMRAW_VERIFY_ENABLED` | `true` | Emit OpenCode mem-raw capture verification status |
-| `ESHEPHERD_MEMRAW_CAPTURE_CMD` | unset | Optional command run on stop/compact verification events |
-| `ESHEPHERD_MEMRAW_CAPTURE_TIMEOUT_MS` | `20000` | Timeout ceiling for blocking mem-raw capture subprocess |
+| `ESHEPHERD_CONSOLIDATION_WRITE_GUARD_ENABLED` | `true` | Alert on non-dreamer calls to derived-memory write tools |
+| `ESHEPHERD_ALLOWED_CONSOLIDATION_WRITERS` | `dreamer,dream-consolidator` | Allowed agent identities for consolidation writes |
+| `ESHEPHERD_SOURCE_CAPTURE_VERIFY_ENABLED` | `true` | Emit OpenCode source-transcript capture verification status |
+| `ESHEPHERD_SOURCE_CAPTURE_CMD` | unset | Optional command run on stop/compact verification events |
+| `ESHEPHERD_SOURCE_CAPTURE_TIMEOUT_MS` | `20000` | Timeout ceiling for blocking source-transcript capture subprocess |
 | `ESHEPHERD_MEMCORE_LOADER_TIMEOUT_MS` | `15000` | Timeout ceiling for blocking mem-core loader subprocess |
-| `ESHEPHERD_AUTO_SYNTH_ENABLED` | `false` | Master switch for background auto-synthesis |
-| `ESHEPHERD_AUTO_SYNTH_ON_IDLE` | `true` | Trigger auto-synthesis after idle debounce window |
-| `ESHEPHERD_AUTO_SYNTH_ON_COMPACT` | `true` | Trigger auto-synthesis after compaction |
-| `ESHEPHERD_AUTO_SYNTH_IDLE_DELAY_MS` | `120000` | Idle debounce delay before idle-triggered run |
-| `ESHEPHERD_AUTO_SYNTH_MESSAGE_THRESHOLD` | `12` | Assistant-turn volume trigger threshold |
-| `ESHEPHERD_AUTO_SYNTH_COOLDOWN_MS` | `600000` | Minimum gap between auto-synth run starts |
-| `ESHEPHERD_AUTO_SYNTH_TIMEOUT_MS` | `300000` | Watchdog timeout and stale-lock reclaim window |
-| `ESHEPHERD_AUTO_SYNTH_MAX_TRACKED_SESSIONS` | `512` | Max tracked sessions in auto-synth state maps (oldest evicted first) |
-| `ESHEPHERD_AUTO_SYNTH_CMD` | unset | Optional override command for auto-synth execution |
-| `ESHEPHERD_SYNTH_LOCK_DISABLED` | unset | Test-only bypass for shared synth lock (`1` disables lock) |
+| `ESHEPHERD_AUTO_CONSOLIDATION_ENABLED` | `false` | Master switch for background auto-consolidation |
+| `ESHEPHERD_AUTO_CONSOLIDATION_ON_IDLE` | `true` | Trigger auto-consolidation after idle debounce window |
+| `ESHEPHERD_AUTO_CONSOLIDATION_ON_COMPACT` | `true` | Trigger auto-consolidation after compaction |
+| `ESHEPHERD_AUTO_CONSOLIDATION_IDLE_DELAY_MS` | `120000` | Idle debounce delay before idle-triggered run |
+| `ESHEPHERD_AUTO_CONSOLIDATION_MESSAGE_THRESHOLD` | `12` | Assistant-turn volume trigger threshold |
+| `ESHEPHERD_AUTO_CONSOLIDATION_COOLDOWN_MS` | `600000` | Minimum gap between auto-consolidation run starts |
+| `ESHEPHERD_AUTO_CONSOLIDATION_TIMEOUT_MS` | `300000` | Watchdog timeout and stale-lock reclaim window |
+| `ESHEPHERD_AUTO_CONSOLIDATION_MAX_TRACKED_SESSIONS` | `512` | Max tracked sessions in auto-consolidation state maps (oldest evicted first) |
+| `ESHEPHERD_AUTO_CONSOLIDATION_CMD` | unset | Optional override command for auto-consolidation execution |
+| `ESHEPHERD_CONSOLIDATION_LOCK_DISABLED` | unset | Test-only bypass for shared consolidation lock (`1` disables lock) |
 
 Local env workflow:
 
@@ -278,14 +303,19 @@ For trigger semantics and operational caveats, see QUICKSTART section 3f.
 
 ## Architecture
 
-The dreamer uses a **map-reduce fan-out**: for each raw transcript, a `dream-mapper`
-subagent reads it in isolated context and returns a structured summary + confidence score.
-The parent `dream-consolidator` synthesizes across all summaries, creates new synthesis
-nodes in MemPalace, links them via `synthesized-from` KG triples, and runs the
-`dream-auditor` for bidirectional coherence validation.
+Consolidation is **a script that owns the loop, with the model as a stateless judgment
+function** — not an agent orchestrating the pass. A deterministic script enumerates the
+worklist (raw memories not yet synthesized), then calls the model per bounded step:
+categorize (assign a native hall), summarize, judge connections. The script writes the
+results; the model only judges. This keeps each model call small and isolated, so the pass
+never fills a context and compacts before finishing — the failure mode of the earlier
+agent-driven design.
 
-Synthesis nodes are ordinary MemPalace drawers marked `node_kind=synthesis`. Edges are
-KG triples. The graph is traversal over those structures — no separate graph database.
+Derived memory stays native to MemPalace: **closets** for summaries and arcs, **KG triples**
+for durable facts (with `valid_from`/`valid_to` history) and for `synthesized-from` /
+`merged-into` lineage, **halls** for categories, and recursive KG traversal for graph
+operations. Raw drawers are never altered. A context-isolated `dream-auditor` step provides
+bidirectional coherence validation over what was produced.
 
 ---
 
@@ -306,7 +336,7 @@ Core policy runtime in place. The following are committed and usable now:
 - Deterministic policy-cycle runtime in `scripts/run-policy-cycle.ts`
 - Consolidation + validation runtime pipeline in `scripts/run-memory-consolidation-and-validation.ts`
 - Optional live mapper and auditor integration hooks in `scripts/run-memory-consolidation-and-validation.ts` (`--use-live-mapper`, `--use-live-auditor`)
-- Automatic file-only mem-core render output in `scripts/run-memory-consolidation-and-validation.ts` (`./eshepherd/memory` or `./memory`, configurable via `--mem-core-dir` / `--mem-core-scope-dir` / `--mem-core-file`)
+- Automatic file-only mem-core render output in `scripts/run-memory-consolidation-and-validation.ts` (`./.electric-shepherd/memory`, configurable via `--mem-core-dir` / `--mem-core-scope-dir` / `--mem-core-file`)
 - Directory-scoped mem-core loader in `scripts/run-mem-core-loader.ts` (`npm run policy:mem-core:load`)
 - Cadence orchestration module in `adapter/cadence-orchestrator.ts`
 - Cadence state persistence in `scripts/run-memory-consolidation-and-validation.ts` (`--cadence-state-file`)
@@ -314,14 +344,14 @@ Core policy runtime in place. The following are committed and usable now:
 - OpenCode slash commands in `command/` (both `command/` and `commands/` are recognized by OpenCode)
 - Command isolation defaults for memory mutations (`/count-sheep`, `/herd`, `/lucid-dream`, `/headcount` run as subtask-isolated dreamer passes; `/wake-up` runs in-session by design)
 - Compaction-aware mem-core reinjection + scope-aware loader wiring in `plugin/turn-guard.ts` (`session.compacted`, `session.started`, `session.idle`)
-- mem-synth write-authority guard in `plugin/turn-guard.ts` (alerts when non-dreamer agents call `create_synthesis_node` / `apply_merge`)
-- OpenCode mem-raw capture verification heartbeat in `plugin/turn-guard.ts` with status output in `./.electric-shepherd/turn-guard-status.json`
-- Opt-in auto-synthesis in `plugin/turn-guard.ts` (idle/volume/compaction triggers + cooldown + watchdog)
-- Orphan/hang hardening for auto-synthesis (cross-process lockfile, process-tree kill, bounded tracking maps, start-failure cooldown rollback)
-- Shared synth lock in `scripts/synth-lock.ts` used by standalone/cron runs and plugin-triggered runs
-- Policy adapter scaffold in `adapter/memgraph.ts`, retrieval expansion in `adapter/retrieval-expansion.ts`, synthesis consolidation in `adapter/synthesis-consolidation.ts`, and validation+merge review in `adapter/validation-merge-review.ts`
+- consolidation write-authority guard in `plugin/turn-guard.ts` (alerts when non-dreamer agents call protected consolidation write tools)
+- OpenCode source-transcript capture verification heartbeat in `plugin/turn-guard.ts` with status output in `./.electric-shepherd/turn-guard-status.json`
+- Opt-in auto-consolidation in `plugin/turn-guard.ts` (idle/volume/compaction triggers + cooldown + watchdog)
+- Orphan/hang hardening for auto-consolidation (cross-process lockfile, process-tree kill, bounded tracking maps, start-failure cooldown rollback)
+- Shared consolidation lock in `scripts/consolidation-lock.ts` used by standalone/cron runs and plugin-triggered runs
+- Policy adapter scaffold in `adapter/memgraph.ts`, retrieval expansion in `adapter/retrieval-expansion.ts`, source-to-derived consolidation in `adapter/synthesis-consolidation.ts`, and validation+merge review in `adapter/validation-merge-review.ts`
 - Dreamer profile files in `agents/`
-- Unit test coverage for auto-synth decision + hardening helpers (`npm test`: 34 passing)
+- Unit test coverage for auto-consolidation decision + hardening helpers (`npm test`: 34 passing)
 
 Still pending for full autonomy:
 - Broader harness integrations outside OpenCode defaults

@@ -63,7 +63,7 @@ export function buildCommandExecutionPlan(args: {
           "--include-base-pipeline",
           "--apply",
           "--mem-core-file",
-          "eshepherd/memory/memory.md",
+          ".electric-shepherd/memory/memory.md",
         ]
     return {
       mode: "exec",
@@ -115,22 +115,22 @@ export function decideMemcoreInjection(args: {
   return { shouldInject, changed, cooldownElapsed }
 }
 
-export type AutoSynthTrigger = "volume" | "idle-timer" | "compacted"
+export type AutoConsolidationTrigger = "volume" | "idle-timer" | "compacted"
 
-export function decideAutoSynth(args: {
+export function decideAutoConsolidation(args: {
   enabled: boolean
   now: number
   lastRunAt: number | null
   cooldownMs: number
   messagesSinceRun: number
   messageThreshold: number
-  trigger: AutoSynthTrigger
+  trigger: AutoConsolidationTrigger
   inFlight: boolean
 }): { shouldRun: boolean; reason: string } {
   if (!args.enabled) return { shouldRun: false, reason: "disabled" }
   if (args.inFlight) return { shouldRun: false, reason: "in-flight" }
 
-  // Compaction is an explicit memory-boundary event. Run synthesis every time it
+  // Compaction is an explicit memory-boundary event. Run consolidation every time it
   // happens so mem-core refresh does not get deferred by cooldown.
   if (args.trigger === "compacted") {
     return { shouldRun: true, reason: "compacted" }
@@ -150,7 +150,7 @@ export function decideAutoSynth(args: {
   return { shouldRun: false, reason: "unknown-trigger" }
 }
 
-export function pruneAutoSynthTracking(
+export function pruneAutoConsolidationTracking(
   activity: Map<string, number> | undefined | null,
   lastRun: Map<string, number> | undefined | null,
   max: number,
