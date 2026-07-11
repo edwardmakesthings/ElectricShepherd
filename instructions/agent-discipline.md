@@ -69,6 +69,17 @@ Minimum final review fields:
 Do not end with a silent or step-only stop turn. If no progress was possible, state that clearly
 in the final review and explain why.
 
+## Verification tool routing (required)
+
+Use `dev-tools_verify` as the default end-of-task verifier for implementation work.
+
+1. Run it once near the end (not after every micro-edit).
+2. If it fails, fix the highest-signal blocker first (usually typecheck), then rerun once.
+3. Only call `dev-tools_typecheck` / `dev-tools_lint` / `dev-tools_test` separately when you
+  intentionally need partial checks or a targeted/debug run.
+
+Reason: one combined verify call is cheaper and reduces loop noise.
+
 ## Serena symbol-edit preflight (required)
 
 Before calling `serena_replace_symbol_body`, run `symbol-tools_preflight` first.
@@ -335,6 +346,31 @@ Rule of thumb: required structure comes from the substrate API contract; narrati
 retrievability come from concise, specific content.
 
 ## File editing — when tools fail, use Python via bash
+
+`line-edit` tools are preview-first by default (`apply: false`).
+
+Rule:
+1. Run preview once.
+2. If preview is correct, run exactly once with `apply: true`.
+3. Do not run preview twice in a row for the same edit.
+
+Applies to `line-edit_replace`, `line-edit_insert`, `line-edit_delete`, and `line-edit_batch`.
+
+## Long-file writes — use file-writer (required)
+
+When generating or replacing long files (roughly >200 lines, or content likely to exceed one
+model response), use `file-writer_*` instead of a single-shot write.
+
+Workflow:
+1. `file-writer_begin`
+2. `file-writer_append` in chunks
+3. `file-writer_finish`
+
+Rules:
+1. Never call `file-writer_append` before `file-writer_begin`.
+2. After a truncation, resume from the reported tail preview; do not restart from memory.
+3. If `file-writer_finish` reports bracket imbalance, append the missing chunk and retry once.
+4. Use direct `edit`/`write` for short files; use `file-writer_*` for long or high-risk writes.
 
 When Serena replace, regex-replace, and line-edit have all failed on a file edit,
 the problem is at the byte level (encoding, invisible chars, mixed CRLF/LF). Use

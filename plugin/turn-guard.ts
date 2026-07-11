@@ -39,8 +39,12 @@ import {
   buildCommandExecutionPlan,
   clipText,
   computeMemcoreSignature,
+  computeToolSignature,
   decideAutoConsolidation,
+  decideLoopIntervention,
   decideMemcoreInjection,
+  detectDeliberationSpiral,
+  isDeliberationExemptPrompt,
   pruneAutoConsolidationTracking,
 } from "../adapter/turn-guard-helpers.ts"
 import type { AutoConsolidationTrigger, MemcoreInjectionRecord } from "../adapter/turn-guard-helpers.ts"
@@ -59,13 +63,79 @@ const WRITE_AUTHORITY_MARKER = "[Write-Authority Gate]"
 const MIN_USEFUL_TEXT = 24
 const START_BANNER = "[turn-guard] START"
 const MAX_RETRIES_PER_PARENT = 2
+// Hard ceiling on the TOTAL number of auto-retries per session, independent of
+// parent keying. The per-parent cap above can be defeated by a persistent stall:
+// each auto-retry prompt becomes the parent of the next turn and the retryKey
+// fold only climbs one level (to the grandparent), so the key shifts every
+// generation and the per-parent counter never saturates. Without this total
+// cap a wedged model would retry forever — each retry firing a fresh generation,
+// turning a silent hang into an active GPU-pinning / cost runaway. 4 nudges is
+// plenty: a transient stall recovers on the first, a genuinely stuck one will
+// not recover after four. Override with ESHEPHERD_MAX_RETRIES_PER_SESSION.
+const DEFAULT_MAX_RETRIES_PER_SESSION = 4
 const STATUS_DIR = ".electric-shepherd"
 const STATUS_FILE = "turn-guard-status.json"
 const AUTOCONSOLIDATION_LOG_FILE = "auto-consolidation.log"
+const TURN_GUARD_INSTANCE_DIRS_KEY = "__ESHEPHERD_TURN_GUARD_INSTANCE_DIRS__"
 const DEFAULT_MEMCORE_MAX_CHARS = 12000
 const DEFAULT_MEMCORE_MAX_SCOPES = 6
 const DEFAULT_INJECTION_COOLDOWN_MS = 15000
 const DEFAULT_RETRY_ENABLED = false
+const LOOP_GUARD_MARKER = "[Loop Guard]"
+// Loop guard: abort a tool call whose (name + args) has already run N times in
+// the recent window with no mutation in between, and hand the model a short
+// nudge instead of the tool result. Deliberately gentle — in practice "are you
+// looping? regroup" breaks the cycle; a heavyweight intervention is not needed.
+//
+// NOTE: OpenCode's tool.execute.before hook does not fire for tool calls made
+// inside subagents spawned via the task tool (upstream issue #5894), so a loop
+// entirely contained in a subagent will not be caught here.
+const DEFAULT_LOOP_GUARD_ENABLED = true
+const DEFAULT_LOOP_REPEAT_THRESHOLD = 3
+const DEFAULT_LOOP_WINDOW_SIZE = 12
+const DEFAULT_LOOP_MAX_INTERVENTIONS = 3
+// Any mutating tool is progress, and clears the repeat window. This is what
+// keeps a legitimate verify cycle (typecheck -> edit -> typecheck) from ever
+// looking like a loop, without needing to exempt the verify tools themselves.
+const DEFAULT_LOOP_MUTATION_TOOLS = [
+  "write",
+  "edit",
+  "patch",
+  "bash",
+  "line-edit_replace",
+  "line-edit_insert",
+  "line-edit_delete",
+  "line-edit_batch",
+  "regex-replace",
+  "file-ops_bytes_replace",
+  "file-ops_normalize_eol",
+  "file-writer_begin",
+  "file-writer_append",
+  "file-writer_finish",
+  "ast-tools_rewrite",
+  "organize-tools_move",
+  "organize-tools_apply_plan",
+  "serena_replace_symbol_body",
+  "serena_replace_content",
+  "serena_insert_after_symbol",
+  "serena_insert_before_symbol",
+  "serena_rename_symbol",
+  "serena_safe_delete_symbol",
+]
+// Never blocked: the escape hatches the nudge itself recommends.
+const DEFAULT_LOOP_EXEMPT_TOOLS = ["compress", "dcp-compress"]
+const SPIRAL_GUARD_MARKER = "[Spiral Guard]"
+// Deliberation-spiral guard: the inverse of the loop guard. The loop guard
+// catches a repeated *tool call*; this catches a finish=stop turn that narrates
+// many investigations ("let me check X", "let me re-read Y") while executing NO
+// tool/patch/file part — a model reasoning from priors instead of reading. It is
+// reactive: it redirects the NEXT turn. OpenCode exposes no token-level hook to
+// abort mid-stream, and pure-text generation never passes tool.execute.before,
+// so the loop guard structurally cannot see this failure mode.
+const DEFAULT_SPIRAL_GUARD_ENABLED = true
+const DEFAULT_SPIRAL_INVESTIGATE_THRESHOLD = 3
+const DEFAULT_SPIRAL_REVERSAL_THRESHOLD = 3
+const DEFAULT_SPIRAL_MAX_INTERVENTIONS = 2
 const DEFAULT_ALLOWED_CONSOLIDATION_WRITERS = ["dreamer", "dream-consolidator"]
 const CONSOLIDATION_WRITE_TOOL_NAMES = ["add_drawer", "update_drawer", "kg_add", "kg_invalidate", "apply_merge"]
 
@@ -575,11 +645,26 @@ function getPromptRouting(...candidates: Array<MessageWithParts | null | undefin
 }
 
 export const TurnGuard = async ({ client, directory }: any) => {
-  console.log(`${START_BANNER}: plugin loaded (directory=${directory})`)
-  console.log("[turn-guard] hooks registered: event(message.updated, session.idle, session.compacted, session.started), experimental.session.compacting")
-  console.log("[turn-guard] retry guard: OFF by default (ESHEPHERD_RETRY_ENABLED=true to opt in)")
-
   const rootDirectory = normalizePathForHost(directory || process.cwd())
+  const globalState = globalThis as any
+  const instanceDirs: Set<string> =
+    globalState[TURN_GUARD_INSTANCE_DIRS_KEY] ?? (globalState[TURN_GUARD_INSTANCE_DIRS_KEY] = new Set<string>())
+
+  if (instanceDirs.has(rootDirectory)) {
+    console.log(`${START_BANNER}: duplicate plugin load detected for directory=${rootDirectory}; skipping secondary instance`)
+    return {}
+  }
+  instanceDirs.add(rootDirectory)
+
+  console.log(`${START_BANNER}: plugin loaded (directory=${directory})`)
+  console.log("[turn-guard] registering hooks: event(message.updated, session.idle, session.compacted, session.started), experimental.session.compacting, tool.execute.before")
+  console.log(
+    `[turn-guard] retry guard: ${
+      getBoolEnv("ESHEPHERD_RETRY_ENABLED", DEFAULT_RETRY_ENABLED)
+        ? `ON (ESHEPHERD_RETRY_ENABLED=true, max ${Math.max(1, Number(process?.env?.ESHEPHERD_MAX_RETRIES_PER_SESSION) || DEFAULT_MAX_RETRIES_PER_SESSION)}/session)`
+        : "OFF by default (ESHEPHERD_RETRY_ENABLED=true to opt in)"
+    }`,
+  )
   const projectRoot = findProjectRoot(rootDirectory)
   const memcoreInjectEnabled = getBoolEnv("ESHEPHERD_MEMCORE_REINJECT_ENABLED", true)
   const memcoreInjectOnIdle = getBoolEnv("ESHEPHERD_MEMCORE_REINJECT_ON_IDLE", true)
@@ -615,8 +700,64 @@ export const TurnGuard = async ({ client, directory }: any) => {
   // Allow one follow-up retry when the first retry still ends mid-intent,
   // while keeping a strict cap to avoid loops.
   const retriedParentBySession = new Map<string, Map<string, number>>()
+  // Total auto-retries issued per session (see DEFAULT_MAX_RETRIES_PER_SESSION):
+  // a keying-independent hard stop so a persistent stall cannot loop unbounded.
+  const retriesTotalBySession = new Map<string, number>()
+  const maxRetriesPerSession = Math.max(
+    1,
+    Number(process?.env?.ESHEPHERD_MAX_RETRIES_PER_SESSION) || DEFAULT_MAX_RETRIES_PER_SESSION,
+  )
   const startupConfirmedBySession = new Set<string>()
   const inspectedStopBySession = new Map<string, Set<string>>()
+
+  // --- loop guard state ---
+  // Recent tool-call signatures per session (oldest first), cleared by any
+  // mutating tool and by each intervention (so the nudge gets a clean slate).
+  const toolWindowBySession = new Map<string, string[]>()
+  const loopInterventionsBySession = new Map<string, number>()
+  const loopGuardEnabled = getBoolEnv("ESHEPHERD_LOOPGUARD_ENABLED", DEFAULT_LOOP_GUARD_ENABLED)
+  const loopRepeatThreshold = getNumberEnv("ESHEPHERD_LOOPGUARD_THRESHOLD", DEFAULT_LOOP_REPEAT_THRESHOLD)
+  const loopWindowSize = getNumberEnv("ESHEPHERD_LOOPGUARD_WINDOW", DEFAULT_LOOP_WINDOW_SIZE)
+  const loopMaxInterventions = getNumberEnv("ESHEPHERD_LOOPGUARD_MAX_INTERVENTIONS", DEFAULT_LOOP_MAX_INTERVENTIONS)
+  const loopMutationTools = toLowerSet(
+    process?.env?.ESHEPHERD_LOOPGUARD_MUTATION_TOOLS
+      ? parseCSV(process.env.ESHEPHERD_LOOPGUARD_MUTATION_TOOLS)
+      : DEFAULT_LOOP_MUTATION_TOOLS,
+  )
+  const loopExemptTools = toLowerSet([
+    ...DEFAULT_LOOP_EXEMPT_TOOLS,
+    ...parseCSV(process?.env?.ESHEPHERD_LOOPGUARD_EXEMPT_TOOLS),
+  ])
+  // Loop-guard status banner. Emitted HERE, after the consts above are
+  // initialized — emitting it earlier is a temporal-dead-zone ReferenceError
+  // that throws before the hooks object returns, silently disabling the plugin.
+  console.log(
+    `[turn-guard] loop guard: ${
+      loopGuardEnabled
+        ? `ON (aborts a tool call repeated ${loopRepeatThreshold}x with no edit between; max ${loopMaxInterventions} nudges/session)`
+        : "OFF (ESHEPHERD_LOOPGUARD_ENABLED=true to opt in)"
+    }`,
+  )
+
+  // --- deliberation-spiral guard state ---
+  const spiralGuardEnabled = getBoolEnv("ESHEPHERD_SPIRALGUARD_ENABLED", DEFAULT_SPIRAL_GUARD_ENABLED)
+  const spiralInvestigateThreshold = getNumberEnv("ESHEPHERD_SPIRALGUARD_INVESTIGATE_THRESHOLD", DEFAULT_SPIRAL_INVESTIGATE_THRESHOLD)
+  const spiralReversalThreshold = getNumberEnv("ESHEPHERD_SPIRALGUARD_REVERSAL_THRESHOLD", DEFAULT_SPIRAL_REVERSAL_THRESHOLD)
+  const spiralMaxInterventions = getNumberEnv("ESHEPHERD_SPIRALGUARD_MAX_INTERVENTIONS", DEFAULT_SPIRAL_MAX_INTERVENTIONS)
+  const spiralExemptReflection = getBoolEnv("ESHEPHERD_SPIRALGUARD_EXEMPT_REFLECTION", true)
+  const spiralGuardDisabledModes = toLowerSet(parseCSV(process?.env?.ESHEPHERD_SPIRALGUARD_DISABLED_MODES))
+  const spiralGuardDisabledAgents = toLowerSet(parseCSV(process?.env?.ESHEPHERD_SPIRALGUARD_DISABLED_AGENTS))
+  // Nudges issued per session, and message IDs already inspected (message.updated
+  // can fire repeatedly for one message; dedupe so a stop is judged once).
+  const spiralNudgedBySession = new Map<string, number>()
+  const spiralInspectedBySession = new Map<string, Set<string>>()
+  console.log(
+    `[turn-guard] spiral guard: ${
+      spiralGuardEnabled
+        ? `ON (nudges a finish=stop turn with >=${spiralInvestigateThreshold} announced-but-unexecuted investigations and no action part; max ${spiralMaxInterventions} nudges/session)`
+        : "OFF (ESHEPHERD_SPIRALGUARD_ENABLED=true to opt in)"
+    }`,
+  )
 
   // --- checkpoint state ---
   const checkpointedSessions = new Set<string>()
@@ -1151,8 +1292,19 @@ export const TurnGuard = async ({ client, directory }: any) => {
     const retryCount = retriedParents.get(retryKey) ?? 0
     if (retryCount >= MAX_RETRIES_PER_PARENT) return false
 
+    // Keying-independent per-session ceiling: bounds the entire retry chain even
+    // when retryKey shifts every generation (see DEFAULT_MAX_RETRIES_PER_SESSION).
+    const sessionRetries = retriesTotalBySession.get(sid) ?? 0
+    if (sessionRetries >= maxRetriesPerSession) {
+      console.log(
+        `[turn-guard] skip retry in ${sid}; per-session retry cap ${maxRetriesPerSession} reached`,
+      )
+      return false
+    }
+
     retriedParents.set(retryKey, retryCount + 1)
     retriedParentBySession.set(sid, retriedParents)
+    retriesTotalBySession.set(sid, sessionRetries + 1)
 
     const retryReason = memoryOnlyLikelyPremature
       ? "memory checkpoint without concrete continuation"
@@ -1201,6 +1353,98 @@ export const TurnGuard = async ({ client, directory }: any) => {
     if (activeModel) {
       body.model = activeModel
     }
+
+    await client.session.prompt({
+      path: { id: sid },
+      query: { directory },
+      body,
+    })
+
+    return true
+  }
+
+  // Reactive deliberation-spiral guard. Sibling to issueRetry: retry owns stalls
+  // (no useful output / mid-intent); this owns the opposite failure — a finish=stop
+  // turn dense with announced-but-unexecuted investigation and zero action parts.
+  // Fires independently of retryEnabled.
+  const maybeSpiralNudge = async (
+    sid: string,
+    last: MessageWithParts,
+    prev: MessageWithParts | null,
+  ): Promise<boolean> => {
+    if (!spiralGuardEnabled) return false
+    if (!isAssistantStop(last)) return false
+
+    const messageID = String(last?.info?.id ?? "")
+    if (messageID) {
+      const inspected = spiralInspectedBySession.get(sid) ?? new Set<string>()
+      if (inspected.has(messageID)) return false
+      inspected.add(messageID)
+      spiralInspectedBySession.set(sid, inspected)
+    }
+
+    const currentMode = String(last?.info?.mode ?? "").trim().toLowerCase()
+    const currentAgent = String(last?.info?.agent ?? "").trim().toLowerCase()
+    if (currentMode && spiralGuardDisabledModes.has(currentMode)) return false
+    if (currentAgent && spiralGuardDisabledAgents.has(currentAgent)) return false
+
+    // A reply to any guard prompt is terminal — never guard the guard's own reply.
+    const parentText = getText(prev?.parts ?? [])
+    if (
+      parentText.includes(SPIRAL_GUARD_MARKER) ||
+      parentText.includes(AUTO_RETRY_MARKER) ||
+      parentText.includes(CHECKPOINT_MARKER)
+    ) {
+      return false
+    }
+
+    // Explicit reflection/explanation asks are supposed to be long and tool-free.
+    const prevIsUser = prev?.info?.role === "user"
+    if (spiralExemptReflection && prevIsUser && isDeliberationExemptPrompt(parentText)) {
+      return false
+    }
+
+    const text = getText(last.parts ?? [])
+    const decision = detectDeliberationSpiral({
+      text,
+      hasActionPart: hasActionPart(last),
+      investigateThreshold: spiralInvestigateThreshold,
+      reversalThreshold: spiralReversalThreshold,
+    })
+    if (!decision.isSpiral) return false
+
+    const used = spiralNudgedBySession.get(sid) ?? 0
+    if (used >= spiralMaxInterventions) {
+      console.log(
+        `[turn-guard] spiral guard: budget ${spiralMaxInterventions} spent in ${sid}; letting it through`,
+      )
+      return false
+    }
+    spiralNudgedBySession.set(sid, used + 1)
+
+    console.log(
+      `[turn-guard] spiral detected sid=${sid} msg=${messageID || "?"} ` +
+        `investigate=${decision.investigateCount} reversal=${decision.reversalCount} ` +
+        `nudge=${used + 1}/${spiralMaxInterventions}`,
+    )
+
+    const routing = getPromptRouting(last, prev)
+    const body: any = {
+      parts: [
+        {
+          type: "text",
+          text:
+            `${SPIRAL_GUARD_MARKER} Your last turn described ${decision.investigateCount} investigations ` +
+            `("let me check...", "let me re-read...") but executed none — it reasoned about the code instead of reading it. ` +
+            "Stop speculating and gather evidence:\n" +
+            "- Take the single most load-bearing \"let me check X\" from that turn and actually call the tool now (read/grep the file, run the command).\n" +
+            "- For runtime/ordering/async questions source cannot answer (\"does X fire before Y?\"), add a log or read the library source — do not infer execution order.\n" +
+            "- One tool call, then reassess against its real result. Do not narrate another plan without a tool call between.",
+        },
+      ],
+    }
+    if (routing.agent) body.agent = routing.agent
+    if (routing.model) body.model = routing.model
 
     await client.session.prompt({
       path: { id: sid },
@@ -1330,9 +1574,9 @@ export const TurnGuard = async ({ client, directory }: any) => {
 
       if (info?.finish !== "stop") return
 
-      // When retry is disabled, skip parent fetch and all heuristic evaluation —
-      // zero extra overhead per message.
-      if (!retryEnabled) {
+      // When BOTH reactive guards are disabled, skip parent fetch and all
+      // heuristic evaluation — zero extra overhead per message.
+      if (!retryEnabled && !spiralGuardEnabled) {
         verifySourceCapture(sid, "message.stop")
         return
       }
@@ -1347,8 +1591,11 @@ export const TurnGuard = async ({ client, directory }: any) => {
       const parent = unwrapMessageResult(parentRes)
       verifySourceCapture(sid, "message.stop")
 
-      // message.updated only handles retries; checkpoint is idle-only.
-      await issueRetry(sid, current, parent)
+      // message.updated owns the reactive end-of-turn guards; checkpoint is
+      // idle-only. At most one injection per stop: retry owns stalls, the spiral
+      // guard owns no-action deliberation (opposite failure modes).
+      const retried = await issueRetry(sid, current, parent)
+      if (!retried) await maybeSpiralNudge(sid, current, parent)
     } catch (err) {
       console.error("[turn-guard] message.updated failed:", err)
     }
@@ -1413,11 +1660,16 @@ export const TurnGuard = async ({ client, directory }: any) => {
     if (!preHookRan) {
       compactionPathBySession.set(sid, { path: "post-compact-fallback", at: new Date().toISOString() })
       console.log(`[turn-guard] post-compact fallback: pre-hook absent for sid=${sid}, re-injecting mem-core`)
+      // NOTE: do NOT force here. maybeInjectMemcore injects via client.session.prompt(),
+      // which creates a real generating turn (~memcoreMaxChars). Forcing made every
+      // post-compaction event re-inject the same large block, re-inflating context and
+      // triggering another compaction → an infinite compact/reinject loop. Relying on
+      // the signature+cooldown dedup means the fallback fires at most once per unique
+      // mem-core content, so identical mem-core after a compaction is a no-op.
       await maybeInjectMemcore({
         sid,
         event,
         reason: "compacted",
-        force: true,
       })
     } else {
       console.log(`[turn-guard] post-compact event: pre-compact hook already ran for sid=${sid}, skipping re-injection`)
@@ -1432,6 +1684,9 @@ export const TurnGuard = async ({ client, directory }: any) => {
   async function onSessionStarted(event: any): Promise<void> {
     const sid = String(event?.properties?.sessionID ?? findSessionID(event))
     if (!sid) return
+
+    toolWindowBySession.delete(sid)
+    loopInterventionsBySession.delete(sid)
 
     await maybeInjectMemcore({
       sid,
@@ -1543,6 +1798,68 @@ export const TurnGuard = async ({ client, directory }: any) => {
     },
     "experimental.session.compacting": async (input: any) => {
       return injectMemcoreIntoCompaction(input)
+    },
+    "tool.execute.before": async (input: any, output: any) => {
+      if (!loopGuardEnabled) return
+      const toolName = String(input?.tool ?? "").trim()
+      if (!toolName) return
+      const sid = String(input?.sessionID ?? input?.sessionId ?? "")
+      if (!sid) return
+
+      const key = toolName.toLowerCase()
+      // A mutation is progress: forget the repeats that preceded it.
+      if (loopMutationTools.has(key)) {
+        toolWindowBySession.delete(sid)
+        return
+      }
+      if (loopExemptTools.has(key)) return
+
+      const args = output?.args ?? input?.args ?? {}
+      const signature = computeToolSignature(toolName, args)
+      const window = toolWindowBySession.get(sid) ?? []
+      const interventionsUsed = loopInterventionsBySession.get(sid) ?? 0
+
+      const { count, shouldIntervene, exhausted } = decideLoopIntervention({
+        window,
+        signature,
+        repeatThreshold: loopRepeatThreshold,
+        interventionsUsed,
+        maxInterventions: loopMaxInterventions,
+      })
+
+      if (exhausted) {
+        console.log(
+          `[turn-guard] loop guard: ${toolName} repeated ${count}x in sid=${sid} but the ` +
+            `${loopMaxInterventions}-nudge budget is spent; letting it through`,
+        )
+        return
+      }
+
+      if (!shouldIntervene) {
+        window.push(signature)
+        while (window.length > loopWindowSize) window.shift()
+        toolWindowBySession.set(sid, window)
+        return
+      }
+
+      // Nudge, then wipe the window so the model gets a clean slate to recover in
+      // rather than tripping the guard again on its very next call.
+      loopInterventionsBySession.set(sid, interventionsUsed + 1)
+      toolWindowBySession.delete(sid)
+      const nudge = interventionsUsed + 1
+      console.log(
+        `[turn-guard] loop guard: aborting ${toolName} (repeat ${count}x, nudge ${nudge}/${loopMaxInterventions}) sid=${sid}`,
+      )
+
+      throw new Error(
+        `${LOOP_GUARD_MARKER} You just called \`${toolName}\` ${count} times with identical ` +
+          `arguments and no edits in between — are you looping?\n\n` +
+          `This call was not executed. Regroup before continuing:\n` +
+          `- Say what specific information you still need, and why the earlier result did not give it to you.\n` +
+          `- If earlier context was pruned or compacted away, call \`compress\` (or write your findings down) instead of re-reading.\n` +
+          `- If the same approach keeps failing, change the approach rather than repeating it.\n\n` +
+          `(nudge ${nudge}/${loopMaxInterventions} this session)`,
+      )
     },
     tool: {
       delete_drawers: deleteDrawersTool,
