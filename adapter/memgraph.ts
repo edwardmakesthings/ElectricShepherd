@@ -189,6 +189,8 @@ export class MemgraphClient {
     source_file?: string;
     added_by?: string;
     labels?: string[];
+    // P2-3: provenance — the run_id of the consolidation execution
+    source_run_id?: string;
   }) {
     const sourceDrawerIds = this.uniq(args.source_drawer_ids || []);
     const addResult = await this.addDrawer({
@@ -216,11 +218,36 @@ export class MemgraphClient {
           predicate: "synthesized-from",
           object: sourceId,
           source_closet: id,
+          source_run_id: args.source_run_id,
+        });
+        // P1-3: forward edge — source drawer → new closet (cheap worklist exclusion)
+        await this.kgAdd({
+          subject: sourceId,
+          predicate: "consolidated-into",
+          object: id,
+          source_closet: id,
+          source_run_id: args.source_run_id,
         });
         lineageEdgesAdded += 1;
       } catch (err) {
         lineageErrors.push(String(err));
       }
+    }
+
+    // P2-2: stamp the new closet `provisional`. Validation promotes it to `active`
+    // once it has >= 2 direct sources; until then it is filtered from default
+    // retrieval. Vanilla-only (kg_add). Best-effort: a failed stamp must not fail
+    // closet creation — an unstamped closet reads as "unknown" and stays visible.
+    try {
+      await this.kgAdd({
+        subject: id,
+        predicate: "es-status",
+        object: "provisional",
+        source_closet: id,
+        source_run_id: args.source_run_id,
+      });
+    } catch {
+      // non-fatal: leave the closet unstamped rather than fail creation
     }
 
     return {
@@ -538,6 +565,8 @@ export class MemgraphClient {
     object: string;
     valid_from?: string;
     source_closet?: string;
+    // P2-3: provenance — the run_id of the consolidation execution
+    source_run_id?: string;
   }) {
     return this.call("kgAdd", args as unknown as JsonMap);
   }
@@ -549,6 +578,54 @@ export class MemgraphClient {
     ended?: string;
   }) {
     return this.call("kgInvalidate", args as unknown as JsonMap);
+  }
+
+  // ── P2-2: provisional -> active closet status ───────────────────────────────
+  // Status is an `es-status` KG fact on the closet, NOT a hall/label (halls are
+  // categorization). Written `provisional` at creation, promoted to `active` by
+  // validation once the closet has enough DIRECT source support. Every operation
+  // here is one-hop kg_query/kg_add/kg_invalidate — vanilla MemPalace only, no
+  // dependency on the graph-tools PR — so behavior is identical with or without it.
+
+  /** Count a closet's DIRECT sources via its outgoing one-hop synthesized-from edges. */
+  async countDirectSources(closetId: string): Promise<number> {
+    const result = await this.kgQuery({
+      entity: closetId,
+      direction: "outgoing",
+      predicate: "synthesized-from",
+      recurse: false,
+      max_depth: 1,
+    }).catch(() => ({}));
+    return this.uniqueFromFactsByDirection(this.parseKgFacts(result), "outgoing")
+      .filter((id) => id !== closetId).length;
+  }
+
+  /** Read a closet's es-status. "provisional" | "active" | "unknown" (no stamp / legacy). */
+  async getClosetStatus(closetId: string): Promise<"provisional" | "active" | "unknown"> {
+    const result = await this.kgQuery({
+      entity: closetId,
+      direction: "outgoing",
+      predicate: "es-status",
+      recurse: false,
+      max_depth: 1,
+    }).catch(() => ({}));
+    const values = this.uniqueFromFactsByDirection(this.parseKgFacts(result), "outgoing");
+    if (values.includes("active")) return "active";
+    if (values.includes("provisional")) return "provisional";
+    return "unknown";
+  }
+
+  /** Set a closet's es-status, invalidating the opposite value first. Idempotent-safe. */
+  async setClosetStatus(closetId: string, status: "provisional" | "active", sourceRunId?: string): Promise<void> {
+    const opposite = status === "active" ? "provisional" : "active";
+    await this.kgInvalidate({ subject: closetId, predicate: "es-status", object: opposite }).catch(() => ({}));
+    await this.kgAdd({
+      subject: closetId,
+      predicate: "es-status",
+      object: status,
+      source_closet: closetId,
+      source_run_id: sourceRunId,
+    });
   }
 
   search(query: string, limit = 5, wing?: string, room?: string) {
@@ -619,6 +696,21 @@ export class MemgraphClient {
 
     for (const item of rawItems) {
       try {
+        // P1-3: forward check — if the source has an outgoing consolidated-into edge,
+        // it's already been consumed by a consolidation run; skip it.
+        const forwardEdges = await this.kgQuery({
+          entity: item.drawer_id,
+          direction: "outgoing",
+          predicate: "consolidated-into",
+          recurse: false,
+          max_depth: 1,
+        });
+        const forwardConsolidated = this.uniqueFromFactsByDirection(this.parseKgFacts(forwardEdges), "outgoing");
+        if (forwardConsolidated.length > 0) {
+          continue // already consolidated; skip
+        }
+
+        // Legacy backward check: also exclude if incoming synthesized-from exists
         const incoming = await this.kgQuery({
           entity: item.drawer_id,
           direction: "incoming",
@@ -631,7 +723,7 @@ export class MemgraphClient {
           out.push(item);
         }
       } catch {
-        // Conservative fallback: if descendant traversal fails, keep the item in
+        // Conservative fallback: if lineage inspection fails, keep the item in
         // the worklist so consolidation does not silently miss a raw memory.
         out.push(item);
       }

@@ -13,4 +13,9 @@ Steps:
    narrow scope (current directory) — and a short summary of what changed since they
    were last rendered.
 
+Note: rendering excludes `es-status: provisional` closets by default (unvalidated
+syntheses don't reach mem-core). If you just ran /lucid-dream or /count-sheep and expect
+to see brand-new content here, it may still be provisional — run /headcount to check,
+or dispatch dream-auditor to validate and promote it first.
+
 Refresh and report only — do not synthesize or merge in this command.

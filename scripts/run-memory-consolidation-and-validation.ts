@@ -499,8 +499,9 @@ function parseDrawerPayload(raw: unknown): SourceDrawerWorkItem | null {
 async function ensureRawEntriesForChunk(
   client: ReturnType<typeof createMemgraphClient>,
   items: SourceDrawerWorkItem[],
-): Promise<Array<{ id: string; text: string }>> {
+): Promise<{ entries: Array<{ id: string; text: string }>; skipped: Array<{ drawer_id: string; reason: string }> }> {
   const out: Array<{ id: string; text: string }> = [];
+  const skipped: Array<{ drawer_id: string; reason: string }> = [];
   for (const item of items) {
     const existing = asString(item.content).trim();
     if (existing) {
@@ -512,11 +513,13 @@ async function ensureRawEntriesForChunk(
       const parsed = parseDrawerPayload(raw);
       const text = asString(parsed?.content).trim();
       if (text) out.push({ id: item.drawer_id, text });
+      else skipped.push({ drawer_id: item.drawer_id, reason: "empty-content" });
     } catch {
-      // Keep going; missing drawer text should not fail the whole batch.
+      // P3-3: record fetch failure instead of silently dropping
+      skipped.push({ drawer_id: item.drawer_id, reason: "drawer-fetch-failed" });
     }
   }
-  return out;
+  return { entries: out, skipped };
 }
 
 function parseValidationOptions(argv: string[], consolidation: SynthesisConsolidationOptions): ValidationMergeReviewOptions {
@@ -683,7 +686,11 @@ function usage(): string {
 }
 
 async function main(): Promise<void> {
+  const startTime = Date.now();
   loadRuntimeEnv({ scriptUrl: import.meta.url, env: process.env });
+
+  // P2-1 + P2-3: generate run_id at startup
+  const runId = "eshepherd-" + new Date().toISOString().replace(/[:.]/g, "-").slice(0, 17) + "-" + Math.random().toString(36).slice(2, 6);
 
   const argv = process.argv.slice(2);
   if (hasFlag(argv, "--help") || hasFlag(argv, "-h")) {
@@ -703,7 +710,7 @@ async function main(): Promise<void> {
   if (!lockInherited) {
     const staleMs = Number(process.env.ESHEPHERD_AUTO_CONSOLIDATION_TIMEOUT_MS) || 300000;
     const lockRoot = process.cwd();
-    if (!acquireConsolidationLock(lockRoot, { source: "run-memory-consolidation-and-validation" }, staleMs)) {
+    if (!acquireConsolidationLock(lockRoot, { source: "run-memory-consolidation-and-validation", runId }, staleMs)) {
       process.stdout.write(`${JSON.stringify({ skipped: true, reason: "consolidation-lock-held" }, null, 2)}\n`);
       return;
     }
@@ -811,6 +818,8 @@ async function main(): Promise<void> {
   if (includeBasePipeline) {
     const worklistChunks = chunkItems(worklist, worklistOptions.batchSize);
     const useLiveMapper = hasFlag(argv, "--use-live-mapper");
+    const allSkipped: Array<{ drawer_id: string; reason: string }> = [];
+
 
     for (const chunk of worklistChunks) {
       const chunkIds = chunk.map((item) => item.drawer_id);
@@ -830,12 +839,19 @@ async function main(): Promise<void> {
         mapperBatches.push(chunkMapper);
       }
 
-      const rawEntries = await ensureRawEntriesForChunk(client, chunk);
+      const { entries: rawEntries, skipped: chunkSkipped } = await ensureRawEntriesForChunk(client, chunk);
+      if (chunkSkipped.length > 0) allSkipped.push(...chunkSkipped);
       const chunkConsolidation = await runSynthesisConsolidation(client, {
         ...consolidationOptions,
         mapperSummaries: chunkMapper && chunkMapper.summaries.length > 0 ? chunkMapper.summaries : undefined,
         rawEntries,
+        runId,
       });
+      // Record the chunk's result so downstream stages can see it. Without this
+      // push, consolidationBatches stays empty: `consolidation` never gets set,
+      // touchedNodeIds is empty so validation-merge-review is skipped, mem-core
+      // apply is skipped (it is gated on `consolidation`), and the trace envelope
+      // reports createdNodeCount: 0 even though closets were actually written.
       consolidationBatches.push(chunkConsolidation);
     }
 
@@ -955,24 +971,57 @@ async function main(): Promise<void> {
     cadenceStateOut = next;
   }
 
+  // P2-1: trace envelope — wrap output with run metadata
+  const durationMs = Date.now() - startTime;
+  const examinedCount = worklist.length;
+  const createdNodes = consolidationBatches.map((c) => c.createdNodeId).filter(Boolean) as string[];
+
+  // P3-4: collect warnings for mapper/auditor fallbacks
+  const traceWarnings: string[] = [];
+  if (mapper && mapper.via === "none") traceWarnings.push("mapper-unavailable");
+  if (auditor && auditor.via === "none") traceWarnings.push("auditor-unavailable");
+
   const output: Record<string, unknown> = {
+    trace: {
+      runId,
+      startedAt: new Date(startTime).toISOString(),
+      completedAt: new Date().toISOString(),
+      durationMs,
+      pid: process.pid,
+      examinedCount,
+      createdNodeCount: createdNodes.length,
+      createdNodeIds: createdNodes,
+      consolidationBatchCount: consolidationBatches.length,
+      skipped: allSkipped.length > 0 ? allSkipped : undefined,
+      warnings: traceWarnings.length > 0 ? traceWarnings : undefined,
+    },
     mode: includeBasePipeline ? "full-pipeline" : "cadence-only",
     worklistMode: worklistOptions.mode,
     worklist: worklistOutput,
   };
 
-  if (consolidation) output.consolidation = consolidation;
-  if (consolidationBatches.length > 0) output.consolidationBatches = consolidationBatches;
-  if (validationMergeReview) output.validationMergeReview = validationMergeReview;
-  if (validationSkippedReason && !validationMergeReview) output.validationSkipped = { reason: validationSkippedReason };
-
-  if (mapper) output.mapper = mapper;
-  if (auditor) output.auditor = auditor;
-  if (memCoreApplyResult) output.memCoreApply = memCoreApplyResult;
-  if (cadence) output.cadence = cadence;
-  if (cadenceStateOut) output.cadenceState = cadenceStateOut;
-
+  // P2-1: write trace envelope to stdout
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+
+  // P1-2: append run journal entry for crash-safe resume
+  try {
+    const journalDir = join(process.cwd(), ".electric-shepherd", "journal");
+    mkdirSync(journalDir, { recursive: true });
+    const journalPath = join(journalDir, `${runId}.jsonl`);
+    const journalLine = JSON.stringify({
+      runId,
+      completedAt: new Date().toISOString(),
+      durationMs,
+      examinedCount,
+      createdNodeIds: createdNodes,
+      consolidationBatchCount: consolidationBatches.length,
+    });
+    appendFileSync(journalPath, `${journalLine}\n`, "utf8");
+  } catch (err) {
+    // Journal append failure is non-fatal; the stdout trace is the primary record
+    process.stderr.write(`[memory-consolidation-validation] journal append failed: ${String(err)}\n`);
+  }
+
 
   if (heldConsolidationLockRoot) {
     releaseConsolidationLock(heldConsolidationLockRoot);

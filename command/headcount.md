@@ -10,6 +10,10 @@ Scope: $ARGUMENTS (default: the current project's memory if no scope is given)
 Report:
 - Number of unconsolidated source drawers in scope.
 - Number of existing consolidated summary nodes in scope.
+- Number of those summary nodes still `es-status: provisional` (synthesized but never
+  validated/promoted — hidden from default retrieval until a dream-auditor pass promotes
+  them). This is separate backlog from the two counts above: it needs a validation pass,
+  not a synthesis pass.
 - Approximate backlog (source memories not yet represented in any synthesized-from summary node).
 - Whether that backlog is above the auto-consolidation volume threshold
   (ESHEPHERD_AUTO_CONSOLIDATION_MESSAGE_THRESHOLD) — i.e. whether a /count-sheep is due.

@@ -95,7 +95,7 @@ Add to your `opencode.json`:
 
 OpenCode resolves this package on startup. This repo currently provides:
 - The `turn-guard` plugin (checkpoint + stop-quality retry + compaction-aware mem-core reinjection + scope-aware loader wiring + write-authority/capture guards)
-- Dreamer agent profiles (`dreamer`, `dream-consolidator`, `dream-mapper`, `dream-auditor`)
+- Dreamer agent profiles (`dreamer`, `dream-mapper`, `dream-auditor`)
 - Slash commands in `command/` (`/count-sheep`, `/herd`, `/lucid-dream`, `/wake-up`, `/headcount`) for consolidation workflows
 - The `memsave` / `memload` OpenChamber snippets
 - The memory discipline instruction plus runtime-derived mem-core renders under `.electric-shepherd/memory/`
@@ -168,7 +168,6 @@ like the rest of the plugin. Each agent and command stays in its own standalone 
 The dreamer profiles in `agents/` are markdown agent files that the plugin injects automatically
 — no `opencode.json` edits required:
 - `agents/dreamer.md`
-- `agents/dream-consolidator.md` (alias profile)
 - `agents/dream-mapper.md`
 - `agents/dream-auditor.md`
 
@@ -213,7 +212,6 @@ electric-shepherd/
 │   └── turn-guard.ts          # OpenCode plugin: retry/checkpoint + mem-core injection + authority/capture guards
 ├── agents/
 │   ├── dreamer.md             # primary dream orchestrator profile
-│   ├── dream-consolidator.md  # alias profile name used by some setups
 │   ├── dream-mapper.md        # per-transcript subagent (isolated context)
 │   └── dream-auditor.md       # validator subagent (bidirectional coherence check)
 ├── command/
@@ -274,7 +272,7 @@ All configuration is optional — defaults work out of the box.
 | `ESHEPHERD_MEMCORE_MAX_SCOPES` | `6` | Max broad→narrow scopes merged by reinjection loader |
 | `ESHEPHERD_MEMCORE_MAX_CHARS` | `12000` | Character cap for injected mem-core payload |
 | `ESHEPHERD_CONSOLIDATION_WRITE_GUARD_ENABLED` | `true` | Alert on non-dreamer calls to derived-memory write tools |
-| `ESHEPHERD_ALLOWED_CONSOLIDATION_WRITERS` | `dreamer,dream-consolidator` | Allowed agent identities for consolidation writes |
+| `ESHEPHERD_ALLOWED_CONSOLIDATION_WRITERS` | `dreamer` | Allowed agent identities for consolidation writes |
 | `ESHEPHERD_SOURCE_CAPTURE_VERIFY_ENABLED` | `true` | Emit OpenCode source-transcript capture verification status |
 | `ESHEPHERD_SOURCE_CAPTURE_CMD` | unset | Optional command run on stop/compact verification events |
 | `ESHEPHERD_SOURCE_CAPTURE_TIMEOUT_MS` | `20000` | Timeout ceiling for blocking source-transcript capture subprocess |

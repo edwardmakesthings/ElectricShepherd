@@ -204,7 +204,7 @@ export ESHEPHERD_MEMCORE_REINJECT_ENABLED=true
 export ESHEPHERD_MEMCORE_REINJECT_ON_COMPACT=true
 export ESHEPHERD_MEMCORE_REINJECT_ON_IDLE=true
 export ESHEPHERD_MEMCORE_REINJECT_ON_START=true
-export ESHEPHERD_ALLOWED_CONSOLIDATION_WRITERS="dreamer,dream-consolidator"
+export ESHEPHERD_ALLOWED_CONSOLIDATION_WRITERS="dreamer"
 export ESHEPHERD_SOURCE_CAPTURE_VERIFY_ENABLED=true
 # Required: full MCP endpoint URL used for source-transcript verification/capture.
 export MEMPALACE_MCP_URL="http://your-mcp-endpoint/mcp"

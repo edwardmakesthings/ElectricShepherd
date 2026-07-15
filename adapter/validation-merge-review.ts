@@ -42,6 +42,7 @@ export type MergeAdjudication = {
   decision: "merge" | "escalate";
   reasons: string[];
   applied: boolean;
+  error?: string;
 };
 
 /**
@@ -242,13 +243,20 @@ export async function runValidationMergeReview(
   for (const nodeId of nodeIds) {
     const ancestors = await client.getLineageSources(nodeId, validationDepth).catch(() => ({}));
     const ancestorIds = parseAncestorIds(ancestors);
+    // getLineageSources is a PR-only multi-hop tool; on stock MemPalace it returns
+    // nothing, which would flag every closet "revise" and promote none. The direct
+    // one-hop synthesized-from count works on vanilla and is the correct signal for
+    // "does this synthesis have >= 2 distinct sources", so decisions key off it.
+    // ancestorCount reporting keeps the richer multi-hop number when it is available.
+    const directSourceCount = await client.countDirectSources(nodeId);
+    const reportedSourceCount = Math.max(ancestorIds.length, directSourceCount);
 
     const reasons: string[] = [];
     let verdict: "pass" | "revise" = "pass";
 
-    if (ancestorIds.length < 2) {
+    if (directSourceCount < 2) {
       verdict = "revise";
-      reasons.push("downward-check: synthesis has fewer than 2 ancestor/source nodes");
+      reasons.push("downward-check: synthesis has fewer than 2 direct source nodes");
       escalationNodeIds.add(nodeId);
       escalationReasons.add("downward validation failed: insufficient source support");
     }
@@ -265,8 +273,17 @@ export async function runValidationMergeReview(
       nodeId,
       verdict,
       reasons,
-      ancestorCount: ancestorIds.length,
+      ancestorCount: reportedSourceCount,
     });
+
+    // P2-2: promote provisional -> active on sufficient DIRECT source support.
+    // Deliberately decoupled from the lineage-issue veto and merge machinery (both
+    // PR-only) so promotion is identical on vanilla and PR-enabled MemPalace. A
+    // closet that never reaches 2 direct sources stays provisional and is filtered
+    // from default retrieval. Best-effort: a failed status write is non-fatal.
+    if (directSourceCount >= 2) {
+      await client.setClosetStatus(nodeId, "active").catch(() => {});
+    }
   }
 
   const mergeResult = await client.findMergeCandidates({
@@ -296,13 +313,19 @@ export async function runValidationMergeReview(
     }
 
     let applied = false;
+    let mergeError: string | undefined;
     if (decision === "merge" && applyMerges) {
-      await client.applyMerge({
-        source_node_id: candidate.sourceNodeId,
-        canonical_node_id: candidate.canonicalNodeId,
-        invalidate_source_edges: true,
-      });
-      applied = true;
+      try {
+        await client.applyMerge({
+          source_node_id: candidate.sourceNodeId,
+          canonical_node_id: candidate.canonicalNodeId,
+          invalidate_source_edges: true,
+        });
+        applied = true;
+      } catch (err) {
+        mergeError = String(err);
+        reasons.push(`merge-apply-error: ${mergeError}`);
+      }
     }
 
     mergeAdjudications.push({
@@ -312,6 +335,7 @@ export async function runValidationMergeReview(
       decision,
       reasons,
       applied,
+      error: mergeError,
     });
   }
 

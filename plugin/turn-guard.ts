@@ -32,9 +32,10 @@
  */
 // @ts-nocheck
 
-import { execFileSync, execSync, spawn } from "node:child_process"
+import { execFile, execFileSync, spawn } from "node:child_process"
 import { dirname, join, resolve } from "node:path"
-import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, closeSync } from "node:fs"
+import { promisify } from "node:util"
 import {
   buildCommandExecutionPlan,
   clipText,
@@ -136,7 +137,7 @@ const DEFAULT_SPIRAL_GUARD_ENABLED = true
 const DEFAULT_SPIRAL_INVESTIGATE_THRESHOLD = 3
 const DEFAULT_SPIRAL_REVERSAL_THRESHOLD = 3
 const DEFAULT_SPIRAL_MAX_INTERVENTIONS = 2
-const DEFAULT_ALLOWED_CONSOLIDATION_WRITERS = ["dreamer", "dream-consolidator"]
+const DEFAULT_ALLOWED_CONSOLIDATION_WRITERS = ["dreamer"]
 const CONSOLIDATION_WRITE_TOOL_NAMES = ["add_drawer", "update_drawer", "kg_add", "kg_invalidate", "apply_merge"]
 
 // Automatic consolidation ("count-sheep in the background"): OPT-IN. When enabled,
@@ -299,6 +300,18 @@ function appendAutoConsolidationLog(projectRoot: string, line: string): void {
     const statusDir = join(projectRoot, STATUS_DIR)
     mkdirSync(statusDir, { recursive: true })
     const logPath = join(statusDir, AUTOCONSOLIDATION_LOG_FILE)
+    // P3-2: rotate at 1 MB to .1 (keep one generation)
+    const MAX_LOG_SIZE = 1048576 // 1 MB
+    try {
+      const stat = statSync(logPath)
+      if (stat.size >= MAX_LOG_SIZE) {
+        const rotatedPath = logPath + ".1"
+        if (existsSync(rotatedPath)) unlinkSync(rotatedPath)
+        renameSync(logPath, rotatedPath)
+      }
+    } catch {
+      // stat/rename failure is non-fatal; proceed with append
+    }
     appendFileSync(logPath, `${line}\n`, "utf8")
   } catch (err) {
     console.error("[turn-guard] failed writing auto-consolidation log:", err)
@@ -311,34 +324,63 @@ function appendAutoConsolidationLog(projectRoot: string, line: string): void {
  * self-heals the case where a previous run was orphaned (e.g. OpenCode exited
  * before the background process finished) and never released the lock.
  *
- * Fails open on lock-I/O errors: consolidation should not be permanently blocked by a
- * filesystem hiccup, and the in-process guard still prevents same-process overlap.
+ * Uses atomic exclusive creation ("wx") so two processes cannot both acquire.
+ * Fails CLOSED on unexpected FS errors: a skipped consolidation is recoverable,
+ * a double-write race is not.
+ *
+ * NOTE: This function must stay byte-compatible with scripts/consolidation-lock.ts.
+ * Any change to the algorithm here must be mirrored there.
  */
 function acquireAutoConsolidationLock(projectRoot: string, payload: Record<string, unknown>, staleMs: number): boolean {
+  const dir = join(projectRoot, STATUS_DIR)
+  mkdirSync(dir, { recursive: true })
+  const lockPath = join(dir, AUTOCONSOLIDATION_LOCK_FILE)
+
+  // Attempt atomic exclusive create
+  let fd: number | undefined
   try {
-    const dir = join(projectRoot, STATUS_DIR)
-    mkdirSync(dir, { recursive: true })
-    const lockPath = join(dir, AUTOCONSOLIDATION_LOCK_FILE)
-    if (existsSync(lockPath)) {
-      try {
-        const raw = JSON.parse(readFileSync(lockPath, "utf8"))
-        const startedAtMs = Number(raw?.startedAtMs || 0)
-        if (startedAtMs && Date.now() - startedAtMs < staleMs) {
-          return false // a still-fresh run holds the lock
-        }
-      } catch {
-        // unreadable/corrupt lock -> treat as stale and reclaim
+    fd = openSync(lockPath, "wx")
+  } catch (err: any) {
+    if (err?.code !== "EEXIST") throw err // fail closed on unexpected errors
+    // Lock exists — check staleness
+    try {
+      const raw = JSON.parse(readFileSync(lockPath, "utf8"))
+      const startedAtMs = Number(raw?.startedAtMs || 0)
+      if (startedAtMs && Date.now() - startedAtMs < staleMs) {
+        return false // a still-fresh run holds the lock
       }
+    } catch {
+      // unreadable/corrupt lock -> treat as stale
     }
-    writeFileSync(
-      lockPath,
-      `${JSON.stringify({ ...payload, pid: process.pid, startedAtMs: Date.now() }, null, 2)}\n`,
-      "utf8",
-    )
+
+    // Stale — reclaim: unlink first, then retry wx-create
+    try {
+      unlinkSync(lockPath)
+    } catch (unlinkErr) {
+      console.error("[turn-guard] auto-consolidation lock stale reclaim unlink failed:", unlinkErr)
+      throw unlinkErr // fail closed
+    }
+
+    try {
+      fd = openSync(lockPath, "wx")
+    } catch (retryErr: any) {
+      if (retryErr?.code === "EEXIST") {
+        return false // another process won the reclaim race
+      }
+      throw retryErr // fail closed on unexpected errors
+    }
+  }
+
+  const content = `${JSON.stringify({ ...payload, pid: process.pid, startedAtMs: Date.now() }, null, 2)}\n`
+  try {
+    writeFileSync(fd, content, "utf8")
+    closeSync(fd)
     return true
   } catch (err) {
-    console.error("[turn-guard] auto-consolidation lock acquire failed (failing open):", err)
-    return true
+    // If we can't write the payload after acquiring, release and fail closed
+    try { unlinkSync(lockPath) } catch {}
+    console.error("[turn-guard] auto-consolidation lock write failed:", err)
+    throw err
   }
 }
 
@@ -381,7 +423,7 @@ function killProcessTree(child: { pid?: number; kill: (signal?: string) => boole
   }
 }
 
-function loadMemcoreMarkdown(projectRoot: string, scopeDir: string): { markdown: string; loaderInfo: Record<string, unknown> } {
+async function loadMemcoreMarkdown(projectRoot: string, scopeDir: string): Promise<{ markdown: string; loaderInfo: Record<string, unknown> }> {
   const loaderScript = join(projectRoot, "scripts", "run-mem-core-loader.ts")
   if (!existsSync(loaderScript)) {
     return { markdown: "", loaderInfo: { reason: "loader-script-not-found", loaderScript } }
@@ -410,12 +452,12 @@ function loadMemcoreMarkdown(projectRoot: string, scopeDir: string): { markdown:
     args.push("--store-roots", storeRoots.join(","))
   }
 
+  const execFileAsync = promisify(execFile)
   try {
-    const output = execFileSync("node", args, {
+    const output = await execFileAsync("node", args, {
       cwd: projectRoot,
       encoding: "utf8",
       maxBuffer: 2 * 1024 * 1024,
-      stdio: ["ignore", "pipe", "pipe"],
       timeout: getNumberEnv("ESHEPHERD_MEMCORE_LOADER_TIMEOUT_MS", DEFAULT_MEMCORE_LOADER_TIMEOUT_MS),
       killSignal: "SIGKILL",
     })
@@ -462,7 +504,7 @@ function getAgentIdentity(msg: MessageWithParts | null | undefined): string {
   return fromInfo
 }
 
-function runSourceCaptureCommand(projectRoot: string, sid: string, eventType: string): { attempted: boolean; ok: boolean; output?: string; error?: string } {
+async function runSourceCaptureCommand(projectRoot: string, sid: string, eventType: string): Promise<{ attempted: boolean; ok: boolean; output?: string; error?: string }> {
   const configured = String(process?.env?.ESHEPHERD_SOURCE_CAPTURE_CMD || "").trim()
   const defaultScript = join(projectRoot, "scripts", "capture-source-transcripts.sh")
   const command = configured || (existsSync(defaultScript) ? "bash ./scripts/capture-source-transcripts.sh" : "")
@@ -470,12 +512,12 @@ function runSourceCaptureCommand(projectRoot: string, sid: string, eventType: st
     return { attempted: false, ok: false, error: "capture command not set and default script missing" }
   }
 
+  const execFileAsync = promisify(execFile)
   try {
-    const output = execSync(command, {
+    const output = await execFileAsync("/bin/sh", ["-c", command], {
       cwd: projectRoot,
       encoding: "utf8",
       maxBuffer: 2 * 1024 * 1024,
-      stdio: ["ignore", "pipe", "pipe"],
       timeout: getNumberEnv("ESHEPHERD_SOURCE_CAPTURE_TIMEOUT_MS", DEFAULT_SOURCE_CAPTURE_TIMEOUT_MS),
       killSignal: "SIGKILL",
       env: {
@@ -643,6 +685,18 @@ function getPromptRouting(...candidates: Array<MessageWithParts | null | undefin
   if (model) routing.model = model
   return routing
 }
+/**
+ * P3-1: Evict oldest entries from a Map or Set to keep it bounded.
+ * Used for all session-keyed state to prevent memory leaks in long-lived processes.
+ */
+function pruneToMax(collection: Map<string, any> | Set<string>, max: number): void {
+  if (max <= 0) return
+  while (collection.size > max) {
+    const oldest = collection.keys().next().value as string | undefined
+    if (oldest === undefined) break
+    collection.delete(oldest)
+  }
+}
 
 export const TurnGuard = async ({ client, directory }: any) => {
   const rootDirectory = normalizePathForHost(directory || process.cwd())
@@ -666,10 +720,10 @@ export const TurnGuard = async ({ client, directory }: any) => {
     }`,
   )
   const projectRoot = findProjectRoot(rootDirectory)
-  const memcoreInjectEnabled = getBoolEnv("ESHEPHERD_MEMCORE_REINJECT_ENABLED", true)
-  const memcoreInjectOnIdle = getBoolEnv("ESHEPHERD_MEMCORE_REINJECT_ON_IDLE", true)
-  const memcoreInjectOnCompacted = getBoolEnv("ESHEPHERD_MEMCORE_REINJECT_ON_COMPACT", true)
-  const memcoreInjectOnStart = getBoolEnv("ESHEPHERD_MEMCORE_REINJECT_ON_START", true)
+  const memcoreInjectEnabled = getBoolEnv("ESHEPHERD_MEMCORE_REINJECT_ENABLED", false)
+  const memcoreInjectOnIdle = getBoolEnv("ESHEPHERD_MEMCORE_REINJECT_ON_IDLE", false)
+  const memcoreInjectOnCompacted = getBoolEnv("ESHEPHERD_MEMCORE_REINJECT_ON_COMPACT", false)
+  const memcoreInjectOnStart = getBoolEnv("ESHEPHERD_MEMCORE_REINJECT_ON_START", false)
   const memcoreMaxChars = getNumberEnv("ESHEPHERD_MEMCORE_MAX_CHARS", DEFAULT_MEMCORE_MAX_CHARS)
   const injectionCooldownMs = getNumberEnv("ESHEPHERD_MEMCORE_INJECTION_COOLDOWN_MS", DEFAULT_INJECTION_COOLDOWN_MS)
   const retryEnabled = getBoolEnv("ESHEPHERD_RETRY_ENABLED", DEFAULT_RETRY_ENABLED)
@@ -703,6 +757,11 @@ export const TurnGuard = async ({ client, directory }: any) => {
   // Total auto-retries issued per session (see DEFAULT_MAX_RETRIES_PER_SESSION):
   // a keying-independent hard stop so a persistent stall cannot loop unbounded.
   const retriesTotalBySession = new Map<string, number>()
+  // Chain counter: increments on each retry issued for a session, resets to 0
+  // when a turn is consideredComplete or a real (non-injected) user message arrives.
+  // This is the authoritative bound against runaway retry chains where per-parent
+  // keying shifts every generation.
+  const retryChainBySession = new Map<string, number>()
   const maxRetriesPerSession = Math.max(
     1,
     Number(process?.env?.ESHEPHERD_MAX_RETRIES_PER_SESSION) || DEFAULT_MAX_RETRIES_PER_SESSION,
@@ -755,8 +814,41 @@ export const TurnGuard = async ({ client, directory }: any) => {
     `[turn-guard] spiral guard: ${
       spiralGuardEnabled
         ? `ON (nudges a finish=stop turn with >=${spiralInvestigateThreshold} announced-but-unexecuted investigations and no action part; max ${spiralMaxInterventions} nudges/session)`
-        : "OFF (ESHEPHERD_SPIRALGUARD_ENABLED=true to opt in)"
-    }`,
+    : "OFF (ESHEPHERD_SPIRALGUARD_ENABLED=true to opt in)"
+     }`,
+   )
+
+  // P3-7: structured effective-config echo — single JSON line for programmatic parsing
+  console.log(
+    `[turn-guard] config=${JSON.stringify({
+      retryEnabled,
+      maxRetriesPerSession,
+      memcoreInjectEnabled,
+      memcoreInjectOnIdle,
+      memcoreInjectOnCompacted,
+      memcoreInjectOnStart,
+      memcoreMaxChars,
+      injectionCooldownMs,
+      loopGuardEnabled,
+      loopRepeatThreshold,
+      loopWindowSize,
+      loopMaxInterventions,
+      spiralGuardEnabled,
+      spiralInvestigateThreshold,
+      spiralReversalThreshold,
+      spiralMaxInterventions,
+      consolidationWriteGuardEnabled,
+      sourceCaptureVerifyEnabled,
+      autoConsolidationEnabled,
+      autoConsolidationOnIdle,
+      autoConsolidationOnCompact,
+      autoConsolidationIdleDelayMs,
+      autoConsolidationMessageThreshold,
+      autoConsolidationCooldownMs,
+      autoConsolidationTimeoutMs,
+      autoConsolidationMaxTrackedSessions,
+      allowedConsolidationWriters: [...allowedConsolidationWriters],
+    })}`,
   )
 
   // --- checkpoint state ---
@@ -837,7 +929,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
         : dirname(pathFromMessages)
     }
 
-    const { markdown, loaderInfo } = loadMemcoreMarkdown(projectRoot, scopeDir)
+    const { markdown, loaderInfo } = await loadMemcoreMarkdown(projectRoot, scopeDir)
     if (!markdown) {
       writeStatusFile(projectRoot, statusSnapshot({
         type: "memcore-reinject",
@@ -972,10 +1064,10 @@ export const TurnGuard = async ({ client, directory }: any) => {
     return true
   }
 
-  function verifySourceCapture(sid: string, eventType: string): void {
+  async function verifySourceCapture(sid: string, eventType: string): Promise<void> {
     if (!sourceCaptureVerifyEnabled) return
 
-    const result = runSourceCaptureCommand(projectRoot, sid, eventType)
+    const result = await runSourceCaptureCommand(projectRoot, sid, eventType)
     const prev = sourceCaptureBySession.get(sid)
     const next = {
       totalEvents: Number(prev?.totalEvents || 0) + 1,
@@ -1243,7 +1335,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
 
     const parentText = getText(prev?.parts ?? [])
     // A reply to a memory-checkpoint prompt is terminal by design — never retry it.
-    if (parentText.includes(CHECKPOINT_MARKER)) {
+    if (parentText.trimStart().startsWith(CHECKPOINT_MARKER)) {
       console.log(`[turn-guard] skip retry in ${sid}; turn is a memory-checkpoint reply`)
       return false
     }
@@ -1274,6 +1366,8 @@ export const TurnGuard = async ({ client, directory }: any) => {
         `reviewRequired=${String(reviewRequired)} capabilityQuestion=${String(capabilityQuestion)} ` +
         `prevSerenaMemory=${String(prevWasSerenaMemory)})`
       )
+      // Turn is genuinely complete — reset the retry chain counter for this session.
+      retryChainBySession.delete(sid)
       return false
     }
 
@@ -1283,9 +1377,19 @@ export const TurnGuard = async ({ client, directory }: any) => {
     // If the parent already is an auto-retry prompt, fold retries under the
     // grandparent ID so we can cap the whole retry chain.
     let retryKey = parentID
-    if (parentText.includes(AUTO_RETRY_MARKER)) {
+    if (parentText.trimStart().startsWith(AUTO_RETRY_MARKER)) {
       const grandParentID = String(prev?.info?.parentID ?? "")
       if (grandParentID) retryKey = grandParentID
+    }
+
+    // Chain counter: the authoritative bound against runaway retry chains.
+    // Resets on consideredComplete or real user message (not injected prompts).
+    const chainCount = retryChainBySession.get(sid) ?? 0
+    if (chainCount >= MAX_RETRIES_PER_PARENT) {
+      console.log(
+        `[turn-guard] skip retry in ${sid}; retry chain cap ${MAX_RETRIES_PER_PARENT} reached`,
+      )
+      return false
     }
 
     const retriedParents = retriedParentBySession.get(sid) ?? new Map<string, number>()
@@ -1305,6 +1409,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
     retriedParents.set(retryKey, retryCount + 1)
     retriedParentBySession.set(sid, retriedParents)
     retriesTotalBySession.set(sid, sessionRetries + 1)
+    retryChainBySession.set(sid, chainCount + 1)
 
     const retryReason = memoryOnlyLikelyPremature
       ? "memory checkpoint without concrete continuation"
@@ -1391,9 +1496,9 @@ export const TurnGuard = async ({ client, directory }: any) => {
     // A reply to any guard prompt is terminal — never guard the guard's own reply.
     const parentText = getText(prev?.parts ?? [])
     if (
-      parentText.includes(SPIRAL_GUARD_MARKER) ||
-      parentText.includes(AUTO_RETRY_MARKER) ||
-      parentText.includes(CHECKPOINT_MARKER)
+      parentText.trimStart().startsWith(SPIRAL_GUARD_MARKER) ||
+      parentText.trimStart().startsWith(AUTO_RETRY_MARKER) ||
+      parentText.trimStart().startsWith(CHECKPOINT_MARKER)
     ) {
       return false
     }
@@ -1491,8 +1596,10 @@ export const TurnGuard = async ({ client, directory }: any) => {
               `- project-state — architecture, active work, or a major decision changed?\n` +
               `- active-conventions — a naming/style/structural/tooling rule changed?\n` +
               `- user-preferences — a new durable preference was stated?\n` +
-              `For each durable STATE change, write/update the corresponding derived memory fact using ` +
-              `add_drawer plus kg_add lineage/fact edges (the same durable layer used in PART 2).\n` +
+              `For each durable STATE change, write/update it via diary_write (derived memory ` +
+              `writes like add_drawer/kg_add are dreamer-only; write-authority will reject them from ` +
+              `this agent — diary_write is the correct tool here, and a dreamer consolidation pass ` +
+              `formalizes it into the derived layer).\n` +
               `mem-core is a deterministic file-only render regenerated by the consolidation runtime from derived memory. ` +
               `Do NOT hand-edit mem-core files and do NOT write any context-blocks drawer for mem-core.\n\n` +
               `PART 2 — was substantive WORK done or something LEARNED? (diary / worked example)\n` +
@@ -1503,7 +1610,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
               `- a problem was solved in a reusable way (file as a worked example in the ` +
               `apprenticeship room),\n` +
               `- a dead end worth not repeating was hit.\n` +
-              `Use diary_write / kg_add / add_drawer / the apprenticeship room. Synthesize — ` +
+              `Use diary_write (the apprenticeship room included) for all of this. Synthesize — ` +
               `don't dump a transcript; write what a future session would want to retrieve. ` +
               `Lead each saved entry with a one-line \`DESC:\` (what it is + when it's ` +
               `relevant) so it's discoverable without loading the body.\n\n` +
@@ -1543,6 +1650,11 @@ export const TurnGuard = async ({ client, directory }: any) => {
     const sid = String(info?.sessionID ?? findSessionID(event))
     if (!sid) return
 
+    // A real (non-injected) user message resets the retry chain counter.
+    if (info?.role === "user") {
+      retryChainBySession.delete(sid)
+    }
+
     if (!startupConfirmedBySession.has(sid)) {
       startupConfirmedBySession.add(sid)
       console.log(`${START_BANNER}: message hook active`)
@@ -1577,7 +1689,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
       // When BOTH reactive guards are disabled, skip parent fetch and all
       // heuristic evaluation — zero extra overhead per message.
       if (!retryEnabled && !spiralGuardEnabled) {
-        verifySourceCapture(sid, "message.stop")
+        verifySourceCapture(sid, "message.stop").catch(() => {})
         return
       }
 
@@ -1589,7 +1701,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
         query: { directory },
       })
       const parent = unwrapMessageResult(parentRes)
-      verifySourceCapture(sid, "message.stop")
+      verifySourceCapture(sid, "message.stop").catch(() => {})
 
       // message.updated owns the reactive end-of-turn guards; checkpoint is
       // idle-only. At most one injection per stop: retry owns stalls, the spiral
@@ -1599,6 +1711,21 @@ export const TurnGuard = async ({ client, directory }: any) => {
     } catch (err) {
       console.error("[turn-guard] message.updated failed:", err)
     }
+    // P3-1: bound all session-keyed state to prevent memory leaks in long-lived processes
+    pruneToMax(retriedParentBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(retriesTotalBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(retryChainBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(startupConfirmedBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(inspectedStopBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(toolWindowBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(loopInterventionsBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(spiralNudgedBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(spiralInspectedBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(checkpointedSessions, autoConsolidationMaxTrackedSessions)
+    pruneToMax(terminalCountBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(memcoreInjectionBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(sourceCaptureBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(compactionPathBySession, autoConsolidationMaxTrackedSessions)
   }
 
   async function onSessionIdle(event: any): Promise<void> {
@@ -1645,13 +1772,28 @@ export const TurnGuard = async ({ client, directory }: any) => {
     } catch (err) {
       console.error("[turn-guard] failed:", err)
     }
+    // P3-1: bound all session-keyed state (same as onMessageUpdated)
+    pruneToMax(retriedParentBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(retriesTotalBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(retryChainBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(startupConfirmedBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(inspectedStopBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(toolWindowBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(loopInterventionsBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(spiralNudgedBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(spiralInspectedBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(checkpointedSessions, autoConsolidationMaxTrackedSessions)
+    pruneToMax(terminalCountBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(memcoreInjectionBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(sourceCaptureBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(compactionPathBySession, autoConsolidationMaxTrackedSessions)
   }
 
   async function onSessionCompacted(event: any): Promise<void> {
     const sid = String(event?.properties?.sessionID ?? findSessionID(event))
     if (!sid) return
 
-    verifySourceCapture(sid, "session.compacted")
+    verifySourceCapture(sid, "session.compacted").catch(() => {})
 
     // PRIMARY mem-core injection is the experimental.session.compacting pre-hook.
     // This handler is a post-compaction fallback: re-inject only when the pre-hook
@@ -1679,6 +1821,21 @@ export const TurnGuard = async ({ client, directory }: any) => {
     if (autoConsolidationOnCompact) {
       evaluateAutoConsolidation(sid, "compacted")
     }
+    // P3-1: bound all session-keyed state (same as onMessageUpdated)
+    pruneToMax(retriedParentBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(retriesTotalBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(retryChainBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(startupConfirmedBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(inspectedStopBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(toolWindowBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(loopInterventionsBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(spiralNudgedBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(spiralInspectedBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(checkpointedSessions, autoConsolidationMaxTrackedSessions)
+    pruneToMax(terminalCountBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(memcoreInjectionBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(sourceCaptureBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(compactionPathBySession, autoConsolidationMaxTrackedSessions)
   }
 
   async function onSessionStarted(event: any): Promise<void> {
@@ -1702,10 +1859,21 @@ export const TurnGuard = async ({ client, directory }: any) => {
   // tool-prefix adapter. Returns { prompt } to inject mem-core into the compaction
   // context, or {} to leave the default prompt unchanged.
   async function injectMemcoreIntoCompaction(input: any): Promise<Record<string, unknown>> {
+    // Respect the SAME switches as every other injection path. Without this gate
+    // the pre-compact hook injected mem-core into the summary prompt on EVERY
+    // compaction regardless of ESHEPHERD_MEMCORE_REINJECT_ENABLED — so
+    // "disabling reinjection" left this path fully live. Worse, its "preserve and
+    // carry forward ALL facts" instruction fights compaction's job of shrinking
+    // context: the summary comes back nearly as large, the over-threshold check
+    // never clears, and OpenCode re-compacts on a loop. Returning {} hands
+    // compaction back to OpenCode's default (shrink-oriented) summary prompt.
+    if (!memcoreInjectEnabled || !memcoreInjectOnCompacted) {
+      return {}
+    }
     const sid = String(input?.sessionID ?? input?.sessionId ?? findSessionID(input) ?? "")
     const existingPrompt = String(input?.prompt ?? "")
     const scopeDir = resolveScopeDirFromEvent(input, rootDirectory)
-    const { markdown, loaderInfo } = loadMemcoreMarkdown(projectRoot, scopeDir)
+    const { markdown, loaderInfo } = await loadMemcoreMarkdown(projectRoot, scopeDir)
     if (!markdown) {
       console.log(`[turn-guard] pre-compact hook: no mem-core loaded sid=${sid} scope=${scopeDir}`)
       writeStatusFile(projectRoot, statusSnapshot({ type: "pre-compact-hook", sid, scopeDir, injected: false, loaderInfo }))

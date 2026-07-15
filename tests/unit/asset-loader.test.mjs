@@ -112,7 +112,7 @@ test("mergeWithoutOverride keeps user-defined entries", () => {
 
 test("real bundled assets parse into the expected dreamer agents and commands", () => {
   const { agents, commands } = loadPackagedAssets(repoRoot);
-  for (const name of ["dreamer", "dream-mapper", "dream-auditor", "dream-consolidator"]) {
+  for (const name of ["dreamer", "dream-mapper", "dream-auditor"]) {
     assert.ok(agents[name], `expected bundled agent ${name}`);
     assert.ok(typeof agents[name].prompt === "string" && agents[name].prompt.length > 0);
     assert.ok(agents[name].mode === "primary" || agents[name].mode === "subagent");

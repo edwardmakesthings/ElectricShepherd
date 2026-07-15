@@ -37,6 +37,8 @@ export type SynthesisConsolidationOptions = {
   applyWrites?: boolean;
   mapperSummaries?: TranscriptInsightSummary[];
   rawEntries?: Array<{ id: string; text: string }>;
+  // P2-3: provenance — the run_id of the consolidation execution that produced this result
+  runId?: string;
 };
 
 /**
@@ -75,8 +77,9 @@ export type SynthesisConsolidationResult = {
   };
   createdNodeId?: string;
   createResult?: Record<string, unknown>;
+  // P2-3: provenance — the run_id propagated from the calling script
+  runId?: string;
 };
-
 type DurableFactTriple = {
   subject: string;
   predicate: string;
@@ -493,8 +496,8 @@ export async function runSynthesisConsolidation(
       desc: consolidationDraft.title,
       labels: options.labels || [],
       added_by: "electric-shepherd-consolidation",
+      source_run_id: options.runId,
     });
-    createResult = create;
 
     const createObj = asObject(create);
     const id = asString(createObj.node_id || createObj.drawer_id || createObj.id).trim();
@@ -506,7 +509,7 @@ export async function runSynthesisConsolidation(
         targetHall: options.targetHall,
       });
 
-      const writes: Array<{ subject: string; predicate: string; object: string; source_closet?: string; valid_from?: string }> = [];
+      const writes: Array<{ subject: string; predicate: string; object: string; source_closet?: string; valid_from?: string; source_run_id?: string }> = [];
       const writeErrors: string[] = [];
       let writeSuccess = 0;
 
@@ -515,6 +518,7 @@ export async function runSynthesisConsolidation(
         predicate: "in-hall",
         object: selectedHall,
         source_closet: id,
+        source_run_id: options.runId,
       });
 
       for (const summary of included) {
@@ -524,6 +528,7 @@ export async function runSynthesisConsolidation(
           predicate: "in-hall",
           object: hall,
           source_closet: id,
+          source_run_id: options.runId,
         });
       }
 
@@ -536,6 +541,7 @@ export async function runSynthesisConsolidation(
             object: triple.object,
             source_closet: id,
             valid_from: now,
+            source_run_id: options.runId,
           });
         }
       }
@@ -583,5 +589,6 @@ export async function runSynthesisConsolidation(
     kgWrites,
     createdNodeId,
     createResult,
+    runId: options.runId,
   };
 }

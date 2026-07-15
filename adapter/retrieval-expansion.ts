@@ -21,6 +21,7 @@ export type RetrievalExpansionOptions = {
   match_mode?: "any" | "all";
   labeled_only?: boolean;
   include_merged?: boolean;
+  include_provisional?: boolean;
   max_depth?: number;
   limit?: number;
   offset?: number;
@@ -59,6 +60,7 @@ export type RetrievalExpansionResult = {
     match_mode: "any" | "all";
     labeled_only: boolean;
     include_merged: boolean;
+    include_provisional: boolean;
     max_depth: number;
     limit: number;
     offset: number;
@@ -309,7 +311,20 @@ export async function expandScopedRetrieval(
   const canonicalSeedIDs = new Set([...canonicalSeedSet]);
   const alwaysIncludeLabelSet = new Set(alwaysIncludeLabels);
 
-  const rankedNodes = extractScopedNodes(scopedResult).map((node) => {
+  const includeProvisional = Boolean(options.include_provisional);
+  let scopedNodes = extractScopedNodes(scopedResult);
+  // P2-2: drop provisional closets before ranking so top-N is computed over active
+  // (+ legacy/unstamped "unknown") nodes only. One-hop es-status query per node,
+  // run in parallel — vanilla-only. include_provisional=true skips it entirely (zero
+  // cost). "unknown" (pre-P2-2 closets) is kept: absence of a stamp is not provisional.
+  if (!includeProvisional && scopedNodes.length > 0) {
+    const statuses = await Promise.all(
+      scopedNodes.map((node) => client.getClosetStatus(node.node_id).catch(() => "unknown" as const)),
+    );
+    scopedNodes = scopedNodes.filter((_node, i) => statuses[i] !== "provisional");
+  }
+
+  const rankedNodes = scopedNodes.map((node) => {
     node.score = computeNodeScore({
       node,
       weights,
@@ -361,6 +376,7 @@ export async function expandScopedRetrieval(
       match_mode: matchMode,
       labeled_only: labeledOnly,
       include_merged: includeMerged,
+      include_provisional: includeProvisional,
       max_depth: maxDepth,
       limit,
       offset,
