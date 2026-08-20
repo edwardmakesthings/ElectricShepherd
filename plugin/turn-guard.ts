@@ -36,6 +36,7 @@ import { execFile, execFileSync, spawn } from "node:child_process"
 import { dirname, join, resolve } from "node:path"
 import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, closeSync } from "node:fs"
 import { promisify } from "node:util"
+import { fileURLToPath } from "node:url"
 import {
   buildCommandExecutionPlan,
   clipText,
@@ -50,7 +51,19 @@ import {
 } from "../adapter/turn-guard-helpers.ts"
 import type { AutoConsolidationTrigger, MemcoreInjectionRecord } from "../adapter/turn-guard-helpers.ts"
 import { loadPackagedAssets, mergeWithoutOverride, loadInstructionPaths, dedupeAppendInstructions } from "../adapter/asset-loader.ts"
+import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts"
 import deleteDrawersTool from "../tools/delete_drawers.ts"
+import captureTranscriptTool from "../tools/capture_transcript.ts"
+import palaceReportTool from "../tools/palace_report.ts"
+import palaceDiffTool from "../tools/palace_diff.ts"
+import exportDrawerTool from "../tools/export_drawer.ts"
+import relocateMemoryTool from "../tools/relocate_memory.ts"
+
+// Absolute path to the ElectricShepherd install root (the plugin's own repo).
+// Runtime scripts must run from HERE — not the consumer project's cwd — so
+// loadRuntimeEnv finds ElectricShepherd/.env (or the sibling docker/.env) and
+// scripts resolve their sibling adapter modules.
+const ESHEPHERD_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 
 type MessageWithParts = {
   info?: any
@@ -77,6 +90,15 @@ const DEFAULT_MAX_RETRIES_PER_SESSION = 4
 const STATUS_DIR = ".electric-shepherd"
 const STATUS_FILE = "turn-guard-status.json"
 const AUTOCONSOLIDATION_LOG_FILE = "auto-consolidation.log"
+const MEMCORE_CONTEXT_LOG_FILE = "memcore-context.ndjson"
+const MEMORY_USAGE_LOG_FILE = "memory-usage.ndjson"
+// Append-only NDJSON event log: every statusSnapshot write is appended here (one
+// JSON object per line) in addition to overwriting the single-status snapshot.
+// The snapshot answers "current state"; this log answers "what fired, in order,
+// on this event" — which matters because one compaction emits several snapshots
+// (probe, pre-compact-hook, compact-archive, source-capture-verify) and the
+// overwrite-only snapshot would only retain the last.
+const EVENT_LOG_FILE = "turn-guard-events.ndjson"
 const TURN_GUARD_INSTANCE_DIRS_KEY = "__ESHEPHERD_TURN_GUARD_INSTANCE_DIRS__"
 const DEFAULT_MEMCORE_MAX_CHARS = 12000
 const DEFAULT_MEMCORE_MAX_SCOPES = 6
@@ -125,6 +147,70 @@ const DEFAULT_LOOP_MUTATION_TOOLS = [
 ]
 // Never blocked: the escape hatches the nudge itself recommends.
 const DEFAULT_LOOP_EXEMPT_TOOLS = ["compress", "dcp-compress"]
+// Replacement compaction prompt (ESHEPHERD_COMPACT_PROMPT_OVERRIDE). OpenCode's
+// default asks the summarizer to carry findings forward as prose. In this project
+// most findings are already durable -- written to .opencode/context/ by the
+// explorers, or filed in MemPalace by consolidation -- so re-transcribing them
+// burns tokens duplicating something that already persists. This version asks for
+// POINTERS to durable artifacts plus the things that genuinely only exist in the
+// conversation: what was ruled out, and what is still open.
+//
+// Deliberately shrink-oriented. Mem-core is re-injected AFTER compaction for the
+// continuation turn, not into the compaction prompt itself, so this template can
+// stay focused on concise pointers and open work state.
+const COMPACT_PROMPT_TEMPLATE = `Write a handoff summary that lets work continue after the older turns are dropped.
+
+If an anchored summary from a previous compaction is present above, UPDATE it rather than writing a fresh one: keep still-true details, drop details that have become stale, and merge in what is new. Do not restart the summary from scratch -- facts established many compactions ago must survive, or a long session slowly forgets its own beginning.
+
+This project has DURABLE MEMORY outside the conversation. Research already written to a file, or already filed in MemPalace, does not need to be reproduced here -- it needs to be POINTED AT. Preserve the thread of work and the map of where things live, not a re-transcription of findings that are already saved.
+
+Rules:
+- Keep every section, even when empty. Keep the section order unchanged.
+- Use terse bullets, not prose paragraphs.
+- Preserve exact file paths, symbols, commands, error strings, URLs, and identifiers.
+- POINT, DON'T COPY: if a finding is already written under .opencode/context/ or .opencode/audits/, record the path and one line on what it covers -- do not restate its contents.
+- Do NOT point at a file unless it was actually written this session. A pointer to something that does not exist is worse than no pointer.
+- Record what was TRIED AND REJECTED, with the reason. This is the most expensive thing to lose: without it the next turns re-attempt a dead end already ruled out.
+- Preserve open questions verbatim. A half-answered question that reads as settled causes work to proceed on a wrong assumption.
+- Do not mention the summary process or that context was compacted.
+
+Output exactly this Markdown structure, section order unchanged:
+
+## Objective
+- [one or two brief sentences describing what the user is trying to accomplish]
+
+## Important Details
+- [constraints/preferences, decisions and WHY, important facts/assumptions, or "(none)"]
+
+## Ruled Out
+- [approach tried and abandoned: what was tried, and why it failed or was rejected, or "(none)"]
+
+## Work State
+### Completed
+- [finished work, verified facts, or changes made; otherwise "(none)"]
+
+### Active
+- [current work, partial changes, or investigation state; otherwise "(none)"]
+
+### Blocked
+- [blockers, failing commands, or unknowns; otherwise "(none)"]
+
+## Open Questions
+- [anything asked but not yet answered, stated as a question, or "(none)"]
+
+## Next Move
+1. [immediate concrete action, or "(none)"]
+2. [next action if known, or "(none)"]
+
+## Relevant Files
+- [file or directory path: why it matters, or "(none)"]
+
+## Saved Research
+- [path under .opencode/context/ or .opencode/audits/ written this session: one line on what it covers and when to read it, or "(none)"]
+
+## Durable Memory
+- [MemPalace drawers/closets created or updated this session, and what they hold, or "(none)"]`
+
 const SPIRAL_GUARD_MARKER = "[Spiral Guard]"
 // Deliberation-spiral guard: the inverse of the loop guard. The loop guard
 // catches a repeated *tool call*; this catches a finish=stop turn that narrates
@@ -137,6 +223,13 @@ const DEFAULT_SPIRAL_GUARD_ENABLED = true
 const DEFAULT_SPIRAL_INVESTIGATE_THRESHOLD = 3
 const DEFAULT_SPIRAL_REVERSAL_THRESHOLD = 3
 const DEFAULT_SPIRAL_MAX_INTERVENTIONS = 2
+// Cloud models don't spiral the way small local models do — the guard was built
+// for the local llama-swap models and a false positive on a paid Copilot call
+// costs a wasted turn. Skip the guard for these providers by default.
+const DEFAULT_SPIRAL_EXEMPT_PROVIDERS = ["github_copilot"]
+// In OpenCode, cloud calls often route through providerID="litellm" with the
+// concrete model in modelID (e.g. copilot-*). Exempt by model prefix too.
+const DEFAULT_SPIRAL_EXEMPT_MODEL_PREFIXES = ["copilot-"]
 const DEFAULT_ALLOWED_CONSOLIDATION_WRITERS = ["dreamer"]
 const CONSOLIDATION_WRITE_TOOL_NAMES = ["add_drawer", "update_drawer", "kg_add", "kg_invalidate", "apply_merge"]
 
@@ -290,6 +383,32 @@ function writeStatusFile(projectRoot: string, payload: Record<string, unknown>):
     mkdirSync(statusDir, { recursive: true })
     const statusPath = join(statusDir, STATUS_FILE)
     writeFileSync(statusPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8")
+    // Append the event to the durable per-event log (NDJSON, one per line).
+    // Log ONLY the event-specific fields: the payload carries a full config
+    // snapshot via statusSnapshot's spread, which is right for the overwrite
+    // snapshot but pure noise repeated on every appended line. Strip the
+    // constant config/session block and keep the event type + its own data.
+    try {
+      // Drop the constant config/session block that statusSnapshot spreads into
+      // every payload (it's identical across events — noise in an append-only log).
+      // Keep the event type and its own data fields.
+      const rest = { ...(payload as Record<string, unknown>) }
+      for (const k of [
+        "generatedAt", "projectRoot", "rootDirectory",
+        "memcoreInjectEnabled", "memcoreInjectOnIdle", "memcoreInjectOnCompacted", "memcoreInjectOnStart",
+        "retryEnabled", "retryDisabledAgents", "retryDisabledModes",
+        "consolidationWriteGuardEnabled", "sourceCaptureVerifyEnabled",
+        "autoConsolidationEnabled", "autoConsolidationOnIdle", "autoConsolidationOnCompact",
+        "autoConsolidationIdleDelayMs", "autoConsolidationMessageThreshold",
+        "autoConsolidationCooldownMs", "autoConsolidationTimeoutMs",
+        "allowedConsolidationWriters", "sessions",
+      ]) {
+        delete rest[k]
+      }
+      appendFileSync(join(statusDir, EVENT_LOG_FILE), `${JSON.stringify({ at: new Date().toISOString(), ...rest })}\n`, "utf8")
+    } catch {
+      // ignore append failure
+    }
   } catch (err) {
     console.error("[turn-guard] failed writing status file:", err)
   }
@@ -315,6 +434,31 @@ function appendAutoConsolidationLog(projectRoot: string, line: string): void {
     appendFileSync(logPath, `${line}\n`, "utf8")
   } catch (err) {
     console.error("[turn-guard] failed writing auto-consolidation log:", err)
+  }
+}
+
+function appendMemcoreContextLog(projectRoot: string, payload: Record<string, unknown>): void {
+  try {
+    const statusDir = join(projectRoot, STATUS_DIR)
+    mkdirSync(statusDir, { recursive: true })
+    const path = join(statusDir, MEMCORE_CONTEXT_LOG_FILE)
+    appendFileSync(path, `${JSON.stringify({ at: new Date().toISOString(), ...payload })}\n`, "utf8")
+  } catch (err) {
+    console.error("[turn-guard] failed writing mem-core context log:", err)
+  }
+}
+
+function appendMemoryUsageLog(projectRoot: string, payload: Record<string, unknown>): void {
+  try {
+    const statusDir = join(projectRoot, STATUS_DIR)
+    mkdirSync(statusDir, { recursive: true })
+    appendFileSync(
+      join(statusDir, MEMORY_USAGE_LOG_FILE),
+      `${JSON.stringify({ at: new Date().toISOString(), ...payload })}\n`,
+      "utf8",
+    )
+  } catch (err) {
+    console.error("[turn-guard] failed writing memory usage log:", err)
   }
 }
 
@@ -504,10 +648,31 @@ function getAgentIdentity(msg: MessageWithParts | null | undefined): string {
   return fromInfo
 }
 
+// Distinguishes retrieval from writes: "is stored memory actually being consumed?" is the open question.
+function classifyMemoryTools(toolNames: string[]): { reads: string[]; writes: string[] } {
+  const reads: string[] = []
+  const writes: string[] = []
+  for (const name of toolNames) {
+    const normalized = name.toLowerCase()
+    if (!normalized.includes("mempalace")) continue
+    if (CONSOLIDATION_WRITE_TOOL_NAMES.some((tail) => normalized.endsWith(tail)) || normalized.endsWith("diary_write")) {
+      writes.push(name)
+      continue
+    }
+    if (/search|get_drawer|list_drawers|kg_query|diary_read|traverse|follow_tunnels|resolve_canonical/.test(normalized)) {
+      reads.push(name)
+    }
+  }
+  return { reads, writes }
+}
+
 async function runSourceCaptureCommand(projectRoot: string, sid: string, eventType: string): Promise<{ attempted: boolean; ok: boolean; output?: string; error?: string }> {
   const configured = String(process?.env?.ESHEPHERD_SOURCE_CAPTURE_CMD || "").trim()
-  const defaultScript = join(projectRoot, "scripts", "capture-source-transcripts.sh")
-  const command = configured || (existsSync(defaultScript) ? "bash ./scripts/capture-source-transcripts.sh" : "")
+  // Default script resolves inside the ElectricShepherd install (ESHEPHERD_ROOT),
+  // not the consumer project's root — the script ships with the plugin and
+  // sources its env from there (repo .env -> sibling docker/.env fallback).
+  const defaultScript = join(ESHEPHERD_ROOT, "scripts", "capture-source-transcripts.sh")
+  const command = configured || (existsSync(defaultScript) ? `bash "${defaultScript}"` : "")
   if (!command) {
     return { attempted: false, ok: false, error: "capture command not set and default script missing" }
   }
@@ -515,7 +680,7 @@ async function runSourceCaptureCommand(projectRoot: string, sid: string, eventTy
   const execFileAsync = promisify(execFile)
   try {
     const output = await execFileAsync("/bin/sh", ["-c", command], {
-      cwd: projectRoot,
+      cwd: ESHEPHERD_ROOT,
       encoding: "utf8",
       maxBuffer: 2 * 1024 * 1024,
       timeout: getNumberEnv("ESHEPHERD_SOURCE_CAPTURE_TIMEOUT_MS", DEFAULT_SOURCE_CAPTURE_TIMEOUT_MS),
@@ -524,9 +689,17 @@ async function runSourceCaptureCommand(projectRoot: string, sid: string, eventTy
         ...process.env,
         ESHEPHERD_SESSION_ID: sid,
         ESHEPHERD_EVENT_TYPE: eventType,
+        // Script cwd is the plugin install (see above); tell it where the real
+        // consumer project lives so wing/room config resolves against THAT
+        // project, not the plugin's own directory.
+        ESHEPHERD_PROJECT_ROOT: projectRoot,
       },
     })
-    return { attempted: true, ok: true, output: String(output || "").slice(-2000) }
+    // execFile's promisified result is { stdout, stderr }, NOT a string —
+    // String(output) on it produced "[object Object]" in the event log. Read
+    // .stdout explicitly (fall back to stderr if stdout is empty).
+    const text = String(output?.stdout ?? "").trim() || String(output?.stderr ?? "").trim()
+    return { attempted: true, ok: true, output: text.slice(-2000) }
   } catch (err) {
     return { attempted: true, ok: false, error: String(err) }
   }
@@ -685,6 +858,64 @@ function getPromptRouting(...candidates: Array<MessageWithParts | null | undefin
   if (model) routing.model = model
   return routing
 }
+
+function normalizeModelSpec(candidate: any): { providerID: string; modelID: string } | null {
+  if (!candidate || typeof candidate !== "object") return null
+
+  const providerID = String(
+    candidate.providerID ?? candidate.providerId ?? candidate.provider ?? "",
+  ).trim()
+  const modelID = String(
+    candidate.modelID ?? candidate.modelId ?? candidate.model ?? candidate.id ?? "",
+  ).trim()
+
+  if (providerID && modelID) return { providerID, modelID }
+  return null
+}
+
+function getPromptRoutingFromToolHook(input: any, output: any): {
+  agent?: string
+  model?: { providerID: string; modelID: string }
+} {
+  const routing: {
+    agent?: string
+    model?: { providerID: string; modelID: string }
+  } = {}
+
+  const agentCandidates = [
+    output?.agent,
+    input?.agent,
+    output?.mode,
+    input?.mode,
+  ]
+  for (const candidate of agentCandidates) {
+    const value = String(candidate ?? "").trim()
+    if (!value) continue
+    routing.agent = value
+    break
+  }
+
+  const modelCandidates = [
+    output?.model,
+    input?.model,
+    {
+      providerID: output?.providerID,
+      modelID: output?.modelID,
+    },
+    {
+      providerID: input?.providerID,
+      modelID: input?.modelID,
+    },
+  ]
+  for (const candidate of modelCandidates) {
+    const normalized = normalizeModelSpec(candidate)
+    if (!normalized) continue
+    routing.model = normalized
+    break
+  }
+
+  return routing
+}
 /**
  * P3-1: Evict oldest entries from a Map or Set to keep it bounded.
  * Used for all session-keyed state to prevent memory leaks in long-lived processes.
@@ -700,6 +931,13 @@ function pruneToMax(collection: Map<string, any> | Set<string>, max: number): vo
 
 export const TurnGuard = async ({ client, directory }: any) => {
   const rootDirectory = normalizePathForHost(directory || process.cwd())
+  const projectRoot = findProjectRoot(rootDirectory)
+  const runtimeConfig = loadRuntimeConfig({
+    cwd: projectRoot,
+    env: process.env,
+  })
+  applyRuntimeConfigToEnv(process.env, runtimeConfig)
+
   const globalState = globalThis as any
   const instanceDirs: Set<string> =
     globalState[TURN_GUARD_INSTANCE_DIRS_KEY] ?? (globalState[TURN_GUARD_INSTANCE_DIRS_KEY] = new Set<string>())
@@ -711,6 +949,14 @@ export const TurnGuard = async ({ client, directory }: any) => {
   instanceDirs.add(rootDirectory)
 
   console.log(`${START_BANNER}: plugin loaded (directory=${directory})`)
+  if (runtimeConfig.configPath) {
+    console.log(`[turn-guard] runtime config loaded: ${runtimeConfig.configPath}`)
+  } else {
+    console.log("[turn-guard] runtime config loaded: defaults (no .electric-shepherd/config.jsonc found)")
+  }
+  for (const warning of runtimeConfig.warnings) {
+    console.warn(`[turn-guard] runtime config warning: ${warning}`)
+  }
   console.log("[turn-guard] registering hooks: event(message.updated, session.idle, session.compacted, session.started), experimental.session.compacting, tool.execute.before")
   console.log(
     `[turn-guard] retry guard: ${
@@ -719,11 +965,27 @@ export const TurnGuard = async ({ client, directory }: any) => {
         : "OFF by default (ESHEPHERD_RETRY_ENABLED=true to opt in)"
     }`,
   )
-  const projectRoot = findProjectRoot(rootDirectory)
   const memcoreInjectEnabled = getBoolEnv("ESHEPHERD_MEMCORE_REINJECT_ENABLED", false)
   const memcoreInjectOnIdle = getBoolEnv("ESHEPHERD_MEMCORE_REINJECT_ON_IDLE", false)
   const memcoreInjectOnCompacted = getBoolEnv("ESHEPHERD_MEMCORE_REINJECT_ON_COMPACT", false)
   const memcoreInjectOnStart = getBoolEnv("ESHEPHERD_MEMCORE_REINJECT_ON_START", false)
+  // Diagnostic probe for the experimental.session.compacting hook input shape.
+  // Logs keys/types/lengths only (never message or prompt text). It did its job
+  // 2026-08-19 (answered: input is { sessionID } only, no messages). Default OFF
+  // now — a full config echo per compaction is noise once the shape is known;
+  // set ESHEPHERD_PRECOMPACT_PROBE=true to re-enable when debugging the hook.
+  const precompactProbeEnabled = getBoolEnv("ESHEPHERD_PRECOMPACT_PROBE", false)
+  // Post-compaction transcript archiver: on session.compacted, read back the full
+  // session log (compaction RETAINS prior messages — verified against the SDK:
+  // session.messages returns them, delimited by summary:true/agent:compaction
+  // markers) and write the just-compacted region to a durable file so the facts
+  // the summary dropped are not lost. Default ON; ESHEPHERD_COMPACT_ARCHIVE=false
+  // to disable. Declared with the other env reads, above every use.
+  const compactArchiveEnabled = getBoolEnv("ESHEPHERD_COMPACT_ARCHIVE", true)
+  // Replace OpenCode's default compaction prompt with the pointer-oriented
+  // template above. Independent of the mem-core switches: the template is about
+  // summary SHAPE, mem-core is about what extra facts ride along.
+  const compactPromptOverrideEnabled = getBoolEnv("ESHEPHERD_COMPACT_PROMPT_OVERRIDE", true)
   const memcoreMaxChars = getNumberEnv("ESHEPHERD_MEMCORE_MAX_CHARS", DEFAULT_MEMCORE_MAX_CHARS)
   const injectionCooldownMs = getNumberEnv("ESHEPHERD_MEMCORE_INJECTION_COOLDOWN_MS", DEFAULT_INJECTION_COOLDOWN_MS)
   const retryEnabled = getBoolEnv("ESHEPHERD_RETRY_ENABLED", DEFAULT_RETRY_ENABLED)
@@ -731,9 +993,12 @@ export const TurnGuard = async ({ client, directory }: any) => {
   const retryDisabledModes = toLowerSet(parseCSV(process?.env?.ESHEPHERD_RETRY_DISABLED_MODES))
   const consolidationWriteGuardEnabled = getBoolEnv("ESHEPHERD_CONSOLIDATION_WRITE_GUARD_ENABLED", true)
   const sourceCaptureVerifyEnabled = getBoolEnv("ESHEPHERD_SOURCE_CAPTURE_VERIFY_ENABLED", true)
-  // Automatic consolidation is OFF unless explicitly opted in — it triggers memory
-  // writes in the background, so callers must enable it deliberately.
-  const autoConsolidationEnabled = getBoolEnv("ESHEPHERD_AUTO_CONSOLIDATION_ENABLED", false)
+  // Automatic consolidation ("count-sheep in the background"): ON by default.
+  // It triggers memory writes in the background, throttled by the idle delay,
+  // message threshold, and cooldown below — so "on" means "occasionally," not
+  // "every turn." Set ESHEPHERD_AUTO_CONSOLIDATION_ENABLED=false to opt out
+  // (e.g. ad-hoc opencode runs on machines where background writes are unwanted).
+  const autoConsolidationEnabled = getBoolEnv("ESHEPHERD_AUTO_CONSOLIDATION_ENABLED", true)
   const autoConsolidationOnIdle = getBoolEnv("ESHEPHERD_AUTO_CONSOLIDATION_ON_IDLE", true)
   const autoConsolidationOnCompact = getBoolEnv("ESHEPHERD_AUTO_CONSOLIDATION_ON_COMPACT", true)
   const autoConsolidationIdleDelayMs = getNumberEnv("ESHEPHERD_AUTO_CONSOLIDATION_IDLE_DELAY_MS", DEFAULT_AUTOCONSOLIDATION_IDLE_DELAY_MS)
@@ -806,6 +1071,14 @@ export const TurnGuard = async ({ client, directory }: any) => {
   const spiralExemptReflection = getBoolEnv("ESHEPHERD_SPIRALGUARD_EXEMPT_REFLECTION", true)
   const spiralGuardDisabledModes = toLowerSet(parseCSV(process?.env?.ESHEPHERD_SPIRALGUARD_DISABLED_MODES))
   const spiralGuardDisabledAgents = toLowerSet(parseCSV(process?.env?.ESHEPHERD_SPIRALGUARD_DISABLED_AGENTS))
+  const spiralExemptProviders = toLowerSet(
+    parseCSV(process?.env?.ESHEPHERD_SPIRALGUARD_EXEMPT_PROVIDERS).concat(DEFAULT_SPIRAL_EXEMPT_PROVIDERS),
+  )
+  const spiralExemptModelPrefixes = toLowerSet(
+    parseCSV(process?.env?.ESHEPHERD_SPIRALGUARD_EXEMPT_MODEL_PREFIXES).concat(
+      DEFAULT_SPIRAL_EXEMPT_MODEL_PREFIXES,
+    ),
+  )
   // Nudges issued per session, and message IDs already inspected (message.updated
   // can fire repeatedly for one message; dedupe so a stop is judged once).
   const spiralNudgedBySession = new Map<string, number>()
@@ -857,12 +1130,15 @@ export const TurnGuard = async ({ client, directory }: any) => {
   // single reply satisfies the "real work" gate within the first turn.
   const terminalCountBySession = new Map<string, number>()
   const memcoreInjectionBySession = new Map<string, { signature: string; at: number; scopeDir: string }>()
+  const activeRoutingBySession = new Map<string, {
+    agent?: string
+    model?: { providerID: string; modelID: string }
+  }>()
   const warnedConsolidationWriteMessageIDs = new Set<string>()
+  const memoryReadSessions = new Set<string>()
   const sourceCaptureBySession = new Map<string, { totalEvents: number; lastEvent: string; lastAt: string; lastSuccess: boolean }>()
-  // Tracks which compaction path actually ran for each session: "pre-compact-hook"
-  // means the experimental.session.compacting hook fired before the summarizer;
-  // "post-compact-fallback" means only the session.compacted event fired.
-  const compactionPathBySession = new Map<string, { path: "pre-compact-hook" | "post-compact-fallback"; at: string }>()
+  // Tracks post-compaction mem-core reinjection events per session.
+  const compactionPathBySession = new Map<string, { path: "post-compact-fallback"; at: string }>()
 
   // --- auto-consolidation state ---
   // Pending idle-delay timers (cleared/overridden when a new message arrives),
@@ -908,6 +1184,47 @@ export const TurnGuard = async ({ client, directory }: any) => {
     }
   }
 
+  async function resolveLoopGuardRouting(sid: string, input: any, output: any): Promise<{
+    agent?: string
+    model?: { providerID: string; modelID: string }
+  }> {
+    const fromHook = getPromptRoutingFromToolHook(input, output)
+    const cached = activeRoutingBySession.get(sid) ?? {}
+    let agent = fromHook.agent || cached.agent
+    let model = fromHook.model || cached.model
+
+    if (agent && model) {
+      return { agent, model }
+    }
+
+    try {
+      const res: any = await client.session.messages({
+        path: { id: sid },
+        query: { directory },
+      })
+      const messages = sortByCreated(unwrapListResult(res))
+      const tail = messages[messages.length - 1] ?? null
+      const previous = messages.length > 1 ? messages[messages.length - 2] : null
+      const fromSession = getPromptRouting(tail, previous)
+
+      if (!agent) agent = fromSession.agent
+      if (!model) model = fromSession.model
+    } catch {
+      // best-effort: keep hook/cached routing only
+    }
+
+    const resolved: {
+      agent?: string
+      model?: { providerID: string; modelID: string }
+    } = {}
+    if (agent) resolved.agent = agent
+    if (model) resolved.model = model
+    if (resolved.agent || resolved.model) {
+      activeRoutingBySession.set(sid, resolved)
+    }
+    return resolved
+  }
+
   async function maybeInjectMemcore(args: {
     sid: string
     event: any
@@ -931,6 +1248,14 @@ export const TurnGuard = async ({ client, directory }: any) => {
 
     const { markdown, loaderInfo } = await loadMemcoreMarkdown(projectRoot, scopeDir)
     if (!markdown) {
+      appendMemcoreContextLog(projectRoot, {
+        type: "memcore-reinject",
+        sid: args.sid,
+        reason: args.reason,
+        scopeDir,
+        injected: false,
+        note: "no-memcore-markdown",
+      })
       writeStatusFile(projectRoot, statusSnapshot({
         type: "memcore-reinject",
         sid: args.sid,
@@ -956,6 +1281,15 @@ export const TurnGuard = async ({ client, directory }: any) => {
     })
 
     if (!shouldInject) {
+      appendMemcoreContextLog(projectRoot, {
+        type: "memcore-reinject",
+        sid: args.sid,
+        reason: args.reason,
+        scopeDir,
+        injected: false,
+        signature,
+        note: "dedup-or-cooldown-skip",
+      })
       return false
     }
 
@@ -983,6 +1317,16 @@ export const TurnGuard = async ({ client, directory }: any) => {
       })
 
       memcoreInjectionBySession.set(args.sid, { signature, at: now, scopeDir })
+      appendMemcoreContextLog(projectRoot, {
+        type: "memcore-reinject",
+        sid: args.sid,
+        reason: args.reason,
+        scopeDir,
+        injected: true,
+        signature,
+        chars: clipped.length,
+        preview: clipText(clipped, 1800),
+      })
       writeStatusFile(projectRoot, statusSnapshot({
         type: "memcore-reinject",
         sid: args.sid,
@@ -995,6 +1339,15 @@ export const TurnGuard = async ({ client, directory }: any) => {
       console.log(`[turn-guard] mem-core re-injected sid=${args.sid} reason=${args.reason} scope=${scopeDir}`)
       return true
     } catch (err) {
+      appendMemcoreContextLog(projectRoot, {
+        type: "memcore-reinject",
+        sid: args.sid,
+        reason: args.reason,
+        scopeDir,
+        injected: false,
+        signature,
+        error: String(err),
+      })
       writeStatusFile(projectRoot, statusSnapshot({
         type: "memcore-reinject",
         sid: args.sid,
@@ -1147,6 +1500,8 @@ export const TurnGuard = async ({ client, directory }: any) => {
         // deadlock against itself. Standalone cron/n8n runs lack this flag and
         // take the lock themselves.
         ESHEPHERD_CONSOLIDATION_LOCK_INHERITED: "1",
+        // cwd is the plugin install; the consumer project owns the memory artifacts.
+        ESHEPHERD_PROJECT_ROOT: projectRoot,
       }
       // detached:true makes the child a process-group leader on POSIX so the
       // watchdog can kill the entire tree (see killProcessTree); harmless on
@@ -1154,8 +1509,10 @@ export const TurnGuard = async ({ client, directory }: any) => {
       const detached = process.platform !== "win32"
       const plan = buildCommandExecutionPlan({
         configured,
-        projectRoot,
-        defaultScript: join(projectRoot, "scripts", "capture-source-transcripts.sh"),
+        projectRoot: ESHEPHERD_ROOT,
+        defaultScript: join(ESHEPHERD_ROOT, "scripts", "run-memory-consolidation-and-validation.ts"),
+        // Absolute: a relative path would resolve against the plugin install, where nothing reads it.
+        memcoreFile: join(projectRoot, STATUS_DIR, "memory", "memory.md"),
       })
 
       if (plan.mode === "rejected") {
@@ -1493,6 +1850,18 @@ export const TurnGuard = async ({ client, directory }: any) => {
     if (currentMode && spiralGuardDisabledModes.has(currentMode)) return false
     if (currentAgent && spiralGuardDisabledAgents.has(currentAgent)) return false
 
+    // Cloud models don't spiral the way local models do — skip them by default.
+    const spiralRouting = getPromptRouting(last, prev)
+    const spiralProvider = spiralRouting.model?.providerID?.toLowerCase() ?? ""
+    const spiralModelID = spiralRouting.model?.modelID?.toLowerCase() ?? ""
+    if (spiralProvider && spiralExemptProviders.has(spiralProvider)) return false
+    if (
+      spiralModelID &&
+      Array.from(spiralExemptModelPrefixes).some((prefix) => spiralModelID.startsWith(prefix))
+    ) {
+      return false
+    }
+
     // A reply to any guard prompt is terminal — never guard the guard's own reply.
     const parentText = getText(prev?.parts ?? [])
     if (
@@ -1533,7 +1902,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
         `nudge=${used + 1}/${spiralMaxInterventions}`,
     )
 
-    const routing = getPromptRouting(last, prev)
+    const routing = spiralRouting
     const body: any = {
       parts: [
         {
@@ -1682,6 +2051,23 @@ export const TurnGuard = async ({ client, directory }: any) => {
       const current = unwrapMessageResult(currentRes)
       if (!current) return
 
+      const currentRouting = getPromptRouting(current)
+      if (currentRouting.agent || currentRouting.model) {
+        activeRoutingBySession.set(sid, currentRouting)
+      }
+
+      const memoryTools = classifyMemoryTools(getToolNames(current))
+      if (memoryTools.reads.length > 0 || memoryTools.writes.length > 0) {
+        if (memoryTools.reads.length > 0) memoryReadSessions.add(sid)
+        appendMemoryUsageLog(projectRoot, {
+          sid,
+          messageID,
+          agent: getAgentIdentity(current) || undefined,
+          reads: memoryTools.reads,
+          writes: memoryTools.writes,
+        })
+      }
+
       await maybeWarnWriteAuthority(sid, current)
 
       if (info?.finish !== "stop") return
@@ -1724,6 +2110,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
     pruneToMax(checkpointedSessions, autoConsolidationMaxTrackedSessions)
     pruneToMax(terminalCountBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(memcoreInjectionBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(activeRoutingBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(sourceCaptureBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(compactionPathBySession, autoConsolidationMaxTrackedSessions)
   }
@@ -1785,8 +2172,84 @@ export const TurnGuard = async ({ client, directory }: any) => {
     pruneToMax(checkpointedSessions, autoConsolidationMaxTrackedSessions)
     pruneToMax(terminalCountBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(memcoreInjectionBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(activeRoutingBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(sourceCaptureBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(compactionPathBySession, autoConsolidationMaxTrackedSessions)
+  }
+
+  // Post-compaction transcript archiver. Compaction RETAINS prior messages in the
+  // session log (verified 2026-08-19: session.messages returns the full history,
+  // with summary:true + agent:"compaction" assistant markers delimiting each folded
+  // region). So the "just dropped" content is still readable right after compaction —
+  // this slices the log at the latest compaction marker and writes that region to a
+  // durable file before it scrolls out of practical reach. Structure: one markdown
+  // file per compaction, roles + text/tool/patch parts, no message content omitted.
+  // Entirely wrapped in try/catch — an archive failure must never break compaction.
+  async function archiveCompactedRegion(sid: string): Promise<void> {
+    if (!compactArchiveEnabled) return
+    try {
+      const res: any = await client.session.messages({
+        path: { id: sid },
+        query: { directory },
+      })
+      const messages = sortByCreated(unwrapListResult(res))
+      if (messages.length === 0) return
+
+      // Latest compaction marker = the highest-index assistant message with
+      // info.summary === true. Everything BEFORE it is what this compaction folded.
+      let markerIndex = -1
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const info: any = messages[i]?.info
+        if (info?.role === "assistant" && info?.summary === true) {
+          markerIndex = i
+          break
+        }
+      }
+      if (markerIndex <= 0) return // nothing before the marker to archive
+
+      // Only archive messages since the PREVIOUS marker (don't re-archive regions
+      // already captured by an earlier compaction's archive file).
+      let prevMarkerIndex = -1
+      for (let i = markerIndex - 1; i >= 0; i--) {
+        const info: any = messages[i]?.info
+        if (info?.role === "assistant" && info?.summary === true) {
+          prevMarkerIndex = i
+          break
+        }
+      }
+      const region = messages.slice(prevMarkerIndex + 1, markerIndex)
+      if (region.length === 0) return
+
+      const lines: string[] = []
+      lines.push(`# Compaction archive — session ${sid}`)
+      lines.push(`# Archived ${new Date().toISOString()} — ${region.length} messages folded by compaction`)
+      lines.push("")
+      for (const m of region) {
+        const info: any = m?.info ?? {}
+        const role = String(info.role ?? "?")
+        const parts: any[] = m?.parts ?? []
+        const text = getText(parts)
+        const toolNames = parts.filter((p) => p?.type === "tool").map((p) => p?.tool).filter(Boolean)
+        const patchCount = parts.filter((p) => p?.type === "patch").length
+        lines.push(`## [${role}]`)
+        if (text) lines.push(text)
+        if (toolNames.length > 0) lines.push(`(tools: ${toolNames.join(", ")})`)
+        if (patchCount > 0) lines.push(`(${patchCount} patch part${patchCount === 1 ? "" : "s"})`)
+        lines.push("")
+      }
+
+      // Memory-loop output, not agent-to-agent research: keep it out of .opencode/context.
+      const dir = join(projectRoot, STATUS_DIR, "compaction-archive")
+      mkdirSync(dir, { recursive: true })
+      const ts = new Date().toISOString().replace(/[:.]/g, "-")
+      const path = join(dir, `${sid}-${ts}.md`)
+      writeFileSync(path, lines.join("\n"), "utf8")
+      console.log(`[turn-guard] compact archive: wrote ${region.length} messages sid=${sid} -> ${path}`)
+      writeStatusFile(projectRoot, statusSnapshot({ type: "compact-archive", sid, messages: region.length, path }))
+    } catch (err) {
+      // Never let archiving break the compaction path.
+      console.log(`[turn-guard] compact archive: error (ignored) sid=${sid}: ${err}`)
+    }
   }
 
   async function onSessionCompacted(event: any): Promise<void> {
@@ -1795,27 +2258,24 @@ export const TurnGuard = async ({ client, directory }: any) => {
 
     verifySourceCapture(sid, "session.compacted").catch(() => {})
 
-    // PRIMARY mem-core injection is the experimental.session.compacting pre-hook.
-    // This handler is a post-compaction fallback: re-inject only when the pre-hook
-    // did not already run for this session (hook unavailable or not triggered).
-    const preHookRan = compactionPathBySession.get(sid)?.path === "pre-compact-hook"
-    if (!preHookRan) {
-      compactionPathBySession.set(sid, { path: "post-compact-fallback", at: new Date().toISOString() })
-      console.log(`[turn-guard] post-compact fallback: pre-hook absent for sid=${sid}, re-injecting mem-core`)
-      // NOTE: do NOT force here. maybeInjectMemcore injects via client.session.prompt(),
-      // which creates a real generating turn (~memcoreMaxChars). Forcing made every
-      // post-compaction event re-inject the same large block, re-inflating context and
-      // triggering another compaction → an infinite compact/reinject loop. Relying on
-      // the signature+cooldown dedup means the fallback fires at most once per unique
-      // mem-core content, so identical mem-core after a compaction is a no-op.
-      await maybeInjectMemcore({
-        sid,
-        event,
-        reason: "compacted",
-      })
-    } else {
-      console.log(`[turn-guard] post-compact event: pre-compact hook already ran for sid=${sid}, skipping re-injection`)
-    }
+    // Archive the just-compacted region BEFORE it scrolls out of practical reach.
+    // Independent of the mem-core fallback below; gated by ESHEPHERD_COMPACT_ARCHIVE.
+    await archiveCompactedRegion(sid)
+
+    // Mem-core reinjection is intentionally post-compaction-only. The compaction
+    // hook owns prompt shaping; this event owns continuation-memory refresh.
+    compactionPathBySession.set(sid, { path: "post-compact-fallback", at: new Date().toISOString() })
+    // NOTE: do NOT force here. maybeInjectMemcore injects via client.session.prompt(),
+    // which creates a real generating turn (~memcoreMaxChars). Forcing made every
+    // post-compaction event re-inject the same large block, re-inflating context and
+    // triggering another compaction → an infinite compact/reinject loop. Relying on
+    // the signature+cooldown dedup means this fires at most once per unique mem-core
+    // content, so identical mem-core after a compaction is a no-op.
+    await maybeInjectMemcore({
+      sid,
+      event,
+      reason: "compacted",
+    })
 
     // Compaction is a natural consolidation point; run auto-consolidation if enabled.
     if (autoConsolidationOnCompact) {
@@ -1844,6 +2304,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
 
     toolWindowBySession.delete(sid)
     loopInterventionsBySession.delete(sid)
+    activeRoutingBySession.delete(sid)
 
     await maybeInjectMemcore({
       sid,
@@ -1856,50 +2317,67 @@ export const TurnGuard = async ({ client, directory }: any) => {
   // Thin wrapper for the experimental.session.compacting pre-compaction hook.
   // Isolated so that if OpenCode stabilises the hook shape (proposal #4317), only
   // this function needs updating — same insulation discipline as the MemPalace
-  // tool-prefix adapter. Returns { prompt } to inject mem-core into the compaction
-  // context, or {} to leave the default prompt unchanged.
-  async function injectMemcoreIntoCompaction(input: any): Promise<Record<string, unknown>> {
-    // Respect the SAME switches as every other injection path. Without this gate
-    // the pre-compact hook injected mem-core into the summary prompt on EVERY
-    // compaction regardless of ESHEPHERD_MEMCORE_REINJECT_ENABLED — so
-    // "disabling reinjection" left this path fully live. Worse, its "preserve and
-    // carry forward ALL facts" instruction fights compaction's job of shrinking
-    // context: the summary comes back nearly as large, the over-threshold check
-    // never clears, and OpenCode re-compacts on a loop. Returning {} hands
-    // compaction back to OpenCode's default (shrink-oriented) summary prompt.
-    if (!memcoreInjectEnabled || !memcoreInjectOnCompacted) {
-      return {}
+  // tool-prefix adapter. The hook contract is (input={sessionID}, output={context[],prompt?}):
+  // you MUTATE output.context/output.prompt; the return value is ignored. We append
+  // mem-core to output.context (never replace output.prompt) so the default
+  // shrink-oriented summary prompt stays intact.
+  async function injectMemcoreIntoCompaction(input: any, output: any): Promise<void> {
+    // Diagnostic probe (ESHEPHERD_PRECOMPACT_PROBE): reveal the input shape of the
+    // experimental.session.compacting hook. Logs STRUCTURE ONLY — top-level keys,
+    // their typeof, and for arrays/objects/strings only lengths and key lists.
+    // Never logs values, message text, or prompt content (transcripts contain user
+    // code). Runs BEFORE the reinject gate so it fires even when reinject is off.
+    // Wrapped in try/catch so a probe failure can never break compaction.
+    if (precompactProbeEnabled) {
+      try {
+        const shape: Record<string, unknown> = {}
+        const keys = input && typeof input === "object" ? Object.keys(input) : []
+        for (const key of keys) {
+          const value = (input as Record<string, unknown>)[key]
+          if (Array.isArray(value)) {
+            const first = value.length > 0 ? value[0] : undefined
+            shape[key] = {
+              type: "array",
+              length: value.length,
+              firstElementKeys:
+                first && typeof first === "object" ? Object.keys(first as Record<string, unknown>) : typeof first,
+            }
+          } else if (typeof value === "string") {
+            shape[key] = { type: "string", length: value.length }
+          } else if (value && typeof value === "object") {
+            shape[key] = { type: "object", keys: Object.keys(value as Record<string, unknown>) }
+          } else {
+            shape[key] = { type: typeof value }
+          }
+        }
+        console.log(`[turn-guard] pre-compact probe: keys=${JSON.stringify(keys)} shape=${JSON.stringify(shape)}`)
+        writeStatusFile(projectRoot, statusSnapshot({ type: "pre-compact-probe", keys, shape }))
+      } catch (probeErr) {
+        console.log(`[turn-guard] pre-compact probe: error (ignored): ${probeErr}`)
+      }
     }
+    // Prompt-shape override. Set on output.prompt (replaces the default template)
+    // rather than output.context (which only appends). Runs BEFORE the mem-core
+    // gate on purpose: the summary shape should apply whether or not mem-core is
+    // being carried along. Wrapped so a failure here can never break compaction --
+    // on error OpenCode's default prompt is simply left in place.
+    if (compactPromptOverrideEnabled && output && typeof output === "object") {
+      try {
+        output.prompt = COMPACT_PROMPT_TEMPLATE
+        console.log("[turn-guard] pre-compact: replaced compaction prompt with pointer-oriented template")
+      } catch (promptErr) {
+        console.log(`[turn-guard] pre-compact: prompt override failed (ignored): ${promptErr}`)
+      }
+    }
+
+    // Mem-core is for the continuation turn, so it is injected on session.compacted only.
     const sid = String(input?.sessionID ?? input?.sessionId ?? findSessionID(input) ?? "")
-    const existingPrompt = String(input?.prompt ?? "")
-    const scopeDir = resolveScopeDirFromEvent(input, rootDirectory)
-    const { markdown, loaderInfo } = await loadMemcoreMarkdown(projectRoot, scopeDir)
-    if (!markdown) {
-      console.log(`[turn-guard] pre-compact hook: no mem-core loaded sid=${sid} scope=${scopeDir}`)
-      writeStatusFile(projectRoot, statusSnapshot({ type: "pre-compact-hook", sid, scopeDir, injected: false, loaderInfo }))
-      return {}
-    }
-
-    const clipped = clipText(markdown, memcoreMaxChars)
-    const injectedPrompt =
-      (existingPrompt ? existingPrompt + "\n\n" : "") +
-      `--- mem-core (resident memory, scope: ${scopeDir}) ---\n` +
-      clipped +
-      "\n--- end mem-core ---\n\n" +
-      "The mem-core block above is the always-loaded resident memory for this session's active scope. " +
-      "Preserve and carry forward all facts listed in it when generating the continuation summary."
-
-    compactionPathBySession.set(sid, { path: "pre-compact-hook", at: new Date().toISOString() })
     writeStatusFile(projectRoot, statusSnapshot({
       type: "pre-compact-hook",
       sid,
-      scopeDir,
-      injected: true,
-      chars: clipped.length,
-      loaderInfo,
+      injected: false,
+      note: "prompt-shape only; mem-core injects post-compaction",
     }))
-    console.log(`[turn-guard] pre-compact hook: mem-core injected sid=${sid} scope=${scopeDir} chars=${clipped.length}`)
-    return { prompt: injectedPrompt }
   }
 
   return {
@@ -1964,8 +2442,8 @@ export const TurnGuard = async ({ client, directory }: any) => {
         await onSessionStarted(event)
       }
     },
-    "experimental.session.compacting": async (input: any) => {
-      return injectMemcoreIntoCompaction(input)
+    "experimental.session.compacting": async (input: any, output: any) => {
+      await injectMemcoreIntoCompaction(input, output)
     },
     "tool.execute.before": async (input: any, output: any) => {
       if (!loopGuardEnabled) return
@@ -1975,11 +2453,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
       if (!sid) return
 
       const key = toolName.toLowerCase()
-      // A mutation is progress: forget the repeats that preceded it.
-      if (loopMutationTools.has(key)) {
-        toolWindowBySession.delete(sid)
-        return
-      }
       if (loopExemptTools.has(key)) return
 
       const args = output?.args ?? input?.args ?? {}
@@ -2004,6 +2477,22 @@ export const TurnGuard = async ({ client, directory }: any) => {
       }
 
       if (!shouldIntervene) {
+        // A MUTATING tool called with NEW arguments is real progress: drop the
+        // history that preceded it. Keep this call's own signature though --
+        // seeding with [signature] instead of clearing outright is what lets an
+        // immediately-repeated identical command still accumulate.
+        //
+        // This used to be an early return at the top of the handler, before the
+        // repeat check ran at all. Because `bash` is in the mutation list, that
+        // made repeated identical shell commands structurally INVISIBLE to the
+        // guard -- and worse, every bash call wiped the window and erased the
+        // history of every other tool too. bash mutates sometimes, but it is
+        // also the most common READ tool (grep / ls / git status / test runs),
+        // so "saw bash, therefore progress" was never a safe assumption.
+        if (loopMutationTools.has(key) && count === 1) {
+          toolWindowBySession.set(sid, [signature])
+          return
+        }
         window.push(signature)
         while (window.length > loopWindowSize) window.shift()
         toolWindowBySession.set(sid, window)
@@ -2019,18 +2508,74 @@ export const TurnGuard = async ({ client, directory }: any) => {
         `[turn-guard] loop guard: aborting ${toolName} (repeat ${count}x, nudge ${nudge}/${loopMaxInterventions}) sid=${sid}`,
       )
 
-      throw new Error(
-        `${LOOP_GUARD_MARKER} You just called \`${toolName}\` ${count} times with identical ` +
-          `arguments and no edits in between — are you looping?\n\n` +
-          `This call was not executed. Regroup before continuing:\n` +
-          `- Say what specific information you still need, and why the earlier result did not give it to you.\n` +
-          `- If earlier context was pruned or compacted away, call \`compress\` (or write your findings down) instead of re-reading.\n` +
-          `- If the same approach keeps failing, change the approach rather than repeating it.\n\n` +
-          `(nudge ${nudge}/${loopMaxInterventions} this session)`,
-      )
+      // WORDING IS LOAD-BEARING (measured 2026-08-18). A softer version of this
+      // message asked "are you looping?" and said "regroup before continuing" --
+      // in practice the model answered the question, took "continuing" as
+      // permission to proceed, and looped again. Manual interventions phrased as
+      // "you're looping, stop and move forward" broke the loop; ones phrased as
+      // "continue, you're looping, finish then move forward" did NOT. So: state
+      // it, never ask it; forbid the specific call; say move forward, never
+      // continue/finish/regroup; and do not invite narration, which just burns a
+      // turn explaining the loop instead of leaving it.
+      // 1) Block the tool call - the model gets a tool-error part and cannot
+      //    keep hammering the identical call. This alone is invisible in some
+      //    OpenCode surfaces: the error shows as a bare tool error, not a
+      //    conversational turn, so the model never "hears" the nudge.
+      const finalNudge = nudge >= loopMaxInterventions
+      const nudgeText =
+        `${LOOP_GUARD_MARKER} STOP. You have called \`${toolName}\` ${count} times with identical ` +
+        `arguments. You are looping.\n\n` +
+        `This call was BLOCKED and did not run. Calling \`${toolName}\` with these arguments again will ` +
+        `not produce a different result - the answer you already have is the answer.\n\n` +
+        `Move forward now:\n` +
+        `- Act on what you already have. The earlier identical call's result is in your context; use it.\n` +
+        `- If you genuinely need something else, take a DIFFERENT action: different tool, different ` +
+        `arguments, or a different approach to the problem.\n` +
+        `- If you cannot proceed without information you are unable to obtain, say so plainly and stop. ` +
+        `Do not retry.\n\n` +
+        `Your next action must be different from the one just blocked. Do not explain the loop, do not ` +
+        `apologise, and do not restate your plan - just take the next real step.` +
+        (finalNudge
+          ? `\n\nThis is the LAST time this will be blocked (${nudge}/${loopMaxInterventions}). If you ` +
+            `repeat it after this, abandon this line of work entirely and report what you have with your ` +
+            `remaining uncertainty stated.`
+          : `\n\n(nudge ${nudge}/${loopMaxInterventions} this session)`)
+
+      const routing = await resolveLoopGuardRouting(sid, input, output)
+
+      // 2) Deliver the same nudge as a real user message so it lands in the
+      //    conversation context the model reads - this is what breaks the loop
+      //    when the tool-error part alone doesn't register. noReply keeps it
+      //    from spawning a second generation turn; the blocked call's own error
+      //    path already triggers the retry/continue.
+      try {
+        const body: any = {
+          noReply: true,
+          parts: [{ type: "text", text: nudgeText }],
+        }
+        if (routing.agent) body.agent = routing.agent
+        if (routing.model) body.model = routing.model
+
+        await client.session.prompt({
+          path: { id: sid },
+          query: { directory },
+          body,
+        })
+      } catch (promptErr) {
+        // Best-effort: if the prompt injection fails, the thrown error below
+        // still blocks the tool call. Log so the gap is diagnosable.
+        console.error(`[turn-guard] loop guard: nudge prompt failed sid=${sid}:`, promptErr)
+      }
+
+      throw new Error(nudgeText)
     },
     tool: {
       delete_drawers: deleteDrawersTool,
+      capture_transcript: captureTranscriptTool,
+      palace_report: palaceReportTool,
+      palace_diff: palaceDiffTool,
+      export_drawer: exportDrawerTool,
+      relocate_memory: relocateMemoryTool,
     },
   } as any
 }

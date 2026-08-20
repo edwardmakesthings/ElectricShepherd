@@ -49,7 +49,7 @@ test("source drawers consolidate into a derived drawer that is then discoverable
   );
   const seededB = await room.addDrawer(
     "ElectricShepherd consolidation: the dedup gate stays configurable via " +
-      "ESHEPHERD_SOURCE_CAPTURE_DEDUP_ENABLED. Subsystems: adapter/synthesis-consolidation.ts and " +
+      "sourceCapture.dedupEnabled. Subsystems: adapter/synthesis-consolidation.ts and " +
       "scripts/capture-source-transcripts.sh. Open item: end-to-end retrieval verification."
   );
   assert.equal(typeof seededA.drawer_id, "string");
@@ -75,7 +75,7 @@ test("source drawers consolidate into a derived drawer that is then discoverable
       {
         transcriptId: seededB.drawer_id,
         confidence: "medium",
-        durableFacts: ["The dedup gate is configurable via ESHEPHERD_SOURCE_CAPTURE_DEDUP_ENABLED"],
+        durableFacts: ["The dedup gate is configurable via sourceCapture.dedupEnabled"],
         decisions: ["Keep dedup opt-in"],
         rootCausesAndWorkedExamples: ["check_duplicate gates appends on similarity"],
         subsystemsAndFiles: ["scripts/capture-source-transcripts.sh"],

@@ -188,6 +188,7 @@ Hard prohibitions:
 Deep-consolidation sequence (must follow in order):
 
 1. Discover/search: `search`, `list_drawers`, `get_drawer` as needed.
+  Discovery guardrails: keep `list_drawers` room-scoped and paginated (`limit` + `offset`), avoid broad wing-only scans on high-cardinality wings, and on repeated timeout move to a narrower room or deterministic script fallback instead of retry loops.
 2. Synthesize: `add_drawer` + `kg_add` (`synthesized-from`) for each accepted synthesis.
 3. Merge review: `find_merge_candidates` then `apply_merge` for high-confidence merges.
 4. Drift evidence: lineage queries (`kg_query` recurse) + `find_closet_lineage_issues`.

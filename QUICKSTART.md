@@ -34,7 +34,7 @@ ElectricShepherd is a plugin, so it loads the same way wherever it is enabled. T
 - Agents (`agents/*.md`): yes — injected into `config.agent` by the `config` hook
 - Commands (`command/*.md`): yes — injected into `config.command` by the `config` hook
 - Instructions (`instructions/agent-discipline.md`): yes — absolute paths appended to `config.instructions`
-  (opt out with `ESHEPHERD_INJECT_INSTRUCTIONS=false`)
+  (opt out with `assets.injectInstructions=false` in `.electric-shepherd/config.jsonc`)
 
 Not config-injectable:
 
@@ -48,13 +48,18 @@ Not config-injectable:
 > like the rest of the plugin. User-defined agents/commands with the same name always override
 > the bundled ones.
 
-## 1b. Local env setup
+## 1b. Local config + secrets setup
 
-Create your machine-local env file from the tracked template:
+Create runtime behavior config and machine-local secrets:
 
 ```bash
+mkdir -p .electric-shepherd
+cp electric-shepherd.config.example.jsonc .electric-shepherd/config.jsonc
 cp .env.example .env
 ```
+
+Use `.electric-shepherd/config.jsonc` for non-secret behavior settings.
+Use `.env` for secrets (API keys/tokens) only.
 
 Runtime scripts auto-load env files in this order:
 
@@ -63,12 +68,6 @@ Runtime scripts auto-load env files in this order:
 3. fallback: `../docker/.env` (for monorepo setups)
 
 No manual `source .env` step is required.
-
-Optional explicit override:
-
-```bash
-export ESHEPHERD_ENV_FILE="/absolute/path/to/your.env"
-```
 
 ## 1c. Quick sanity check
 
@@ -86,7 +85,7 @@ check is a lightweight way to confirm the scoped loader path is wired correctly.
 
 MemPalace tool names vary by how MemPalace is registered with your MCP host:
 
-| Registration | Tool name shape | Correct `MEMGRAPH_TOOL_PREFIX` |
+| Registration | Tool name shape | Correct `mcp.toolPrefix` |
 |---|---|---|
 | Direct MCP at `:8093` | `mempalace_search` | `mempalace_` *(default, no action needed)* |
 | Namespaced gateway | `<namespace>mempalace_search` | `<namespace>mempalace_` |
@@ -95,25 +94,35 @@ For agent prompts (the dreamer and mapper subagents) you also need to state the 
 prefix in any agent prompt that calls MemPalace tools directly, or load `skills/mempalace/SKILL.md`
 as an additional instruction so the agent knows which names to use.
 
-For the TypeScript adapter (`adapter/memgraph.ts`), set the env var in your shell
-profile or in the environment passed to the process:
+For the TypeScript adapter (`adapter/memgraph.ts`), set the prefix in
+`.electric-shepherd/config.jsonc`:
 
-```bash
-# Set this only when your gateway rewrites tool names.
-# Example for namespaced tools: export MEMGRAPH_TOOL_PREFIX="mygateway_mempalace_"
+```jsonc
+{
+  "mcp": {
+    "toolPrefix": "mygateway_mempalace_"
+  }
+}
 ```
 
 For standalone runtime scripts (`policy:cycle`, `policy:consolidate-validate`,
-`policy:cadence`) on authenticated MCP endpoints, set MCP auth via env:
+`policy:cadence`) on authenticated MCP endpoints, set endpoint/prefix in config and
+auth in env:
+
+```jsonc
+{
+  "mcp": {
+    "url": "http://your-mcp-endpoint/mcp",
+    "toolPrefix": "mempalace_",
+    "authHeader": "Authorization",
+    "authScheme": "Bearer"
+  }
+}
+```
 
 ```bash
-export MEMPALACE_MCP_URL="http://your-mcp-endpoint/mcp"
 # Generic API key/token value
 export MEMPALACE_MCP_API_KEY="<your-key-or-token>"
-# Optional: force auth header name (default: Authorization)
-# export MEMPALACE_MCP_AUTH_HEADER="Authorization"
-# Optional: prepend a scheme (for example Bearer)
-# export MEMPALACE_MCP_AUTH_SCHEME="Bearer"
 # Optional: explicit bearer token shortcut for Authorization header
 # export MEMPALACE_MCP_BEARER_TOKEN="<your-token>"
 # Optional: full custom headers as JSON
@@ -197,70 +206,63 @@ The plugin now wires deterministic events directly:
 - write-authority guard for consolidation writes (`add_drawer`/`kg_add` lineage + `apply_merge`)
 - OpenCode source-transcript capture verification heartbeat
 
-Recommended environment settings:
+Recommended setup:
 
 ```bash
-export ESHEPHERD_MEMCORE_REINJECT_ENABLED=true
-export ESHEPHERD_MEMCORE_REINJECT_ON_COMPACT=true
-export ESHEPHERD_MEMCORE_REINJECT_ON_IDLE=true
-export ESHEPHERD_MEMCORE_REINJECT_ON_START=true
-export ESHEPHERD_ALLOWED_CONSOLIDATION_WRITERS="dreamer"
-export ESHEPHERD_SOURCE_CAPTURE_VERIFY_ENABLED=true
-# Required: full MCP endpoint URL used for source-transcript verification/capture.
-export MEMPALACE_MCP_URL="http://your-mcp-endpoint/mcp"
-# Optional auth controls for capture pipeline:
-# export MEMPALACE_MCP_API_KEY="<your-key-or-token>"
-# export MEMPALACE_MCP_AUTH_HEADER="Authorization"
-# export MEMPALACE_MCP_AUTH_SCHEME="Bearer"
+# 1) Runtime behavior: config file
+cp electric-shepherd.config.example.jsonc .electric-shepherd/config.jsonc
+
+# 2) Secrets only: env
+export MEMPALACE_MCP_API_KEY="<your-key-or-token>"
 # export MEMPALACE_MCP_HEADERS_JSON='{"X-Api-Key":"<your-key>"}'
-# Optional tool prefix for capture endpoint (default: mempalace_):
-# export ESHEPHERD_SOURCE_CAPTURE_TOOL_PREFIX="mempalace_"
-# Optional duplicate suppression (default false keeps source-transcript capture append-only):
-# export ESHEPHERD_SOURCE_CAPTURE_DEDUP_ENABLED=true
-# Optional capture command on stop/compact events:
-# export ESHEPHERD_SOURCE_CAPTURE_CMD="bash ./scripts/capture-source-transcripts.sh"
 ```
 
 Plugin status/verification output is written to `./.electric-shepherd/turn-guard-status.json`.
 
-## 3f. Automatic consolidation ("count sheep in the background") — OPT-IN
+## 3f. Automatic consolidation ("count sheep in the background")
 
-> ⚠️ **This is OFF by default and writes to your memory in the background.**
-> When enabled, the plugin will spawn the deterministic consolidation script on
-> its own (no prompt, no confirmation) after the session goes quiet, after enough
-> new turns accumulate, or after compaction. It can create closets, KG facts, and
-> re-render your mem-core files without you asking. **Only turn this on once you
+> ⚠️ **This writes to your memory in the background when enabled.**
+> The plugin can spawn the deterministic consolidation script on its own (no
+> prompt, no confirmation) after the session goes quiet, after enough new turns
+> accumulate, or after compaction. It can create closets, KG facts, and re-render
+> your mem-core files without you asking. **Only leave this enabled once you
 > understand the triggers below.** Everything it does is logged to
 > `./.electric-shepherd/turn-guard-status.json` (`type: "auto-consolidation-*"` entries).
 
-Enable it deliberately:
+Control it in `.electric-shepherd/config.jsonc`:
 
-```bash
-export ESHEPHERD_AUTO_CONSOLIDATION_ENABLED=true        # master switch (default: false)
+```jsonc
+{
+  "consolidation": {
+    "auto": {
+      "enabled": true
+    }
+  }
+}
 ```
 
 It triggers on three conditions, each independently gated:
 
-| Trigger | Fires when | Env var(s) | Default |
+| Trigger | Fires when | Config path(s) | Default |
 |---|---|---|---|
-| **idle-timer** | The session stays quiet for the full delay after going idle. The timer is **reset every time you send a new message**, so it only fires once the session has *actually* been left alone — it is a debounce, not a fixed schedule. Requires ≥1 new turn since the last run. | `ESHEPHERD_AUTO_CONSOLIDATION_ON_IDLE`, `ESHEPHERD_AUTO_CONSOLIDATION_IDLE_DELAY_MS` | `true`, `120000` (2 min) |
-| **volume-threshold** | Enough new assistant turns accumulate; runs eagerly without waiting. | `ESHEPHERD_AUTO_CONSOLIDATION_MESSAGE_THRESHOLD` | `12` |
-| **compacted** | The session is compacted (a natural consolidation point). | `ESHEPHERD_AUTO_CONSOLIDATION_ON_COMPACT` | `true` |
+| **idle-timer** | The session stays quiet for the full delay after going idle. The timer is **reset every time you send a new message**, so it only fires once the session has *actually* been left alone — it is a debounce, not a fixed schedule. Requires ≥1 new turn since the last run. | `consolidation.auto.onIdle`, `consolidation.auto.idleDelayMs` | `true`, `120000` (2 min) |
+| **volume-threshold** | Enough new assistant turns accumulate; runs eagerly without waiting. | `consolidation.auto.messageThreshold` | `12` |
+| **compacted** | The session is compacted (a natural consolidation point). | `consolidation.auto.onCompact` | `true` |
 
 Shared throttles and overrides:
 
-| Env var | Meaning | Default |
+| Config path | Meaning | Default |
 |---|---|---|
-| `ESHEPHERD_AUTO_CONSOLIDATION_COOLDOWN_MS` | Minimum time between auto-consolidation runs (counted from when a run starts). | `600000` (10 min) |
-| `ESHEPHERD_AUTO_CONSOLIDATION_TIMEOUT_MS` | Watchdog: a run exceeding this is killed, and the in-flight flag/lock is released. Also the staleness window for the cross-process lock. | `300000` (5 min) |
-| `ESHEPHERD_AUTO_CONSOLIDATION_CMD` | Override the command that is run. The default is deterministic (`--run-cadence --cadence-mode execute --apply`, **no** live mapper) so it never forces a model to load. | deterministic script |
-| `ESHEPHERD_SOURCE_CAPTURE_TIMEOUT_MS` | Ceiling for the blocking source-transcript capture call so a hung script can't freeze the session. | `20000` |
-| `ESHEPHERD_MEMCORE_LOADER_TIMEOUT_MS` | Ceiling for the blocking mem-core loader call. | `15000` |
+| `consolidation.auto.cooldownMs` | Minimum time between auto-consolidation runs (counted from when a run starts). | `600000` (10 min) |
+| `commands.autoConsolidation.timeoutMs` | Watchdog: a run exceeding this is killed, and the in-flight flag/lock is released. Also the staleness window for the cross-process lock. | `300000` (5 min) |
+| `commands.autoConsolidation.command` | Override the command that is run. The default is deterministic (`--run-cadence --cadence-mode execute --apply`, **no** live mapper) so it never forces a model to load. | deterministic script |
+| `commands.sourceCapture.timeoutMs` | Ceiling for the blocking source-transcript capture call so a hung script can't freeze the session. | `20000` |
+| `commands.memcoreLoader.timeoutMs` | Ceiling for the blocking mem-core loader call. | `15000` |
 
 How the timer actually works (the important bit): OpenCode emits a `session.idle`
 event when the conversation stops. On that event the plugin **arms** a real
-`setTimeout` for `ESHEPHERD_AUTO_CONSOLIDATION_IDLE_DELAY_MS`. If you send another message
-before it fires, the next `message.updated` **clears** the timer — so the delay is
+`setTimeout` for `consolidation.auto.idleDelayMs`. If you send another message before
+it fires, the next `message.updated` **clears** the timer — so the delay is
 genuinely "quiet for N ms," and any new activity overrides it.
 
 Failure containment (so a run that begins can't get stuck or orphaned):
@@ -271,10 +273,10 @@ Failure containment (so a run that begins can't get stuck or orphaned):
   child trusts the parent's lock, while a standalone `sheep:*` / cron run acquires
   the lock itself. So a plugin run and a cron run firing at the same instant
   cannot both proceed.
-- A **watchdog** kills any run that exceeds `ESHEPHERD_AUTO_CONSOLIDATION_TIMEOUT_MS`, so a
+- A **watchdog** kills any run that exceeds `commands.autoConsolidation.timeoutMs`, so a
   hung MCP endpoint can never wedge auto-consolidation permanently. The kill targets the
   **whole process tree** (`taskkill /T` on Windows, process-group signal on
-  POSIX), so a shell-wrapped `ESHEPHERD_AUTO_CONSOLIDATION_CMD` can't leave an orphaned
+  POSIX), so a shell-wrapped `commands.autoConsolidation.command` can't leave an orphaned
   grandchild behind.
 - If a run is **orphaned** (OpenCode exits before the background process
   finishes), the lock is treated as stale after the timeout window and the next
@@ -285,14 +287,14 @@ Failure containment (so a run that begins can't get stuck or orphaned):
   so a transient failure doesn't make you wait out a phantom cooldown; a run that
   started and then failed/timed out keeps the cooldown as anti-thrash.
 - The per-session tracking maps are **bounded** by
-  `ESHEPHERD_AUTO_CONSOLIDATION_MAX_TRACKED_SESSIONS` (default 512, oldest evicted first)
+  `consolidation.auto.maxTrackedSessions` (default 512, oldest evicted first)
   so a long-lived process can't leak memory across many sessions.
 
 The deterministic script re-renders mem-core, which the existing mem-core
 re-injection then picks up on the next idle/compaction — closing the loop.
 
 **Prefer an external scheduler?** Auto-consolidation is entirely optional. You can leave
-`ESHEPHERD_AUTO_CONSOLIDATION_ENABLED=false` and instead have n8n, cron, or Windows Task
+`consolidation.auto.enabled=false` and instead have n8n, cron, or Windows Task
 Scheduler call the same entrypoint on a timer — there is no coupling, and the
 shared lock keeps a scheduled run from colliding with a plugin run:
 
@@ -301,7 +303,7 @@ npm run sheep:lucid-dream   # == policy:cadence:execute --apply --apply-merges
 ```
 
 > Testing/automation note: pass `--no-lock` (or set
-> `ESHEPHERD_CONSOLIDATION_LOCK_DISABLED=1`) to bypass the shared lock when you knowingly
+> `consolidation.lock.disabled=true`) to bypass the shared lock when you knowingly
 > want concurrent runs (e.g. isolated test fixtures).
 
 ## 3g. Playful commands
@@ -344,8 +346,9 @@ npm test
 ```
 
 Integration tests exercise the adapters against a real MemPalace MCP endpoint
-and are gated behind `ESHEPHERD_TEST_INTEGRATION=1`. They use `MEMPALACE_MCP_URL`
-from your env file — the configured endpoint must expose the full tool surface
+and are gated behind `ESHEPHERD_TEST_INTEGRATION=1`. They use `mcp.url` from
+`.electric-shepherd/config.jsonc` (or `MEMPALACE_MCP_URL` if you intentionally
+override in env) — the configured endpoint must expose the full tool surface
 (lineage graph traversal, scoped-node lookup, single/bulk delete).
 
 ```bash
@@ -357,7 +360,7 @@ GitHub Actions wiring:
 
 - `.github/workflows/ci.yml` always runs `npm test`.
 - If `MEMPALACE_MCP_URL` is configured as a repository variable/secret, CI uses
-  that endpoint for integration suites.
+  that endpoint for integration suites (env wins over config only when set deliberately).
 - If no endpoint is configured, CI starts an ephemeral local MemPalace MCP
   server in the job, points tests at `http://127.0.0.1:8093/mcp`, and tears it
   down at the end of the run.
@@ -390,7 +393,7 @@ The mem-core that gets injected into a session is **location-based**, and it
 **works upward** from that location:
 
 1. **Starting point.** The plugin resolves a scope directory from the session
-   event (working directory / `cwd`), then `ESHEPHERD_SCOPE_DIR`, then the
+  event (working directory / `cwd`), then `memcore.scopeDir`, then the
    directory OpenCode was launched in, then the process cwd — the first one that
    exists wins.
 2. **File-follow override.** If your recent messages reference a concrete file
@@ -406,11 +409,15 @@ The mem-core that gets injected into a session is **location-based**, and it
 
 Knobs:
 
-```bash
-export ESHEPHERD_SCOPE_DIR="/absolute/scope/dir"   # force the starting point
-export ESHEPHERD_MEMCORE_MAX_SCOPES=6              # cap how many scope levels merge (default 6)
-export ESHEPHERD_MEMCORE_STORE_ROOTS=".electric-shepherd/memory"
-export ESHEPHERD_MEMCORE_MAX_CHARS=12000           # clip the merged payload
+```jsonc
+{
+  "memcore": {
+    "scopeDir": "/absolute/scope/dir",
+    "maxScopes": 6,
+    "storeRoots": ".electric-shepherd/memory",
+    "maxChars": 12000
+  }
+}
 ```
 
 ## 5. Updating mem-core

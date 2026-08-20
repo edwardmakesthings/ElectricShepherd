@@ -130,7 +130,27 @@ test("real bundled assets parse into the expected dreamer agents and commands", 
     edit: "deny",
     bash: "allow",
     task: "allow",
+    write: {
+      "*": "deny",
+      ".electric-shepherd/dream-reports/**": "allow",
+    },
   });
+});
+
+test("palace inspection assets are bundled and read-only where required", () => {
+  const { agents, commands } = loadPackagedAssets(repoRoot);
+
+  assert.equal(agents["palace-guide"].mode, "primary");
+  assert.equal(agents["palace-guide"].permission.edit, "deny");
+  assert.deepEqual(agents["palace-guide"].permission.write, { "*": "deny" });
+
+  assert.equal(agents["drawer-digest"].mode, "subagent");
+  assert.equal(agents["drawer-digest"].permission.task, "deny");
+
+  assert.equal(commands["palace-tour"].agent, "palace-guide");
+  assert.equal(commands["palace-tour"].subtask, false);
+  assert.equal(commands["palace-diff"].agent, "palace-guide");
+  assert.equal(commands["relocate-memory"].agent, "dreamer");
 });
 
 test("loadInstructionPaths returns absolute paths to existing bundled rule files", () => {

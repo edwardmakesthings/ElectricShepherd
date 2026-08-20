@@ -141,7 +141,8 @@ project that enables the plugin — no need to run OpenCode from inside this rep
 `.opencode/`, or list anything under `agent` / `command` / `instructions` yourself.
 
 User-defined entries always win: if you declare an agent or command with the same name, yours
-overrides the bundled one. Opt out of instruction injection with `ESHEPHERD_INJECT_INSTRUCTIONS=false`.
+overrides the bundled one. Opt out of instruction injection with `assets.injectInstructions=false`
+in `.electric-shepherd/config.jsonc`.
 
 ### What loads automatically vs. what is provided
 
@@ -154,7 +155,7 @@ markdown files at startup and injects them into the resolved config:
 | Plugin (`plugin/turn-guard.ts`) | Yes | Yes | `"plugin": ["electric-shepherd"]` |
 | Agents (`agents/*.md`) | Yes | Yes | Injected into `config.agent` by the plugin's `config` hook |
 | Commands (`command/*.md`) | Yes | Yes | Injected into `config.command` by the plugin's `config` hook |
-| Instructions (`instructions/agent-discipline.md`) | Yes | Yes | Absolute paths appended to `config.instructions` (opt out: `ESHEPHERD_INJECT_INSTRUCTIONS=false`) |
+| Instructions (`instructions/agent-discipline.md`) | Yes | Yes | Absolute paths appended to `config.instructions` (opt out: `assets.injectInstructions=false` in `.electric-shepherd/config.jsonc`) |
 | Skills (`skills/*/SKILL.md`) | Yes | No | OpenCode has no config-injection path for skills — place in your own `.opencode/skills/<name>/SKILL.md` if you want it |
 | Snippets (`snippets/*.md`) | Yes | No | OpenChamber snippet assets; not an OpenCode auto-load concept |
 
@@ -247,53 +248,26 @@ electric-shepherd/
 
 ## Configuration
 
-All configuration is optional — defaults work out of the box.
+Runtime behavior is now config-file-first.
+
+1. Copy `electric-shepherd.config.example.jsonc` to `.electric-shepherd/config.jsonc`.
+2. Edit behavior there (capture mode, consolidation cadence, guard thresholds, command overrides).
+3. Keep `.env` for secrets only.
+
+Allowed options and defaults are defined in `adapter/runtime-config.ts` (`RUNTIME_CONFIG_SPECS`), including command-scoped paths under `commands.*`.
+
+Secret env vars:
 
 | Env var | Default | Description |
 |---|---|---|
 | `ESHEPHERD_ENV_FILE` | unset | Optional explicit env file path override for runtime scripts |
-| `MEMPALACE_MCP_URL` | `http://localhost:8093/mcp` | MemPalace MCP endpoint |
 | `MEMPALACE_MCP_API_KEY` | unset | Optional API key header value for MCP gateway auth |
-| `MEMPALACE_MCP_AUTH_HEADER` | `Authorization` | Header name used when sending API key/bearer auth |
-| `MEMPALACE_MCP_AUTH_SCHEME` | unset | Optional auth scheme prefix (for example `Bearer`) |
 | `MEMPALACE_MCP_BEARER_TOKEN` | unset | Optional bearer token (alternate to API-key header style) |
 | `MEMPALACE_MCP_HEADERS_JSON` | unset | Optional JSON map of additional MCP HTTP headers |
-| `MEMGRAPH_TOOL_PREFIX` | `mempalace_` | Prefix for MemPalace tools (set only if your gateway rewrites tool names) |
-| `NTFY_URL` | unset | ntfy endpoint for escalation notifications |
-| `ESHEPHERD_SOURCE_CAPTURE_TOOL_PREFIX` | `mempalace_` | Optional tool prefix override for source-transcript capture path |
-| `ESHEPHERD_SOURCE_CAPTURE_DEDUP_ENABLED` | `false` | Optional capture dedupe gate (default keeps source-transcript capture append-only) |
-| `ESHEPHERD_MEMCORE_REINJECT_ENABLED` | `true` | Enable plugin-driven scoped mem-core reinjection |
-| `ESHEPHERD_MEMCORE_REINJECT_ON_COMPACT` | `true` | Force mem-core reload after `session.compacted` |
-| `ESHEPHERD_MEMCORE_REINJECT_ON_IDLE` | `true` | Reinject when scope/content changed during idle checks |
-| `ESHEPHERD_MEMCORE_REINJECT_ON_START` | `true` | Prime scoped mem-core when a session starts |
-| `ESHEPHERD_SCOPE_DIR` | unset | Optional fixed scope directory override for reinjection |
-| `ESHEPHERD_MEMCORE_DIRECT_FILE` | `memory.md` | Direct per-directory mem-core filename used by loader wiring |
-| `ESHEPHERD_MEMCORE_STORE_ROOTS` | `.electric-shepherd/memory` | Store roots consulted by loader wiring |
-| `ESHEPHERD_MEMCORE_MAX_SCOPES` | `6` | Max broad→narrow scopes merged by reinjection loader |
-| `ESHEPHERD_MEMCORE_MAX_CHARS` | `12000` | Character cap for injected mem-core payload |
-| `ESHEPHERD_CONSOLIDATION_WRITE_GUARD_ENABLED` | `true` | Alert on non-dreamer calls to derived-memory write tools |
-| `ESHEPHERD_ALLOWED_CONSOLIDATION_WRITERS` | `dreamer` | Allowed agent identities for consolidation writes |
-| `ESHEPHERD_SOURCE_CAPTURE_VERIFY_ENABLED` | `true` | Emit OpenCode source-transcript capture verification status |
-| `ESHEPHERD_SOURCE_CAPTURE_CMD` | unset | Optional command run on stop/compact verification events |
-| `ESHEPHERD_SOURCE_CAPTURE_TIMEOUT_MS` | `20000` | Timeout ceiling for blocking source-transcript capture subprocess |
-| `ESHEPHERD_MEMCORE_LOADER_TIMEOUT_MS` | `15000` | Timeout ceiling for blocking mem-core loader subprocess |
-| `ESHEPHERD_AUTO_CONSOLIDATION_ENABLED` | `false` | Master switch for background auto-consolidation |
-| `ESHEPHERD_AUTO_CONSOLIDATION_ON_IDLE` | `true` | Trigger auto-consolidation after idle debounce window |
-| `ESHEPHERD_AUTO_CONSOLIDATION_ON_COMPACT` | `true` | Trigger auto-consolidation after compaction |
-| `ESHEPHERD_AUTO_CONSOLIDATION_IDLE_DELAY_MS` | `120000` | Idle debounce delay before idle-triggered run |
-| `ESHEPHERD_AUTO_CONSOLIDATION_MESSAGE_THRESHOLD` | `12` | Assistant-turn volume trigger threshold |
-| `ESHEPHERD_AUTO_CONSOLIDATION_COOLDOWN_MS` | `600000` | Minimum gap between auto-consolidation run starts |
-| `ESHEPHERD_AUTO_CONSOLIDATION_TIMEOUT_MS` | `300000` | Watchdog timeout and stale-lock reclaim window |
-| `ESHEPHERD_AUTO_CONSOLIDATION_MAX_TRACKED_SESSIONS` | `512` | Max tracked sessions in auto-consolidation state maps (oldest evicted first) |
-| `ESHEPHERD_AUTO_CONSOLIDATION_CMD` | unset | Optional override command for auto-consolidation execution |
-| `ESHEPHERD_CONSOLIDATION_LOCK_DISABLED` | unset | Test-only bypass for shared consolidation lock (`1` disables lock) |
 
-Local env workflow:
+MCP endpoint URL, tool prefix, auth header name, and auth scheme are configured in `.electric-shepherd/config.jsonc` (`mcp.url`, `mcp.toolPrefix`, `mcp.authHeader`, `mcp.authScheme`).
 
-- Repo template: `.env.example`
-- Your machine-specific values: `.env` (ignored by git)
-- Auto-discovery order: `ESHEPHERD_ENV_FILE` -> `./.env` + `./.env.local` -> `../docker/.env`
-- No manual `source` step required
+By default, runtime scripts and plugin paths do not consume behavior toggles from env; they read `.electric-shepherd/config.jsonc` and apply built-in defaults when a key is missing.
 
 For trigger semantics and operational caveats, see QUICKSTART section 3f.
 

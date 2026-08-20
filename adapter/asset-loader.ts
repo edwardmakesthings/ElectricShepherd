@@ -47,23 +47,37 @@ function coerceScalar(value: string): any {
   return v
 }
 
+/** Strip surrounding quotes from a frontmatter key (e.g. `"*"` -> `*`). */
+function unquoteKey(key: string): string {
+  const k = key.trim()
+  if ((k.startsWith('"') && k.endsWith('"')) || (k.startsWith("'") && k.endsWith("'"))) {
+    return k.slice(1, -1)
+  }
+  return k
+}
+
 /**
- * Parse a frontmatter block into an object. Top-level `key: value` pairs become
- * scalars; a top-level `key:` with no value starts a nested map whose 2-space
- * indented children are collected until the next top-level key.
+ * Parse a frontmatter block into an object. Supports top-level scalars and two
+ * levels of nested maps, so `permission.write."*"` matches the shape OpenCode's
+ * JSON config uses for scoped permissions.
  */
 export function parseFrontmatter(frontmatter: string): AssetRecord {
   const out: AssetRecord = {}
   let currentMap: AssetRecord | null = null
+  let currentIndent = -1
+  let nestedMap: AssetRecord | null = null
   for (const rawLine of (frontmatter || "").split(/\r?\n/)) {
     if (!rawLine.trim() || rawLine.trim().startsWith("#")) continue
     const indent = rawLine.length - rawLine.trimStart().length
     const line = rawLine.trim()
     const sep = line.indexOf(":")
     if (sep === -1) continue
-    const key = line.slice(0, sep).trim()
+    const key = unquoteKey(line.slice(0, sep))
     const value = line.slice(sep + 1).trim()
+
     if (indent === 0) {
+      nestedMap = null
+      currentIndent = -1
       if (value === "") {
         currentMap = {}
         out[key] = currentMap
@@ -71,9 +85,24 @@ export function parseFrontmatter(frontmatter: string): AssetRecord {
         out[key] = coerceScalar(value)
         currentMap = null
       }
-    } else if (currentMap) {
-      currentMap[key] = coerceScalar(value)
+      continue
     }
+
+    if (!currentMap) continue
+    if (currentIndent === -1) currentIndent = indent
+
+    if (indent <= currentIndent) {
+      if (value === "") {
+        nestedMap = {}
+        currentMap[key] = nestedMap
+      } else {
+        nestedMap = null
+        currentMap[key] = coerceScalar(value)
+      }
+      continue
+    }
+
+    if (nestedMap) nestedMap[key] = coerceScalar(value)
   }
   return out
 }

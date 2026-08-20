@@ -46,7 +46,29 @@ export function buildCommandExecutionPlan(args: {
   configured: string
   projectRoot: string
   defaultScript: string
+  memcoreFile?: string
 }): { mode: "exec"; command: string; args: string[]; cwd: string } | { mode: "rejected"; reason: string } {
+  const configuredRaw = typeof args.configured === "string" ? args.configured.trim() : ""
+  const memcoreFile = args.memcoreFile || ".electric-shepherd/memory/memory.md"
+  if (!configuredRaw) {
+    return {
+      mode: "exec",
+      command: "node",
+      args: [
+        "--experimental-strip-types",
+        args.defaultScript,
+        "--run-cadence",
+        "--cadence-mode",
+        "execute",
+        "--include-base-pipeline",
+        "--apply",
+        "--mem-core-file",
+        memcoreFile,
+      ],
+      cwd: args.projectRoot,
+    }
+  }
+
   const normalizedConfigured = normalizeCommandSpec(args.configured)
   if (normalizedConfigured.mode === "rejected") {
     return normalizedConfigured
@@ -56,14 +78,15 @@ export function buildCommandExecutionPlan(args: {
     const scriptArgs = normalizedConfigured.args.length > 0
       ? normalizedConfigured.args
       : [
-          "scripts/run-memory-consolidation-and-validation.ts",
+          "--experimental-strip-types",
+          args.defaultScript,
           "--run-cadence",
           "--cadence-mode",
           "execute",
           "--include-base-pipeline",
           "--apply",
           "--mem-core-file",
-          ".electric-shepherd/memory/memory.md",
+          memcoreFile,
         ]
     return {
       mode: "exec",

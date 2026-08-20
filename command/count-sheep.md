@@ -18,8 +18,8 @@ Argument modes:
 
 Scope defaults:
 
-- wing: `context-blocks`
-- room: `context-blocks`
+- wing: from runtime config `memory.projectWing` (or computed from project directory name with sortable numeric prefixes stripped, e.g. `001-SampleProject` -> `sampleproject`)
+- room: from runtime config `sourceCapture.room` (default `source-transcripts`)
 - query: `memory consolidation candidates`
 
 Optional scope syntax in arguments:
@@ -31,7 +31,7 @@ Execution steps:
 
 1. Parse `$ARGUMENTS` for `all`, `apply`, and optional scope overrides.
 2. Build this command from repo root:
-   `node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts --query "memory consolidation candidates" --wing "<wing>" --room "<room>" --batch-size 25 [--all] [--apply --apply-merges]`
+   `node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts --query "memory consolidation candidates" --batch-size 25 [--wing "<wing>"] [--room "<room>"] [--all] [--apply --apply-merges]`
 3. Run it via shell and capture stdout JSON.
 4. Summarize result for the user with:
    - `worklistMode`, `worklist.count`

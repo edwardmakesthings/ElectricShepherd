@@ -15,7 +15,7 @@ function runScript(scriptPath, scriptArgs) {
     {
       cwd: repoRoot,
       encoding: "utf8",
-      env: { ...process.env, ESHEPHERD_CONSOLIDATION_LOCK_DISABLED: "1" },
+      env: process.env,
     }
   );
   return JSON.parse(stdout);
@@ -45,6 +45,7 @@ test("quickstart retrieval expansion returns expected envelope", { skip: !should
 
 test("quickstart consolidation and cadence return expected envelopes", { skip: !shouldRunIntegration }, () => {
   const consolidate = runScript("scripts/run-memory-consolidation-and-validation.ts", [
+    "--no-lock",
     "--query",
     "memory consolidation candidates",
     "--wing",
@@ -61,6 +62,7 @@ test("quickstart consolidation and cadence return expected envelopes", { skip: !
   assert.equal(typeof consolidate.memCoreApply.applied, "boolean");
 
   const cadence = runScript("scripts/run-memory-consolidation-and-validation.ts", [
+    "--no-lock",
     "--run-cadence",
     "--cadence-mode",
     "plan",

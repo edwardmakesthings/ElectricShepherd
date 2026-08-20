@@ -32,13 +32,16 @@
  * CONNECTION
  * ----------
  * Env discovery mirrors the runtime scripts (ESHEPHERD_ENV_FILE -> repo
- * .env/.env.local -> ../docker/.env) by reusing `loadRuntimeEnv`. If no MCP URL
- * is configured the fixture reports `available: false` with a reason so callers
- * can skip gracefully instead of hard-failing.
+ * .env/.env.local -> ../docker/.env) by reusing `loadRuntimeEnv`, then runtime
+ * behavior is applied from `.electric-shepherd/config.jsonc` via
+ * `loadRuntimeConfig`. If no MCP URL is configured the fixture reports
+ * `available: false` with a reason so callers can skip gracefully instead of
+ * hard-failing.
  */
 
 import { createMemgraphClient } from "../../adapter/memgraph.ts";
 import { MCPHttpClient, resolveMCPHeadersFromEnv } from "../../adapter/mcp-http-client.ts";
+import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../../adapter/runtime-config.ts";
 import { loadRuntimeEnv } from "../../scripts/runtime-env.ts";
 
 const DEFAULT_WING = "eshepherd-test";
@@ -72,12 +75,17 @@ export async function createTestRoom(options = {}) {
   // correctly regardless of where this helper lives.
   const anchorUrl = new URL("../../scripts/_fixture-env-anchor.ts", import.meta.url).href;
   loadRuntimeEnv({ scriptUrl: anchorUrl, env: process.env });
+  const runtimeConfig = loadRuntimeConfig({
+    cwd: process.cwd(),
+    env: process.env,
+  });
+  applyRuntimeConfigToEnv(process.env, runtimeConfig);
 
   const mcpURL = (process.env.MEMPALACE_MCP_URL || "").trim();
   if (!mcpURL) {
     return {
       available: false,
-      reason: "MEMPALACE_MCP_URL is not configured; cannot create a test room.",
+      reason: "mcp.url is not configured; cannot create a test room.",
     };
   }
 

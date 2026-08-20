@@ -1,5 +1,6 @@
 import { createMemgraphClient } from "../adapter/memgraph.ts";
 import { MCPHttpClient, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-client.ts";
+import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
 import { expandScopedRetrieval, type RetrievalExpansionOptions } from "../adapter/retrieval-expansion.ts";
 import { loadRuntimeEnv } from "./runtime-env.ts";
 
@@ -7,6 +8,7 @@ const runtimeProcess = (globalThis as unknown as {
   process: {
     argv: string[];
     env: Record<string, string | undefined>;
+    cwd: () => string;
     stdout: { write: (text: string) => void };
     stderr: { write: (text: string) => void };
     exit: (code: number) => never;
@@ -62,6 +64,11 @@ function parseArgs(argv: string[]): RetrievalExpansionOptions {
 
 async function main(): Promise<void> {
   loadRuntimeEnv({ scriptUrl: import.meta.url, env: runtimeProcess.env });
+  const runtimeConfig = loadRuntimeConfig({
+    cwd: runtimeProcess.cwd(),
+    env: runtimeProcess.env,
+  });
+  applyRuntimeConfigToEnv(runtimeProcess.env, runtimeConfig);
 
   const mcpURL = runtimeProcess.env.MEMPALACE_MCP_URL || "http://localhost:8093/mcp";
   const toolPrefix = runtimeProcess.env.MEMGRAPH_TOOL_PREFIX;

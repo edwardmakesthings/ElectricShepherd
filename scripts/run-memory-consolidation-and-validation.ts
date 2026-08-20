@@ -3,7 +3,7 @@ import { MCPHttpClient, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-cli
 // @ts-expect-error runtime script package does not include node typings
 import { execFileSync } from "node:child_process";
 // @ts-expect-error runtime script package does not include node typings
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 // @ts-expect-error runtime script package does not include node typings
 import { dirname, join, relative, resolve } from "node:path";
 import {
@@ -23,6 +23,7 @@ import {
   type CadenceOrchestratorOptions,
   type CadenceOrchestratorResult,
 } from "../adapter/cadence-orchestrator.ts";
+import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
 import { loadRuntimeEnv } from "./runtime-env.ts";
 import { acquireConsolidationLock, releaseConsolidationLock } from "./consolidation-lock.ts";
 
@@ -45,6 +46,12 @@ function isTruthyFlag(value: string | undefined): boolean {
   if (!value) return false;
   const v = value.trim().toLowerCase();
   return v === "1" || v === "true" || v === "yes" || v === "on";
+}
+
+function isFalsyFlag(value: string | undefined): boolean {
+  if (!value) return false;
+  const v = value.trim().toLowerCase();
+  return v === "0" || v === "false" || v === "no" || v === "off";
 }
 
 type MapperEnvelope = {
@@ -424,14 +431,22 @@ async function callSubagentAuditor(args: {
 function parseConsolidationOptions(argv: string[]): SynthesisConsolidationOptions {
   const runCadence = hasFlag(argv, "--run-cadence");
 
+  const defaultSourceWing =
+    (process.env.ESHEPHERD_SOURCE_CAPTURE_WING || "").trim() ||
+    (process.env.ESHEPHERD_PROJECT_WING || "").trim() ||
+    "opencode";
+  const defaultSourceRoom =
+    (process.env.ESHEPHERD_SOURCE_CAPTURE_ROOM || "").trim() ||
+    "source-transcripts";
+
   let query = getArg(argv, "--query") || "memory consolidation candidates";
-  let targetWing = getArg(argv, "--wing") || getArg(argv, "--target-wing") || getArg(argv, "--scope-wing") || "context-blocks";
-  let targetRoom = getArg(argv, "--room") || getArg(argv, "--target-room") || getArg(argv, "--scope-room") || "context-blocks";
+  let targetWing = getArg(argv, "--wing") || getArg(argv, "--target-wing") || getArg(argv, "--scope-wing") || defaultSourceWing;
+  let targetRoom = getArg(argv, "--room") || getArg(argv, "--target-room") || getArg(argv, "--scope-room") || defaultSourceRoom;
 
   if ((!query || !targetWing || !targetRoom) && runCadence) {
     query = query || "memory consolidation candidates";
-    targetWing = targetWing || "context-blocks";
-    targetRoom = targetRoom || "context-blocks";
+    targetWing = targetWing || defaultSourceWing;
+    targetRoom = targetRoom || defaultSourceRoom;
   }
 
   const mapperSummaries = parseMapperSummariesFromFile(getArg(argv, "--mapper-summaries-file"));
@@ -580,46 +595,98 @@ function parseMemcoreApply(argv: string[]): MemcoreApplyOptions {
   };
 }
 
+function pointerBullets(values: string[], formatter: (value: string) => string, max = 40): string[] {
+  const unique = [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+  if (unique.length === 0) return ["- (none)"];
+  const out = unique.slice(0, max).map((value) => `- ${formatter(value)}`);
+  if (unique.length > max) out.push(`- ... (${unique.length - max} more)`);
+  return out;
+}
+
+// A bare id is not retrievable knowledge; the description is what makes a pointer worth keeping.
+function pointerDescription(value: string | undefined, fallback: string): string {
+  const text = asString(value).replace(/\s+/g, " ").trim();
+  if (!text) return fallback;
+  return text.length > 100 ? `${text.slice(0, 97)}...` : text;
+}
+
+function factBullets(values: string[], max: number): string[] {
+  const unique = [...new Set(values.map((value) => asString(value).replace(/\s+/g, " ").trim()).filter(Boolean))];
+  if (unique.length === 0) return ["- (none)"];
+  const out = unique.slice(0, max).map((value) => `- ${value.length > 200 ? `${value.slice(0, 197)}...` : value}`);
+  if (unique.length > max) out.push(`- ... (${unique.length - max} more; see pointers below)`);
+  return out;
+}
+
 function buildMemcoreMarkdown(args: {
   query: string;
   consolidation: SynthesisConsolidationResult;
   validation: ValidationMergeReviewResult;
   auditor?: AuditorEnvelope;
+  sourceDescriptions?: Record<string, string>;
+  includeFacts?: boolean;
+  includePointers?: boolean;
+  maxFactsPerSection?: number;
 }): string {
-  const validationSummary = {
-    totalNodes: args.validation.downwardValidation.length,
-    reviseCount: args.validation.downwardValidation.filter((x) => x.verdict === "revise").length,
-    mergeEscalations: args.validation.mergeAdjudications.filter((x) => x.decision === "escalate").length,
-  };
+  const includeFacts = args.includeFacts !== false;
+  const includePointers = args.includePointers !== false;
+  const maxFacts = Math.max(1, Number(args.maxFactsPerSection) || 8);
+  const runId = asString(args.consolidation.runId).trim();
+  const runPointer = runId ? `.electric-shepherd/journal/${runId}.jsonl` : "(none)";
+  const draftTitle = pointerDescription(args.consolidation.consolidationDraft.title, "latest synthesis");
+  const sourceDescriptions = args.sourceDescriptions || {};
+  const verdictByNode = new Map(args.validation.downwardValidation.map((item) => [item.nodeId, item.verdict]));
+  const createdNodePointers = args.consolidation.createdNodeId ? [args.consolidation.createdNodeId] : [];
+  const sourceDrawerPointers = args.consolidation.sourceDrawerIds || [];
+  const validationNodePointers = args.validation.downwardValidation.map((item) => item.nodeId);
+  const escalationNodePointers = args.validation.escalations.nodeIds || [];
+  const mergePairPointers = args.validation.escalations.mergePairs.map(
+    (pair) => `${pair.sourceNodeId} -> ${pair.canonicalNodeId} (score=${Number(pair.score).toFixed(3)})`,
+  );
+  const auditorPointer = args.auditor ? `available in run trace (via=${args.auditor.via})` : "(not-run)";
 
-  const auditorLine = args.auditor
-    ? `- Auditor verdict: ${args.auditor.verdict}`
-    : "- Auditor verdict: not-run";
+  const lines: string[] = ["# Labeled memory blocks (always in context)", ""];
 
-  const findings = args.auditor?.findings || [];
-  const findingSection = findings.length > 0 ? findings.map((f) => `- ${f}`).join("\n") : "- (none)";
+  if (includeFacts) {
+    lines.push(
+      "Facts below are resident: use them directly, no retrieval call needed.",
+      "",
+      "## [project-state]",
+      `- Latest synthesis: ${draftTitle}`,
+      ...factBullets(args.consolidation.consolidationDraft.durableFacts || [], maxFacts),
+      "",
+      "## [active-conventions]",
+      ...factBullets(args.consolidation.consolidationDraft.decisions || [], maxFacts),
+      "",
+      "## [open-items]",
+      ...factBullets(args.consolidation.consolidationDraft.openItems || [], maxFacts),
+      "",
+    );
+  }
 
-  return [
-    "# Labeled memory blocks (always in context)",
-    "",
-    "## [project-state]",
-    `- Latest consolidation title: ${args.consolidation.consolidationDraft.title}`,
-    `- Consolidation query: ${args.query}`,
-    auditorLine,
-    "",
-    "## [active-conventions]",
-    `- Validation nodes reviewed: ${validationSummary.totalNodes}`,
-    `- Validation revise count: ${validationSummary.reviseCount}`,
-    `- Merge escalations: ${validationSummary.mergeEscalations}`,
-    "",
-    "## [user-preferences]",
-    "- Keep prompts concise, actionable, and testable.",
-    "- Prefer one end-of-pass validation sweep over repetitive incremental checks unless debugging.",
-    "- Keep memory entries high-signal: durable decisions, root causes, and reusable patterns.",
-    "",
-    "## [auditor-findings]",
-    findingSection,
-  ].join("\n");
+  if (includePointers) {
+    lines.push(
+      "Pointer index: open with `get_drawer` only when a description matches the current task.",
+      "",
+      "## [pointers]",
+      `- Consolidation run log: ${runPointer}`,
+      "- Latest synthesis:",
+      ...pointerBullets(createdNodePointers, (id) => `node_id:${id} — ${draftTitle}`),
+      "- Source transcripts consolidated in the latest run:",
+      ...pointerBullets(sourceDrawerPointers, (id) => `drawer_id:${id} — ${pointerDescription(sourceDescriptions[id], "source transcript")}`),
+      "- Synthesis nodes reviewed by validation:",
+      ...pointerBullets(validationNodePointers, (id) => `node_id:${id} — validation ${verdictByNode.get(id) ?? "reviewed"}`),
+      "- Nodes escalated for human review:",
+      ...pointerBullets(escalationNodePointers, (id) => `node_id:${id} — needs review`),
+      "- Merge pairs escalated:",
+      ...pointerBullets(mergePairPointers, (entry) => entry),
+      "",
+      "## [auditor-findings]",
+      `- Auditor review: ${auditorPointer}`,
+    );
+  }
+
+  return lines.join("\n");
 }
 
 function usage(): string {
@@ -689,6 +756,16 @@ async function main(): Promise<void> {
   const startTime = Date.now();
   loadRuntimeEnv({ scriptUrl: import.meta.url, env: process.env });
 
+  // The plugin spawns this script with cwd=plugin install dir (for module/env
+  // resolution); ESHEPHERD_PROJECT_ROOT is the actual consumer project, and
+  // config/wing/room must resolve against THAT, not this script's own cwd.
+  const configCwd = process.env.ESHEPHERD_PROJECT_ROOT || process.cwd();
+  const runtimeConfig = loadRuntimeConfig({
+    cwd: configCwd,
+    env: process.env,
+  });
+  applyRuntimeConfigToEnv(process.env, runtimeConfig);
+
   // P2-1 + P2-3: generate run_id at startup
   const runId = "eshepherd-" + new Date().toISOString().replace(/[:.]/g, "-").slice(0, 17) + "-" + Math.random().toString(36).slice(2, 6);
 
@@ -745,6 +822,7 @@ async function main(): Promise<void> {
   const mapperBatches: MapperEnvelope[] = [];
   let consolidation: SynthesisConsolidationResult | undefined;
   const consolidationBatches: SynthesisConsolidationResult[] = [];
+  const allSkipped: Array<{ drawer_id: string; reason: string }> = [];
   let validationMergeReview: ValidationMergeReviewResult | undefined;
   let validationSkippedReason: string | undefined;
 
@@ -818,7 +896,6 @@ async function main(): Promise<void> {
   if (includeBasePipeline) {
     const worklistChunks = chunkItems(worklist, worklistOptions.batchSize);
     const useLiveMapper = hasFlag(argv, "--use-live-mapper");
-    const allSkipped: Array<{ drawer_id: string; reason: string }> = [];
 
 
     for (const chunk of worklistChunks) {
@@ -913,6 +990,10 @@ async function main(): Promise<void> {
       consolidation,
       validation: validationForRender,
       auditor,
+      sourceDescriptions: Object.fromEntries(worklist.map((item) => [item.drawer_id, asString(item.desc)])),
+      includeFacts: !isFalsyFlag(process.env.ESHEPHERD_MEMCORE_RENDER_INCLUDE_FACTS),
+      includePointers: !isFalsyFlag(process.env.ESHEPHERD_MEMCORE_RENDER_INCLUDE_POINTERS),
+      maxFactsPerSection: Number(process.env.ESHEPHERD_MEMCORE_RENDER_MAX_FACTS) || 8,
     });
 
     const targetFilePath = resolveMemcoreFilePath({
@@ -1005,7 +1086,8 @@ async function main(): Promise<void> {
 
   // P1-2: append run journal entry for crash-safe resume
   try {
-    const journalDir = join(process.cwd(), ".electric-shepherd", "journal");
+    const journalRoot = process.env.ESHEPHERD_PROJECT_ROOT || process.cwd();
+    const journalDir = join(journalRoot, ".electric-shepherd", "journal");
     mkdirSync(journalDir, { recursive: true });
     const journalPath = join(journalDir, `${runId}.jsonl`);
     const journalLine = JSON.stringify({

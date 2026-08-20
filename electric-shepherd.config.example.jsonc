@@ -1,0 +1,132 @@
+{
+  // ElectricShepherd runtime config (JSONC)
+  // Copy to: .electric-shepherd/config.jsonc
+  // Full option surface and defaults are defined in:
+  //   adapter/runtime-config.ts (RUNTIME_CONFIG_SPECS)
+
+  "mcp": {
+    "url": "http://localhost:8093/mcp",
+    "toolPrefix": "mempalace_",
+    "authHeader": "Authorization",
+    "authScheme": "",
+    "deleteUrl": ""
+  },
+
+  "notifications": {
+    "ntfyUrl": ""
+  },
+
+  "memory": {
+    // Left unset by default: the wing is computed from this project's directory
+    // name (matching mempalace's own wing-naming convention). Set explicitly
+    // only to route this project's captures into a different wing.
+    "projectWing": ""
+  },
+
+  "commands": {
+    "sourceCapture": {
+      "command": "",
+      "timeoutMs": 20000
+    },
+    "autoConsolidation": {
+      "command": "",
+      "timeoutMs": 300000
+    },
+    "memcoreLoader": {
+      "timeoutMs": 15000
+    }
+  },
+
+  "sourceCapture": {
+    "verifyEnabled": true,
+    "toolPrefix": "mempalace_",
+    "mode": "append",
+    "dedupEnabled": true,
+    // Left unset by default; see memory.projectWing above.
+    "wing": "",
+    "room": "source-transcripts",
+    "addedBy": "electric-shepherd-capture",
+    "keepLocal": false,
+    "captureRoot": ".electric-shepherd/exports"
+  },
+
+  "compaction": {
+    "archiveEnabled": true,
+    "promptOverrideEnabled": true,
+    "precompactProbeEnabled": false
+  },
+
+  "retry": {
+    "enabled": false,
+    "maxRetriesPerSession": 4,
+    "disabledAgents": "",
+    "disabledModes": ""
+  },
+
+  "memcore": {
+    "reinject": {
+      "enabled": false,
+      "onCompact": false,
+      "onIdle": false,
+      "onStart": false
+    },
+    "maxChars": 12000,
+    "maxScopes": 6,
+    "directFileName": "memory.md",
+    "storeRoots": ".electric-shepherd/memory",
+    "render": {
+      "includeFacts": true,
+      "includePointers": true,
+      "maxFactsPerSection": 8
+    },
+    "injectionCooldownMs": 15000,
+    "scopeDir": ""
+  },
+
+  "consolidation": {
+    "writeGuardEnabled": true,
+    "allowedWriters": "dreamer",
+    "lock": {
+      "disabled": false
+    },
+    "auto": {
+      "enabled": true,
+      "onIdle": true,
+      "onCompact": true,
+      "idleDelayMs": 120000,
+      "messageThreshold": 12,
+      "cooldownMs": 600000,
+      "maxTrackedSessions": 512
+    }
+  },
+
+  "loopGuard": {
+    "enabled": true,
+    "repeatThreshold": 3,
+    "windowSize": 12,
+    "maxInterventions": 3,
+    "mutationTools": [
+      "write",
+      "edit",
+      "patch",
+      "bash"
+    ],
+    "exemptTools": ["compress", "dcp-compress"]
+  },
+
+  "spiralGuard": {
+    "enabled": true,
+    "investigateThreshold": 3,
+    "reversalThreshold": 3,
+    "maxInterventions": 2,
+    "exemptReflection": true,
+    "disabledModes": "",
+    "disabledAgents": "",
+    "exemptProviders": ["github_copilot"],
+    "exemptModelPrefixes": ["copilot-"]
+  },
+
+  "assets": {
+    "injectInstructions": true
+  }
+}

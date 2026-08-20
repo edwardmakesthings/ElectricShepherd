@@ -63,6 +63,9 @@ export type SynthesisConsolidationResult = {
   consolidationDraft: {
     title: string;
     content: string;
+    durableFacts: string[];
+    decisions: string[];
+    openItems: string[];
     contentCharacters: number;
     populatedSectionCount: number;
     labels: string[];
@@ -361,6 +364,9 @@ function buildConsolidationDraft(args: {
 }): {
   title: string;
   content: string;
+  durableFacts: string[];
+  decisions: string[];
+  openItems: string[];
   contentCharacters: number;
   populatedSectionCount: number;
 } {
@@ -397,6 +403,9 @@ function buildConsolidationDraft(args: {
   return {
     title,
     content,
+    durableFacts,
+    decisions,
+    openItems,
     contentCharacters: content.length,
     populatedSectionCount,
   };
@@ -580,6 +589,9 @@ export async function runSynthesisConsolidation(
     consolidationDraft: {
       title: consolidationDraft.title,
       content: consolidationDraft.content,
+      durableFacts: consolidationDraft.durableFacts,
+      decisions: consolidationDraft.decisions,
+      openItems: consolidationDraft.openItems,
       contentCharacters: consolidationDraft.contentCharacters,
       populatedSectionCount: consolidationDraft.populatedSectionCount,
       labels: options.labels || [],
