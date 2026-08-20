@@ -6,6 +6,8 @@
 
   "mcp": {
     "url": "http://localhost:8093/mcp",
+    "autoDiscover": true,
+    "pythonBin": "python",
     "toolPrefix": "mempalace_",
     "authHeader": "Authorization",
     "authScheme": "",
@@ -87,7 +89,10 @@
     "writeGuardEnabled": true,
     "allowedWriters": "dreamer",
     "lock": {
-      "disabled": false
+      "disabled": false,
+      "nativeCoordinatorDisabled": false,
+      "nativeCoordinatorPath": "",
+      "nativePidProbeDisabled": false
     },
     "auto": {
       "enabled": true,

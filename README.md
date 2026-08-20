@@ -265,7 +265,9 @@ Secret env vars:
 | `MEMPALACE_MCP_BEARER_TOKEN` | unset | Optional bearer token (alternate to API-key header style) |
 | `MEMPALACE_MCP_HEADERS_JSON` | unset | Optional JSON map of additional MCP HTTP headers |
 
-MCP endpoint URL, tool prefix, auth header name, and auth scheme are configured in `.electric-shepherd/config.jsonc` (`mcp.url`, `mcp.toolPrefix`, `mcp.authHeader`, `mcp.authScheme`).
+MCP endpoint URL, tool prefix, auth header name, and auth scheme are configured in `.electric-shepherd/config.jsonc` (`mcp.url`, `mcp.toolPrefix`, `mcp.authHeader`, `mcp.authScheme`). When `mcp.autoDiscover` is true and `mcp.url` is unset, runtime scripts auto-discover a live MemPalace hub endpoint/token from MemPalace's local server registry.
+
+Standalone consolidation runs prefer a native MemPalace-backed coordinator (`scripts/native-consolidation-coord.py`) and fall back to the local lockfile path if native coordination is unavailable. Native coordination is best-effort and activates when the configured Python (`mcp.pythonBin`) can import MemPalace runtime modules. Use `consolidation.lock.nativeCoordinatorDisabled` (or CLI `--no-native-coord`) to force lockfile-only behavior.
 
 By default, runtime scripts and plugin paths do not consume behavior toggles from env; they read `.electric-shepherd/config.jsonc` and apply built-in defaults when a key is missing.
 
@@ -319,8 +321,8 @@ Core policy runtime in place. The following are committed and usable now:
 - consolidation write-authority guard in `plugin/turn-guard.ts` (alerts when non-dreamer agents call protected consolidation write tools)
 - OpenCode source-transcript capture verification heartbeat in `plugin/turn-guard.ts` with status output in `./.electric-shepherd/turn-guard-status.json`
 - Opt-in auto-consolidation in `plugin/turn-guard.ts` (idle/volume/compaction triggers + cooldown + watchdog)
-- Orphan/hang hardening for auto-consolidation (cross-process lockfile, process-tree kill, bounded tracking maps, start-failure cooldown rollback)
-- Shared consolidation lock in `scripts/consolidation-lock.ts` used by standalone/cron runs and plugin-triggered runs
+- Orphan/hang hardening for auto-consolidation (cross-process lockfile, native MemPalace PID-liveness probe, process-tree kill, bounded tracking maps, start-failure cooldown rollback)
+- Native-first standalone consolidation coordination via `scripts/native-consolidation-coord.py` with lockfile fallback (`scripts/consolidation-lock.ts`), while plugin-triggered runs keep inherited-lock behavior
 - Policy adapter scaffold in `adapter/memgraph.ts`, retrieval expansion in `adapter/retrieval-expansion.ts`, source-to-derived consolidation in `adapter/synthesis-consolidation.ts`, and validation+merge review in `adapter/validation-merge-review.ts`
 - Dreamer profile files in `agents/`
 - Unit test coverage for auto-consolidation decision + hardening helpers (`npm test`: 34 passing)

@@ -6,6 +6,8 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 // @ts-expect-error runtime script package does not include node typings
 import { dirname, join, relative, resolve } from "node:path";
+// @ts-expect-error runtime script package does not include node typings
+import { fileURLToPath } from "node:url";
 import {
   runSynthesisConsolidation,
   type SynthesisConsolidationOptions,
@@ -37,10 +39,13 @@ declare const process: {
   exit: (code: number) => never;
 };
 
+const NATIVE_COORD_HELPER_PATH = fileURLToPath(new URL("./native-consolidation-coord.py", import.meta.url));
+
 // Project root whose shared consolidation lock this process currently holds (null when it
 // does not hold one, e.g. the lock was inherited from the spawning plugin). Used
 // so both the success path and the top-level catch can release it.
 let heldConsolidationLockRoot: string | null = null;
+let heldNativeConsolidationLease: { projectRoot: string; runId: string } | null = null;
 
 function isTruthyFlag(value: string | undefined): boolean {
   if (!value) return false;
@@ -217,6 +222,101 @@ function parseEmbeddedJSON(text: string): unknown {
   return undefined;
 }
 
+function runNativeCoordinator(args: string[], env: Record<string, string | undefined>): Record<string, unknown> | undefined {
+  if (!existsSync(NATIVE_COORD_HELPER_PATH)) return undefined;
+
+  const pythonBin = (env.ESHEPHERD_PYTHON_BIN || "python").trim() || "python";
+  try {
+    const raw = execFileSync(pythonBin, [NATIVE_COORD_HELPER_PATH, ...args], {
+      encoding: "utf8",
+      maxBuffer: 128 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
+      env,
+    });
+    const parsed = asObject(parseEmbeddedJSON(raw));
+    return Object.keys(parsed).length > 0 ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function tryAcquireNativeConsolidationLease(args: {
+  projectRoot: string;
+  runId: string;
+  staleMs: number;
+  env: Record<string, string | undefined>;
+}): NativeCoordAcquireResult {
+  const cmdArgs = [
+    "acquire",
+    "--project-root",
+    args.projectRoot,
+    "--owner-pid",
+    String(process.pid),
+    "--run-id",
+    args.runId,
+    "--stale-ms",
+    String(Math.max(1, Math.floor(args.staleMs))),
+  ];
+
+  const queuePath = (args.env.ESHEPHERD_CONSOLIDATION_NATIVE_COORD_PATH || "").trim();
+  if (queuePath) {
+    cmdArgs.push("--queue-path", queuePath);
+  }
+
+  const payload = runNativeCoordinator(cmdArgs, args.env);
+  if (!payload) {
+    return { state: "unavailable" };
+  }
+  if (payload.acquired === true) {
+    return { state: "acquired" };
+  }
+  if (payload.acquired === false) {
+    return {
+      state: "held",
+      reason: asString(payload.reason || payload.holder_run_id || payload.holder_pid) || "held",
+    };
+  }
+  return { state: "unavailable" };
+}
+
+function releaseNativeConsolidationLease(args: {
+  projectRoot: string;
+  runId: string;
+  env: Record<string, string | undefined>;
+}): void {
+  const cmdArgs = [
+    "release",
+    "--project-root",
+    args.projectRoot,
+    "--owner-pid",
+    String(process.pid),
+    "--run-id",
+    args.runId,
+  ];
+
+  const queuePath = (args.env.ESHEPHERD_CONSOLIDATION_NATIVE_COORD_PATH || "").trim();
+  if (queuePath) {
+    cmdArgs.push("--queue-path", queuePath);
+  }
+
+  runNativeCoordinator(cmdArgs, args.env);
+}
+
+function releaseHeldConsolidationGuards(): void {
+  if (heldNativeConsolidationLease) {
+    releaseNativeConsolidationLease({
+      projectRoot: heldNativeConsolidationLease.projectRoot,
+      runId: heldNativeConsolidationLease.runId,
+      env: process.env,
+    });
+    heldNativeConsolidationLease = null;
+  }
+  if (heldConsolidationLockRoot) {
+    releaseConsolidationLock(heldConsolidationLockRoot);
+    heldConsolidationLockRoot = null;
+  }
+}
+
 function runSubagentViaOpenCode(args: {
   opencodeBin: string;
   agentName: string;
@@ -235,6 +335,18 @@ type MemcoreApplyOptions = {
   baseDir?: string;
   scopeDir?: string;
 };
+
+type DiscoveredMCPConfig = {
+  url: string;
+  bearerToken?: string;
+};
+
+type NativeCoordAcquireResult = {
+  state: "acquired" | "held" | "unavailable";
+  reason?: string;
+};
+
+type ConsolidationCoordMode = "native-queue" | "lockfile" | "bypassed";
 
 function findWorkspaceRoot(startDir: string): string {
   let current = resolve(startDir);
@@ -595,6 +707,62 @@ function parseMemcoreApply(argv: string[]): MemcoreApplyOptions {
   };
 }
 
+function discoverLiveMCPConfig(env: Record<string, string | undefined>): DiscoveredMCPConfig | undefined {
+  if (isFalsyFlag(env.ESHEPHERD_MCP_AUTO_DISCOVER)) return undefined;
+  if ((env.MEMPALACE_MCP_URL || "").trim()) return undefined;
+
+  const pythonBin = (env.ESHEPHERD_PYTHON_BIN || "python").trim() || "python";
+  const script = [
+    "import json, os",
+    "try:",
+    "    from mempalace.config import MempalaceConfig",
+    "    from mempalace.server_registry import read_live_serverinfo, server_token_path",
+    "except Exception:",
+    "    print('{}')",
+    "    raise SystemExit(0)",
+    "palace_path = (os.environ.get('MEMPALACE_PALACE_PATH') or MempalaceConfig().palace_path or '').strip()",
+    "if not palace_path:",
+    "    print('{}')",
+    "    raise SystemExit(0)",
+    "info = read_live_serverinfo(palace_path)",
+    "if not info:",
+    "    print('{}')",
+    "    raise SystemExit(0)",
+    "scheme = str(info.get('scheme') or 'http').strip() or 'http'",
+    "host = str(info.get('host') or '127.0.0.1').strip() or '127.0.0.1'",
+    "port = info.get('port')",
+    "if isinstance(port, str) and port.strip().isdigit():",
+    "    port = int(port.strip())",
+    "if not isinstance(port, int):",
+    "    print('{}')",
+    "    raise SystemExit(0)",
+    "token = ''",
+    "try:",
+    "    token_file = server_token_path(palace_path)",
+    "    if token_file.exists():",
+    "        token = token_file.read_text(encoding='utf-8').strip()",
+    "except Exception:",
+    "    token = ''",
+    "print(json.dumps({'url': f'{scheme}://{host}:{port}/mcp', 'bearer_token': token}))",
+  ].join("\n");
+
+  try {
+    const raw = execFileSync(pythonBin, ["-c", script], {
+      encoding: "utf8",
+      maxBuffer: 128 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
+      env,
+    });
+    const parsed = asObject(parseEmbeddedJSON(raw));
+    const url = asString(parsed.url).trim();
+    if (!url) return undefined;
+    const bearerToken = asString(parsed.bearer_token).trim();
+    return bearerToken ? { url, bearerToken } : { url };
+  } catch {
+    return undefined;
+  }
+}
+
 function pointerBullets(values: string[], formatter: (value: string) => string, max = 40): string[] {
   const unique = [...new Set(values.map((value) => value.trim()).filter(Boolean))];
   if (unique.length === 0) return ["- (none)"];
@@ -742,6 +910,7 @@ function usage(): string {
     "  --cadence-state-file <path>      (persist area counters/trigger timestamps)",
     "  --include-base-pipeline          (also run top-level consolidation+validation when --run-cadence is set)",
     "  --opencode-bin <path>            (default: opencode; used for live subagent fallback)",
+    "  --no-native-coord                (force standalone lockfile path; bypass MemPalace native coordinator)",
     "",
     "Output:",
     "  JSON envelope: { worklist, worklistMode, consolidation, validationMergeReview, mapper?, auditor?, memCoreApply?, cadence?, cadenceState? }",
@@ -775,6 +944,8 @@ async function main(): Promise<void> {
     return;
   }
 
+  let consolidationCoordMode: ConsolidationCoordMode = "bypassed";
+
   // Cross-process lock so a plugin-triggered run, a cron run, and an n8n run can
   // never overlap. The turn-guard plugin sets ESHEPHERD_CONSOLIDATION_LOCK_INHERITED when
   // it spawns us (it already holds the lock), so we skip acquire/release in that
@@ -787,11 +958,36 @@ async function main(): Promise<void> {
   if (!lockInherited) {
     const staleMs = Number(process.env.ESHEPHERD_AUTO_CONSOLIDATION_TIMEOUT_MS) || 300000;
     const lockRoot = process.cwd();
-    if (!acquireConsolidationLock(lockRoot, { source: "run-memory-consolidation-and-validation", runId }, staleMs)) {
-      process.stdout.write(`${JSON.stringify({ skipped: true, reason: "consolidation-lock-held" }, null, 2)}\n`);
-      return;
+
+    const nativeCoordDisabled =
+      isTruthyFlag(process.env.ESHEPHERD_CONSOLIDATION_NATIVE_COORD_DISABLED) || hasFlag(argv, "--no-native-coord");
+
+    if (!nativeCoordDisabled) {
+      const nativeLease = tryAcquireNativeConsolidationLease({
+        projectRoot: lockRoot,
+        runId,
+        staleMs,
+        env: process.env,
+      });
+      if (nativeLease.state === "acquired") {
+        heldNativeConsolidationLease = { projectRoot: lockRoot, runId };
+        consolidationCoordMode = "native-queue";
+      } else if (nativeLease.state === "held") {
+        process.stdout.write(
+          `${JSON.stringify({ skipped: true, reason: "consolidation-native-coord-held", detail: nativeLease.reason }, null, 2)}\n`,
+        );
+        return;
+      }
     }
-    heldConsolidationLockRoot = lockRoot;
+
+    if (consolidationCoordMode !== "native-queue") {
+      if (!acquireConsolidationLock(lockRoot, { source: "run-memory-consolidation-and-validation", runId }, staleMs)) {
+        process.stdout.write(`${JSON.stringify({ skipped: true, reason: "consolidation-lock-held" }, null, 2)}\n`);
+        return;
+      }
+      heldConsolidationLockRoot = lockRoot;
+      consolidationCoordMode = "lockfile";
+    }
   }
 
   const consolidationOptions = parseConsolidationOptions(argv);
@@ -800,7 +996,12 @@ async function main(): Promise<void> {
   const worklistOptions = parseWorklistOptions(argv);
   const memcoreApply = parseMemcoreApply(argv);
 
-  const mcpURL = process.env.MEMPALACE_MCP_URL || "http://localhost:8093/mcp";
+  const discoveredMCP = discoverLiveMCPConfig(process.env);
+  if (!(process.env.MEMPALACE_MCP_BEARER_TOKEN || "").trim() && discoveredMCP?.bearerToken) {
+    process.env.MEMPALACE_MCP_BEARER_TOKEN = discoveredMCP.bearerToken;
+  }
+
+  const mcpURL = (process.env.MEMPALACE_MCP_URL || discoveredMCP?.url || "http://localhost:8093/mcp").trim();
   const toolPrefix = process.env.MEMGRAPH_TOOL_PREFIX || "mempalace_";
   const mcpHeaders = resolveMCPHeadersFromEnv(process.env);
 
@@ -870,10 +1071,7 @@ async function main(): Promise<void> {
       worklist: worklistOutput,
     };
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
-    if (heldConsolidationLockRoot) {
-      releaseConsolidationLock(heldConsolidationLockRoot);
-      heldConsolidationLockRoot = null;
-    }
+    releaseHeldConsolidationGuards();
     return;
   }
 
@@ -886,10 +1084,7 @@ async function main(): Promise<void> {
       worklist: worklistOutput,
     };
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
-    if (heldConsolidationLockRoot) {
-      releaseConsolidationLock(heldConsolidationLockRoot);
-      heldConsolidationLockRoot = null;
-    }
+    releaseHeldConsolidationGuards();
     return;
   }
 
@@ -1075,6 +1270,12 @@ async function main(): Promise<void> {
       consolidationBatchCount: consolidationBatches.length,
       skipped: allSkipped.length > 0 ? allSkipped : undefined,
       warnings: traceWarnings.length > 0 ? traceWarnings : undefined,
+      consolidationCoordMode,
+      mcpEndpointSource: (process.env.MEMPALACE_MCP_URL || "").trim()
+        ? "env"
+        : discoveredMCP
+          ? "server-registry"
+          : "default",
     },
     mode: includeBasePipeline ? "full-pipeline" : "cadence-only",
     worklistMode: worklistOptions.mode,
@@ -1104,15 +1305,11 @@ async function main(): Promise<void> {
     process.stderr.write(`[memory-consolidation-validation] journal append failed: ${String(err)}\n`);
   }
 
-
-  if (heldConsolidationLockRoot) {
-    releaseConsolidationLock(heldConsolidationLockRoot);
-    heldConsolidationLockRoot = null;
-  }
+  releaseHeldConsolidationGuards();
 }
 
 main().catch((err) => {
-  if (heldConsolidationLockRoot) releaseConsolidationLock(heldConsolidationLockRoot);
+  releaseHeldConsolidationGuards();
   process.stderr.write(`[memory-consolidation-validation] ${String(err)}\n`);
   process.exit(1);
 });

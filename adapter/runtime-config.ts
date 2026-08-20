@@ -59,6 +59,8 @@ const DEFAULT_SPIRAL_EXEMPT_MODEL_PREFIXES = ["copilot-"]
 // Command-related options are intentionally grouped under commands.* paths.
 export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
   { envKey: "MEMPALACE_MCP_URL", path: "mcp.url", kind: "string", defaultValue: "http://localhost:8093/mcp" },
+  { envKey: "ESHEPHERD_MCP_AUTO_DISCOVER", path: "mcp.autoDiscover", kind: "boolean", defaultValue: true },
+  { envKey: "ESHEPHERD_PYTHON_BIN", path: "mcp.pythonBin", kind: "string", defaultValue: "python" },
   { envKey: "MEMGRAPH_TOOL_PREFIX", path: "mcp.toolPrefix", kind: "string", defaultValue: "mempalace_" },
   { envKey: "MEMPALACE_MCP_AUTH_HEADER", path: "mcp.authHeader", kind: "string", defaultValue: "Authorization" },
   { envKey: "MEMPALACE_MCP_AUTH_SCHEME", path: "mcp.authScheme", kind: "string", defaultValue: "" },
@@ -128,6 +130,24 @@ export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
   { envKey: "ESHEPHERD_AUTO_CONSOLIDATION_COOLDOWN_MS", path: "consolidation.auto.cooldownMs", kind: "number", defaultValue: 600000, min: 1 },
   { envKey: "ESHEPHERD_AUTO_CONSOLIDATION_MAX_TRACKED_SESSIONS", path: "consolidation.auto.maxTrackedSessions", kind: "number", defaultValue: 512, min: 1 },
   { envKey: "ESHEPHERD_CONSOLIDATION_LOCK_DISABLED", path: "consolidation.lock.disabled", kind: "boolean", defaultValue: false },
+  {
+    envKey: "ESHEPHERD_CONSOLIDATION_NATIVE_COORD_DISABLED",
+    path: "consolidation.lock.nativeCoordinatorDisabled",
+    kind: "boolean",
+    defaultValue: false,
+  },
+  {
+    envKey: "ESHEPHERD_CONSOLIDATION_NATIVE_COORD_PATH",
+    path: "consolidation.lock.nativeCoordinatorPath",
+    kind: "string",
+    defaultValue: "",
+  },
+  {
+    envKey: "ESHEPHERD_CONSOLIDATION_NATIVE_PID_PROBE_DISABLED",
+    path: "consolidation.lock.nativePidProbeDisabled",
+    kind: "boolean",
+    defaultValue: false,
+  },
 
   { envKey: "ESHEPHERD_PRECOMPACT_PROBE", path: "compaction.precompactProbeEnabled", kind: "boolean", defaultValue: false },
   { envKey: "ESHEPHERD_COMPACT_ARCHIVE", path: "compaction.archiveEnabled", kind: "boolean", defaultValue: true },

@@ -20,12 +20,59 @@
 // @ts-expect-error runtime script package does not include node typings
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 // @ts-expect-error runtime script package does not include node typings
+import { execFileSync } from "node:child_process";
+// @ts-expect-error runtime script package does not include node typings
 import { join } from "node:path";
 
-declare const process: { pid: number };
+declare const process: { pid: number; env?: Record<string, string | undefined> };
 
 export const CONSOLIDATION_LOCK_DIR = ".electric-shepherd";
 export const CONSOLIDATION_LOCK_FILE = "auto-consolidation.lock";
+
+function isTruthyFlag(value: string | undefined): boolean {
+  if (!value) return false;
+  const v = value.trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes" || v === "on";
+}
+
+function probePidAliveViaMempalace(ownerPid: number): boolean | undefined {
+  if (!(ownerPid > 0)) return undefined;
+  const env = process.env || {};
+  if (isTruthyFlag(env.ESHEPHERD_CONSOLIDATION_NATIVE_PID_PROBE_DISABLED)) return undefined;
+
+  const pythonBin = (env.ESHEPHERD_PYTHON_BIN || "python").trim() || "python";
+  const script = [
+    "import sys",
+    "try:",
+    "    from mempalace.daemon import _pid_alive",
+    "except Exception:",
+    "    print('?')",
+    "    raise SystemExit(0)",
+    "try:",
+    "    pid = int(sys.argv[1])",
+    "except Exception:",
+    "    print('?')",
+    "    raise SystemExit(0)",
+    "print('1' if _pid_alive(pid) else '0')",
+  ].join("\n");
+
+  try {
+    const out = execFileSync(pythonBin, ["-c", script, String(ownerPid)], {
+      encoding: "utf8",
+      maxBuffer: 32 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
+      env,
+    })
+      .trim()
+      .toLowerCase();
+
+    if (out === "1" || out === "true") return true;
+    if (out === "0" || out === "false") return false;
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /** A lock is fresh (still owned) while it is younger than the staleness window. */
 export function isConsolidationLockFresh(startedAtMs: number, nowMs: number, staleMs: number): boolean {
@@ -62,11 +109,16 @@ export function acquireConsolidationLock(
       throw err;
     }
 
-    // Lock file exists — check if it is stale before backing off.
+    // Lock file exists — keep active owners and reclaim dead/stale ones.
     try {
       const raw = JSON.parse(readFileSync(lockPath, "utf8"));
       const startedAtMs = Number(raw?.startedAtMs || 0);
-      if (isConsolidationLockFresh(startedAtMs, Date.now(), staleMs)) {
+      const ownerPid = Number(raw?.pid || 0);
+      const ownerAlive = probePidAliveViaMempalace(ownerPid);
+      if (ownerAlive === true) {
+        return false; // lock owner still running
+      }
+      if (ownerAlive !== false && isConsolidationLockFresh(startedAtMs, Date.now(), staleMs)) {
         return false; // fresh lock held by another process
       }
     } catch {
