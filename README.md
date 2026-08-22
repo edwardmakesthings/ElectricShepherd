@@ -96,7 +96,7 @@ Add to your `opencode.json`:
 OpenCode resolves this package on startup. This repo currently provides:
 - The `turn-guard` plugin (checkpoint + stop-quality retry + compaction-aware mem-core reinjection + scope-aware loader wiring + write-authority/capture guards)
 - Dreamer agent profiles (`dreamer`, `dream-mapper`, `dream-auditor`)
-- Slash commands in `command/` (`/count-sheep`, `/herd`, `/lucid-dream`, `/wake-up`, `/headcount`) for consolidation workflows
+- Slash commands in `command/` (`/consolidate`, `/memory-status`, `/consolidate-deep`, `/memory-refresh`, `/memory-status`) for consolidation workflows
 - The `memsave` / `memload` OpenChamber snippets
 - The memory discipline instruction plus runtime-derived mem-core renders under `.electric-shepherd/memory/`
 
@@ -216,11 +216,11 @@ electric-shepherd/
 │   ├── dream-mapper.md        # per-transcript subagent (isolated context)
 │   └── dream-auditor.md       # validator subagent (bidirectional coherence check)
 ├── command/
-│   ├── count-sheep.md         # standard consolidation slash command
+│   ├── consolidate.md         # standard consolidation slash command
 │   ├── herd.md                # read-only consolidation preview slash command
-│   ├── lucid-dream.md         # deep consolidation+merge slash command
-│   ├── wake-up.md             # in-session scoped mem-core refresh slash command
-│   └── headcount.md           # pending source-vs-derived counts slash command
+│   ├── consolidate-deep.md         # deep consolidation+merge slash command
+│   ├── memory-refresh.md             # in-session scoped mem-core refresh slash command
+│   └── memory-status.md           # pending source-vs-derived counts slash command
 ├── instructions/
 │   ├── agent-discipline.md    # agent behavior rules and guardrails
 ├── eshepherd/
@@ -316,7 +316,7 @@ Core policy runtime in place. The following are committed and usable now:
 - Cadence state persistence in `scripts/run-memory-consolidation-and-validation.ts` (`--cadence-state-file`)
 - OpenCode plugin/snippet/instruction assets in `plugin/`, `snippets/`, and `instructions/`
 - OpenCode slash commands in `command/` (both `command/` and `commands/` are recognized by OpenCode)
-- Command isolation defaults for memory mutations (`/count-sheep`, `/herd`, `/lucid-dream`, `/headcount` run as subtask-isolated dreamer passes; `/wake-up` runs in-session by design)
+- Command isolation defaults for memory mutations (`/consolidate`, `/memory-status`, `/consolidate-deep`, `/memory-status` run as subtask-isolated dreamer passes; `/memory-refresh` runs in-session by design)
 - Compaction-aware mem-core reinjection + scope-aware loader wiring in `plugin/turn-guard.ts` (`session.compacted`, `session.started`, `session.idle`)
 - consolidation write-authority guard in `plugin/turn-guard.ts` (alerts when non-dreamer agents call protected consolidation write tools)
 - OpenCode source-transcript capture verification heartbeat in `plugin/turn-guard.ts` with status output in `./.electric-shepherd/turn-guard-status.json`

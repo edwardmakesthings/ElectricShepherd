@@ -775,11 +775,35 @@ function pointerBullets(values: string[], formatter: (value: string) => string, 
 function pointerDescription(value: string | undefined, fallback: string): string {
   const text = asString(value).replace(/\s+/g, " ").trim();
   if (!text) return fallback;
+  if (looksLikeToolOutputFragment(text)) return fallback;
   return text.length > 100 ? `${text.slice(0, 97)}...` : text;
 }
 
+function normalizeSummaryLine(value: string): string {
+  return asString(value).replace(/\s+/g, " ").trim();
+}
+
+function looksLikeToolOutputFragment(text: string): boolean {
+  const line = normalizeSummaryLine(text);
+  if (!line) return true;
+  if (/^"(?:output|text)"\s*:/.test(line)) return true;
+  if (/^\{\s*"(?:info|output|drawers|messages|tool|time)"\s*:/.test(line)) return true;
+  if (/^\{b\[\d+:\d+\]\}/.test(line)) return true;
+  if (/\b(nudge\s+\d+\/\d+\s+this\s+session)\b/i.test(line)) return true;
+  if (line.includes('"id":"prt_') || line.includes('"sessionID":"ses_')) return true;
+  if ((line.includes('\\n') || line.includes('\\"')) && line.includes("{") && line.includes("}")) return true;
+  return false;
+}
+
 function factBullets(values: string[], max: number): string[] {
-  const unique = [...new Set(values.map((value) => asString(value).replace(/\s+/g, " ").trim()).filter(Boolean))];
+  const unique = [
+    ...new Set(
+      values
+        .map((value) => normalizeSummaryLine(value))
+        .filter(Boolean)
+        .filter((value) => !looksLikeToolOutputFragment(value)),
+    ),
+  ];
   if (unique.length === 0) return ["- (none)"];
   const out = unique.slice(0, max).map((value) => `- ${value.length > 200 ? `${value.slice(0, 197)}...` : value}`);
   if (unique.length > max) out.push(`- ... (${unique.length - max} more; see pointers below)`);
@@ -1064,35 +1088,21 @@ async function main(): Promise<void> {
     })),
   };
 
-  if (!enumerateAll && worklist.length === 0 && includeBasePipeline) {
-    const output = {
-      skipped: true,
-      reason: "nothing-unconsolidated",
-      mode: includeBasePipeline ? "full-pipeline" : "cadence-only",
-      worklistMode: worklistOptions.mode,
-      worklist: worklistOutput,
-    };
-    process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
-    releaseHeldConsolidationGuards();
-    return;
-  }
-
-  if (enumerateAll && worklist.length === 0 && includeBasePipeline) {
-    const output = {
-      skipped: true,
-      reason: "scope-empty",
-      mode: includeBasePipeline ? "full-pipeline" : "cadence-only",
-      worklistMode: worklistOptions.mode,
-      worklist: worklistOutput,
-    };
-    process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
-    releaseHeldConsolidationGuards();
-    return;
-  }
-
   if (includeBasePipeline) {
     const worklistChunks = chunkItems(worklist, worklistOptions.batchSize);
     const useLiveMapper = hasFlag(argv, "--use-live-mapper");
+
+    if (worklistChunks.length === 0) {
+      // Even with no new source drawers selected, render mem-core from the
+      // current synthesized memory state so refreshes are not blocked on
+      // creating new closets.
+      const emptyConsolidation = await runSynthesisConsolidation(client, {
+        ...consolidationOptions,
+        rawEntries: [],
+        runId,
+      });
+      consolidationBatches.push(emptyConsolidation);
+    }
 
 
     for (const chunk of worklistChunks) {

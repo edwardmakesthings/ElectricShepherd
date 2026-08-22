@@ -164,7 +164,7 @@ export default tool({
       unconsolidated_new_ids: pendingIDs.slice(0, 25),
       next_step:
         pendingIDs.length > 0
-          ? "Run /lucid-dream to consolidate the new material, or palace_report for a fuller room view."
+          ? "Run /consolidate-deep to consolidate the new material, or palace_report for a fuller room view."
           : "Nothing new is waiting on consolidation in the sampled rooms.",
     });
   },

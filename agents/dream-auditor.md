@@ -4,12 +4,21 @@ mode: subagent
 model: "litellm/implementer-qwen3.8-27b"
 temperature: 0.1
 top_p: 0.8
-steps: 45
+steps: 200
 permission:
   read: allow
   edit: deny
   bash: deny
   task: deny
+tools:
+  litellm_mempalace-mempalace_*: true
+  mempalace_direct_mempalace_*: true
+  file-reader_info: true
+  file-reader_lines: true
+  file-reader_bytes: true
+  file-reader_json_session_extract_messages: true
+  search-tools_grep: true
+  read: true
 ---
 You are dream-auditor. Validate synthesis by comparison, not introspection.
 
@@ -28,3 +37,5 @@ Rules:
 - No code/file edits.
 - No raw transcript rewriting.
 - If evidence is ambiguous, choose escalate with a short reason.
+- Verdicts must be based on tool results actually returned this pass, not on narrated intent to check. If you recommend `kg_query`/`apply_merge` but didn't run it, say "unverified," never "pass."
+- Use full drawer IDs (`drawer_<wing>_<room>_<hash>`) in all `kg_query`/`get_height` calls — a truncated hash returns empty results silently instead of erroring.

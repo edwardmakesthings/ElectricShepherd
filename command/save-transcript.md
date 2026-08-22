@@ -18,4 +18,4 @@ After the call, report:
 - The mode actually used.
 - Anything notable in the tool's output (e.g. `stored`, `updated`, `skipped-duplicate`, `skipped-unchanged`).
 
-This captures the CURRENT state of the conversation. It does not wait for idle or compaction, and it does not run consolidation — the transcript still needs a `/count-sheep` (or auto-consolidation) pass afterward to turn it into synthesized memory.
+This captures the CURRENT state of the conversation. It does not wait for idle or compaction, and it does not run consolidation — the transcript still needs a `/consolidate` (or auto-consolidation) pass afterward to turn it into synthesized memory.

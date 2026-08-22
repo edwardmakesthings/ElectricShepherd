@@ -53,9 +53,13 @@ import type { AutoConsolidationTrigger, MemcoreInjectionRecord } from "../adapte
 import { loadPackagedAssets, mergeWithoutOverride, loadInstructionPaths, dedupeAppendInstructions } from "../adapter/asset-loader.ts"
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts"
 import deleteDrawersTool from "../tools/delete_drawers.ts"
+import moveDrawersTool from "../tools/move_drawers.ts"
 import captureTranscriptTool from "../tools/capture_transcript.ts"
 import palaceReportTool from "../tools/palace_report.ts"
 import palaceDiffTool from "../tools/palace_diff.ts"
+import palaceListDrawersMultiRoomTool from "../tools/palace_list_drawers_multi_room.ts"
+import palaceHeightThresholdTool from "../tools/palace_height_threshold.ts"
+import palaceOrganizeMemoriesTool from "../tools/palace_organize_memories.ts"
 import exportDrawerTool from "../tools/export_drawer.ts"
 import relocateMemoryTool from "../tools/relocate_memory.ts"
 
@@ -233,7 +237,7 @@ const DEFAULT_SPIRAL_EXEMPT_MODEL_PREFIXES = ["copilot-"]
 const DEFAULT_ALLOWED_CONSOLIDATION_WRITERS = ["dreamer"]
 const CONSOLIDATION_WRITE_TOOL_NAMES = ["add_drawer", "update_drawer", "kg_add", "kg_invalidate", "apply_merge"]
 
-// Automatic consolidation ("count-sheep in the background"): OPT-IN. When enabled,
+// Automatic consolidation ("consolidate in the background"): OPT-IN. When enabled,
 // the plugin runs the deterministic consolidation script after the session has
 // either gone quiet for a delay (idle-timer) or accumulated enough new turns
 // (volume-threshold), and on compaction. The idle-timer is overridable: any new
@@ -1035,7 +1039,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
   const retryDisabledModes = toLowerSet(parseCSV(process?.env?.ESHEPHERD_RETRY_DISABLED_MODES))
   const consolidationWriteGuardEnabled = getBoolEnv("ESHEPHERD_CONSOLIDATION_WRITE_GUARD_ENABLED", true)
   const sourceCaptureVerifyEnabled = getBoolEnv("ESHEPHERD_SOURCE_CAPTURE_VERIFY_ENABLED", true)
-  // Automatic consolidation ("count-sheep in the background"): ON by default.
+  // Automatic consolidation ("consolidate in the background"): ON by default.
   // It triggers memory writes in the background, throttled by the idle delay,
   // message threshold, and cooldown below — so "on" means "occasionally," not
   // "every turn." Set ESHEPHERD_AUTO_CONSOLIDATION_ENABLED=false to opt out
@@ -2430,11 +2434,15 @@ export const TurnGuard = async ({ client, directory }: any) => {
         config.permission = {
           "*": permission,
           delete_drawers: "ask",
+          move_drawers: "ask",
         }
       } else {
         const currentPermission = permission && typeof permission === "object" ? permission : {}
         if (!Object.prototype.hasOwnProperty.call(currentPermission, "delete_drawers")) {
           currentPermission.delete_drawers = "ask"
+        }
+        if (!Object.prototype.hasOwnProperty.call(currentPermission, "move_drawers")) {
+          currentPermission.move_drawers = "ask"
         }
         config.permission = currentPermission
       }
@@ -2613,9 +2621,13 @@ export const TurnGuard = async ({ client, directory }: any) => {
     },
     tool: {
       delete_drawers: deleteDrawersTool,
+      move_drawers: moveDrawersTool,
       capture_transcript: captureTranscriptTool,
       palace_report: palaceReportTool,
       palace_diff: palaceDiffTool,
+      palace_list_drawers_multi_room: palaceListDrawersMultiRoomTool,
+      palace_height_threshold: palaceHeightThresholdTool,
+      palace_organize_memories: palaceOrganizeMemoriesTool,
       export_drawer: exportDrawerTool,
       relocate_memory: relocateMemoryTool,
     },

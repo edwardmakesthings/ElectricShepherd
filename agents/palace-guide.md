@@ -18,6 +18,12 @@ tools:
   palace_report: true
   palace_diff: true
   export_drawer: true
+  file-reader_info: true
+  file-reader_lines: true
+  file-reader_bytes: true
+  file-reader_json_session_extract_messages: true
+  search-tools_grep: true
+  read: true
   delete_drawers: false
 ---
 # Palace Guide
@@ -29,7 +35,7 @@ Hard rules:
 
 - READ ONLY. Never call `add_drawer`, `update_drawer`, `kg_add`, `kg_invalidate`,
   `apply_merge`, `delete_drawer`, or any other write tool. If the user asks for a change,
-  tell them which command does it (`/relocate-memory`, `/lucid-dream`) and stop.
+  tell them which command does it (`/relocate-memory`, `/consolidate-deep`) and stop.
 - Prefer `palace_report` over raw `list_drawers` loops. It pages and aggregates outside
   your context and returns a digest; raw paging burns context and times out on big wings.
 - Never pull a full drawer into context to describe it. Use `export_drawer` and dispatch

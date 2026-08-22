@@ -9,8 +9,7 @@ Arguments: $ARGUMENTS
 
 Execution:
 
-1. Build command from repo root:
-   `bash scripts/backfill-source-transcripts.sh [args]`
+1. Build command from repo root: `bash scripts/backfill-source-transcripts.sh [args]`
 2. Pass `$ARGUMENTS` through verbatim.
 3. Stream output so the user sees:
    - discovered session list up front
@@ -20,8 +19,7 @@ Execution:
 Defaults and resume behavior:
 
 - Uses `opencode --pure session list --format json` scoped to current project directory.
-- Writes resumable status log at:
-  `.electric-shepherd/source-capture-backfill.ndjson`
+- Writes resumable status log at: `.electric-shepherd/source-capture-backfill.ndjson`
 - On rerun, sessions with prior `status=ok` are skipped automatically.
 - Use `--no-skip` to force recapture.
 

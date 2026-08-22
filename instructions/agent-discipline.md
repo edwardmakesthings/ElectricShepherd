@@ -80,6 +80,33 @@ Use `dev-tools_verify` as the default end-of-task verifier for implementation wo
 
 Reason: one combined verify call is cheaper and reduces loop noise.
 
+## Missing MCP tool — ask, don't substitute (required)
+
+If a task genuinely requires a specific tool (e.g. `kg_query`, `get_ancestors`, `apply_merge`)
+and that tool is **not present** in your current toolset, do not silently fall back to a
+weaker substitute (e.g. `mempalace_search`) and report its result as if it answered the
+original question.
+
+`mempalace_search` is semantic/BM25 — it returns nearest neighbors, not exact-entity truth.
+It can suggest a fact is absent but can never prove it: a truncated/wrong entity ID, a stale
+index, or a genuinely-missing fact all look identical from a similarity-search result. Treat
+a "no relevant hits" result from `search` as **inconclusive**, never as a negative proof for
+questions that are actually graph/entity questions (consolidation status, KG edges, lineage,
+merge state).
+
+When the required tool is missing:
+1. State explicitly which tool is missing and why it's needed for this specific check
+   (e.g. "I need `dream_mempalace-mempalace_kg_query` enabled to confirm whether closet X
+   has an `es-status` edge — semantic search cannot prove a negative here").
+2. Ask the user to enable it, rather than proceeding on inference.
+3. If you must produce a result anyway, mark that specific claim as **unverified** (not
+   "false", not "confirmed") and say what tool call would resolve it.
+
+Also verify you are passing the **full drawer/entity ID** (`drawer_<wing>_<room>_<hash>`),
+not a truncated hash — `kg_query`/`get_ancestors` on a truncated ID silently return empty
+results instead of erroring, which looks identical to "no facts exist."
+
+
 ## Serena symbol-edit preflight (required)
 
 Before calling `serena_replace_symbol_body`, run `symbol-tools_preflight` first.

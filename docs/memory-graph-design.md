@@ -505,9 +505,9 @@ Current plugin/runtime state now closes these with deterministic wiring:
   correction prompts (authoritative hard denial still belongs in harness/tool-scope policy).
 - Gap #4: `turn-guard` emits OpenCode source transcript capture verification heartbeats and optional
   capture-command execution status to `./.electric-shepherd/turn-guard-status.json`.
-- Operator control surface: slash commands in `command/` (`/count-sheep`, `/herd`,
-  `/lucid-dream`, `/wake-up`, `/headcount`) provide explicit consolidation actions;
-  memory-mutating commands run as isolated subtasks, while `/wake-up` intentionally
+- Operator control surface: slash commands in `command/` (`/consolidate`, `/memory-status`,
+  `/consolidate-deep`, `/memory-refresh`, `/memory-status`) provide explicit consolidation actions;
+  memory-mutating commands run as isolated subtasks, while `/memory-refresh` intentionally
   runs in-session to refresh the active context.
 - Auto-consolidation hardening: idle/volume/compaction triggers are now guarded by
   cooldown + timeout watchdog + cross-process lockfile + process-tree kill +
@@ -567,7 +567,7 @@ was upside down. The fix is to give the loop to the script.
 **The loop (script-owned, resume-safe):**
 1. **Worklist (deterministic, no model):** query for source transcript drawers with no
    `synthesized-from` edge — i.e. unsynthesized. That's a graph query; it's the worklist.
-   Triggerable by a `/count-sheep`-style command that runs the *script*, not an agent.
+   Triggerable by a `/consolidate`-style command that runs the *script*, not an agent.
 2. **Per-item judgment (model as stateless function):** for each raw memory, one **bounded,
    isolated** model call — fresh context containing only that one transcript + a strict
    output schema ("read this, return this JSON"). No tools in this call (see §12a). The model
@@ -725,7 +725,7 @@ scope denial — no prompts. Build this **before** the graph-view inspection sur
   hard substrate enforcement — see scorecard).
 - **§12 factory inversion — partial / divergent.** The consolidation pass *is* a script that
   owns the loop (`scripts/run-memory-consolidation-and-validation.ts`: worklist-first,
-  batch-chunked, cross-process lock via `scripts/consolidation-lock.ts`, triggered by `/count-sheep`
+  batch-chunked, cross-process lock via `scripts/consolidation-lock.ts`, triggered by `/consolidate`
   and auto-consolidation-on-compact — not an agent-in-charge). But its *internal mechanics* still
   diverge from §12a–c: it talks to MemPalace over **MCP** (not as a library), uses **live
   subagent mappers/auditors** (not per-item bounded **no-tools** direct model calls), and has

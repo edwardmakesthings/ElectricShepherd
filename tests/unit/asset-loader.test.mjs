@@ -117,9 +117,9 @@ test("real bundled assets parse into the expected dreamer agents and commands", 
     assert.ok(typeof agents[name].prompt === "string" && agents[name].prompt.length > 0);
     assert.ok(agents[name].mode === "primary" || agents[name].mode === "subagent");
   }
-  for (const name of ["count-sheep", "herd", "lucid-dream", "wake-up", "headcount"]) {
+  for (const name of ["consolidate", "consolidate-deep", "memory-refresh", "memory-status"]) {
     assert.ok(commands[name], `expected bundled command ${name}`);
-    const expectedAgent = name === "count-sheep" ? "build" : "dreamer";
+    const expectedAgent = name === "consolidate" ? "build" : "dreamer";
     assert.equal(commands[name].agent, expectedAgent);
     assert.ok(typeof commands[name].template === "string" && commands[name].template.length > 0);
   }

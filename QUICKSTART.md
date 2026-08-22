@@ -91,7 +91,7 @@ MemPalace tool names vary by how MemPalace is registered with your MCP host:
 | Namespaced gateway | `<namespace>mempalace_search` | `<namespace>mempalace_` |
 
 For agent prompts (the dreamer and mapper subagents) you also need to state the full
-prefix in any agent prompt that calls MemPalace tools directly, or load `skills/mempalace/SKILL.md`
+prefix in any agent prompt that calls MemPalace tools directly, or load `skills/eshepherd/SKILL.md`
 as an additional instruction so the agent knows which names to use.
 
 For the TypeScript adapter (`adapter/memgraph.ts`), set the prefix in
@@ -299,7 +299,7 @@ Scheduler call the same entrypoint on a timer — there is no coupling, and the
 shared lock keeps a scheduled run from colliding with a plugin run:
 
 ```bash
-npm run sheep:lucid-dream   # == policy:cadence:execute --apply --apply-merges
+npm run sheep:consolidate-deep   # == policy:cadence:execute --apply --apply-merges
 ```
 
 > Testing/automation note: pass `--no-lock` (or set
@@ -318,18 +318,18 @@ to the `dreamer` agent. To keep an aside about memory from polluting the codebas
 session you are in, the consolidation commands run as **isolated subagents**
 (`subtask: true`): the dreamer works in its own context and only a short summary
 returns to your session (expand the subtask in the TUI to watch/debug it). The one
-exception is `/wake-up`, which deliberately runs **in-session** (`subtask: false`)
+exception is `/memory-refresh`, which deliberately runs **in-session** (`subtask: false`)
 because its whole purpose is to refresh the *current* session's memory.
 
 | Command | Does | Isolation | CLI / scheduler equivalent |
 |---|---|---|---|
-| `/count-sheep` | Standard consolidation: promote unconsolidated source drawers into closets + KG facts (additive only). | isolated subagent | `npm run sheep:count` |
-| `/herd` | Round-up/preview: list what is pending and what *would* consolidate — read-only, no writes. | isolated subagent | `npm run sheep:herd` |
-| `/lucid-dream` | Deep pass: consolidate **plus** merge/dedupe existing closets and run a drift audit. | isolated subagent | `npm run sheep:lucid-dream` |
-| `/wake-up` | Refresh and re-inject mem-core for the current scope. | in-session | `npm run sheep:wake-up` |
-| `/headcount` | Quick counts of pending source vs existing derived memories. | isolated subagent | — |
+| `/consolidate` | Standard consolidation: promote unconsolidated source drawers into closets + KG facts (additive only). | isolated subagent | `npm run sheep:count` |
+| `/memory-status` | Round-up/preview: list what is pending and what *would* consolidate — read-only, no writes. | isolated subagent | `npm run sheep:memory-status` |
+| `/consolidate-deep` | Deep pass: consolidate **plus** merge/dedupe existing closets and run a drift audit. | isolated subagent | `npm run sheep:consolidate-deep` |
+| `/memory-refresh` | Refresh and re-inject mem-core for the current scope. | in-session | `npm run sheep:memory-refresh` |
+| `/memory-status` | Quick counts of pending source vs existing derived memories. | isolated subagent | — |
 
-Each command takes an optional scope argument, e.g. `/count-sheep context-blocks`.
+Each command takes an optional scope argument, e.g. `/consolidate context-blocks`.
 
 > Note on "a different session": OpenCode commands can isolate work into a
 > subagent (above), which gives you the no-pollution benefit. They cannot, on
@@ -441,9 +441,7 @@ mem-core does not round-trip into MemPalace drawers and is not hand-authored. Hu
 
 | Snippet | When to use |
 |---|---|
-| `snippets/memload.md` | Session start when context is uncertain |
-| `snippets/memsave.md` | Before ending substantial work |
-| `skills/mempalace/SKILL.md` | When doing intensive memory work (add to instructions temporarily) |
+| `skills/eshepherd/SKILL.md` | When doing intensive memory work (add to instructions temporarily) |
 
 ## Architecture reference
 

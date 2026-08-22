@@ -4,7 +4,7 @@ mode: subagent
 model: "litellm/implementer-qwen3.8-27b"
 temperature: 0.1
 top_p: 0.85
-steps: 35
+steps: 120
 permission:
   read: allow
   edit: deny
@@ -13,6 +13,12 @@ permission:
 tools:
   litellm_mempalace-mempalace_*: true
   mempalace_direct_mempalace_*: true
+  file-reader_info: true
+  file-reader_lines: true
+  file-reader_bytes: true
+  file-reader_json_session_extract_messages: true
+  search-tools_grep: true
+  read: true
 ---
 # Dream Mapper
 
@@ -31,15 +37,12 @@ Finish with: CONFIDENCE: high|medium|low - one-line reason.
 
 OFF_SCOPE_MATERIAL (how the user's misfiled asides get found):
 
-A session filed under one project routinely contains a sustained aside about a different
-one. Report each such passage as:
+A session filed under one project routinely contains a sustained aside about a different one. Report each such passage as:
 
 `- <topic> | belongs_to: <project/subject> | start: "<exact first line>" | end: "<exact last line>" | ~<n> lines`
 
-- The `start` and `end` values must be copied EXACTLY from the transcript. They are used to
-  slice the passage verbatim later; an approximated line makes the passage unrecoverable.
-- Only report sustained passages worth retrieving on their own. A one-line mention of
-  another project is not off-scope material.
+- The `start` and `end` values must be copied EXACTLY from the transcript. They are used to slice the passage verbatim later; an approximated line makes the passage unrecoverable.
+- Only report sustained passages worth retrieving on their own. A one-line mention of another project is not off-scope material.
 - Write `- (none)` when the transcript stays on topic. Do not manufacture candidates.
 
 Rules:
