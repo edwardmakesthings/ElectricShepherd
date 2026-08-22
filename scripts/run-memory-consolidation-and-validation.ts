@@ -1059,6 +1059,8 @@ async function main(): Promise<void> {
       room: item.room,
       desc: item.desc,
       filed_at: item.filed_at,
+      source_file: item.source_file,
+      added_by: item.added_by,
     })),
   };
 

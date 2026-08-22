@@ -666,7 +666,23 @@ function classifyMemoryTools(toolNames: string[]): { reads: string[]; writes: st
   return { reads, writes }
 }
 
-async function runSourceCaptureCommand(projectRoot: string, sid: string, eventType: string): Promise<{ attempted: boolean; ok: boolean; output?: string; error?: string }> {
+async function runSourceCaptureCommand(
+  projectRoot: string,
+  sid: string,
+  eventType: string,
+): Promise<{
+  attempted: boolean;
+  ok: boolean;
+  output?: string;
+  error?: string;
+  status?: string;
+  mode?: string;
+  wing?: string;
+  room?: string;
+  source_file?: string;
+  drawer_id?: string;
+  location?: string;
+}> {
   const configured = String(process?.env?.ESHEPHERD_SOURCE_CAPTURE_CMD || "").trim()
   // Default script resolves inside the ElectricShepherd install (ESHEPHERD_ROOT),
   // not the consumer project's root — the script ships with the plugin and
@@ -699,7 +715,33 @@ async function runSourceCaptureCommand(projectRoot: string, sid: string, eventTy
     // String(output) on it produced "[object Object]" in the event log. Read
     // .stdout explicitly (fall back to stderr if stdout is empty).
     const text = String(output?.stdout ?? "").trim() || String(output?.stderr ?? "").trim()
-    return { attempted: true, ok: true, output: text.slice(-2000) }
+    const lines = text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+    const location = lines.find((line) => line.startsWith("mempalace://"))
+    const jsonLine = lines.find((line) => line.startsWith("{") && line.endsWith("}"))
+    let parsed: Record<string, unknown> = {}
+    if (jsonLine) {
+      try {
+        const candidate = JSON.parse(jsonLine)
+        if (candidate && typeof candidate === "object") parsed = candidate as Record<string, unknown>
+      } catch {
+        // keep parsed empty on malformed line
+      }
+    }
+    return {
+      attempted: true,
+      ok: true,
+      output: text.slice(-2000),
+      status: typeof parsed.status === "string" ? parsed.status : undefined,
+      mode: typeof parsed.mode === "string" ? parsed.mode : undefined,
+      wing: typeof parsed.wing === "string" ? parsed.wing : undefined,
+      room: typeof parsed.room === "string" ? parsed.room : undefined,
+      source_file: typeof parsed.source_file === "string" ? parsed.source_file : undefined,
+      drawer_id: typeof parsed.drawer_id === "string" ? parsed.drawer_id : undefined,
+      location,
+    }
   } catch (err) {
     return { attempted: true, ok: false, error: String(err) }
   }

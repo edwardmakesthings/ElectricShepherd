@@ -25,6 +25,8 @@ export type SourceDrawerWorkItem = {
   desc?: string;
   filed_at?: string;
   content?: string;
+  source_file?: string;
+  added_by?: string;
 };
 
 // Short base names — no prefix. MemPalace natively exposes these as `mempalace_<base>`.
@@ -173,10 +175,54 @@ export class MemgraphClient {
         desc: this.asString(row.desc || row.title || row.summary).trim() || undefined,
         filed_at: this.asString(row.filed_at || row.created_at).trim() || undefined,
         content: this.asString(row.content || row.text).trim() || undefined,
+        source_file: this.asString(row.source_file || this.asObject(row.metadata).source_file).trim() || undefined,
+        added_by: this.asString(row.added_by || this.asObject(row.metadata).added_by).trim() || undefined,
       });
     }
 
     return out;
+  }
+
+  private normalizeSourceFileKey(sourceFile?: string): string {
+    const value = this.asString(sourceFile).trim();
+    if (!value) return "";
+    return value.replace(/#chunk-\d+-of-\d+$/, "");
+  }
+
+  private collapseChunkedSourceItems(items: SourceDrawerWorkItem[]): SourceDrawerWorkItem[] {
+    const out: SourceDrawerWorkItem[] = [];
+    const byBase = new Map<string, SourceDrawerWorkItem>();
+
+    for (const item of items) {
+      const rawSource = this.asString(item.source_file).trim();
+      const baseSource = this.normalizeSourceFileKey(rawSource);
+      if (!baseSource) {
+        out.push(item);
+        continue;
+      }
+
+      const existing = byBase.get(baseSource);
+      if (!existing) {
+        byBase.set(baseSource, item);
+        continue;
+      }
+
+      const existingRaw = this.asString(existing.source_file).trim();
+      const existingIsRoot = existingRaw === baseSource;
+      const itemIsRoot = rawSource === baseSource;
+      if (!existingIsRoot && itemIsRoot) {
+        byBase.set(baseSource, item);
+        continue;
+      }
+
+      const existingFiledAt = this.asString(existing.filed_at).trim();
+      const itemFiledAt = this.asString(item.filed_at).trim();
+      if (itemFiledAt && (!existingFiledAt || itemFiledAt < existingFiledAt)) {
+        byBase.set(baseSource, item);
+      }
+    }
+
+    return [...out, ...byBase.values()];
   }
 
   async createDerivedDrawer(args: {
@@ -682,7 +728,7 @@ export class MemgraphClient {
       }
     }
 
-    return out;
+    return this.collapseChunkedSourceItems(out);
   }
 
   async findUnconsolidatedSourceDrawers(args: {

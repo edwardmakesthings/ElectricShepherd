@@ -66,19 +66,118 @@ export default tool({
     }
 
     const execFileAsync = promisify(execFile);
+    const timeoutMs = getNumberEnv("ESHEPHERD_SOURCE_CAPTURE_TIMEOUT_MS", 60000);
     try {
       const output = await execFileAsync("/bin/sh", ["-c", command], {
         cwd: ESHEPHERD_ROOT,
         encoding: "utf8",
         maxBuffer: 2 * 1024 * 1024,
-        timeout: getNumberEnv("ESHEPHERD_SOURCE_CAPTURE_TIMEOUT_MS", 20000),
+        timeout: timeoutMs,
         killSignal: "SIGKILL",
         env: childEnv,
       });
       const text = String(output?.stdout ?? "").trim() || String(output?.stderr ?? "").trim();
-      return JSON.stringify({ ok: true, sid, mode: args.mode || "(configured default)", output: text.slice(-2000) }, null, 2);
+      const lines = text
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+      const location = lines.find((line) => line.startsWith("mempalace://"));
+      const jsonLine = lines.find((line) => line.startsWith("{") && line.endsWith("}"));
+      let parsed: Record<string, unknown> = {};
+      if (jsonLine) {
+        try {
+          const candidate = JSON.parse(jsonLine) as unknown;
+          if (candidate && typeof candidate === "object") parsed = candidate as Record<string, unknown>;
+        } catch {
+          // keep parsed empty if line is malformed
+        }
+      }
+      return JSON.stringify(
+        {
+          ok: true,
+          sid,
+          mode: args.mode || "(configured default)",
+          status: typeof parsed.status === "string" ? parsed.status : undefined,
+          wing: typeof parsed.wing === "string" ? parsed.wing : undefined,
+          room: typeof parsed.room === "string" ? parsed.room : undefined,
+          source_file: typeof parsed.source_file === "string" ? parsed.source_file : undefined,
+          drawer_id: typeof parsed.drawer_id === "string" ? parsed.drawer_id : undefined,
+          location,
+          output: text.slice(-2000),
+        },
+        null,
+        2,
+      );
     } catch (err) {
-      return JSON.stringify({ ok: false, sid, error: String(err) }, null, 2);
+      const e = err as {
+        killed?: boolean;
+        signal?: string | null;
+        code?: string | number;
+        stdout?: string;
+        stderr?: string;
+        message?: string;
+      };
+      const stderrTail = String(e?.stderr ?? "").trim().slice(-1500);
+      const stdoutTail = String(e?.stdout ?? "").trim().slice(-500);
+
+      // execFile sets killed+signal only when the timeout option fired.
+      if (e?.killed && (e.signal === "SIGKILL" || e.signal === "SIGTERM")) {
+        return JSON.stringify(
+          {
+            ok: false,
+            sid,
+            error:
+              `capture_transcript: timed out after ${timeoutMs}ms and was killed (${e.signal}). ` +
+              "Large sessions can legitimately take longer to export and duplicate-check. Raise " +
+              "ESHEPHERD_SOURCE_CAPTURE_TIMEOUT_MS if this session is unusually large. A timeout " +
+              "during the duplicate-check step does not mean capture failed -- this session's " +
+              "content may already be stored in MemPalace from an earlier capture.",
+            timeoutMs,
+            killedBySignal: e.signal,
+          },
+          null,
+          2,
+        );
+      }
+
+      if (e?.code === "ENOENT") {
+        return JSON.stringify(
+          {
+            ok: false,
+            sid,
+            error:
+              "capture_transcript: capture command or a required dependency was not found on PATH. " +
+              "Check that the configured ESHEPHERD_SOURCE_CAPTURE_CMD script and its dependencies " +
+              "(opencode, python3) are resolvable in the environment running this plugin.",
+          },
+          null,
+          2,
+        );
+      }
+
+      if (String(e?.message || "").toLowerCase().includes("maxbuffer")) {
+        return JSON.stringify(
+          {
+            ok: false,
+            sid,
+            error: "capture_transcript: capture script output exceeded the internal buffer limit.",
+          },
+          null,
+          2,
+        );
+      }
+
+      return JSON.stringify(
+        {
+          ok: false,
+          sid,
+          error: `capture_transcript: capture script failed${e?.code !== undefined ? ` (exit code ${e.code})` : ""}.`,
+          stderr: stderrTail || undefined,
+          stdout: stdoutTail || undefined,
+        },
+        null,
+        2,
+      );
     }
   },
 });

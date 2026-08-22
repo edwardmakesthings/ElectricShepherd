@@ -51,10 +51,38 @@ fi
 # --cwd must be the CONSUMER project (not this repo) so wing/room/config resolve
 # against the project actually being captured; the plugin sets ESHEPHERD_PROJECT_ROOT
 # when it spawns this script with cwd=repo_root. Falls back to $PWD for standalone runs.
+preserve_runtime_override() {
+  local key="$1"
+  local val="$2"
+  export "$key=$val"
+}
+
 if command -v node >/dev/null 2>&1; then
+  preserve_capture_keep_local="${ESHEPHERD_CAPTURE_KEEP_LOCAL+x}"
+  preserve_capture_keep_local_val="${ESHEPHERD_CAPTURE_KEEP_LOCAL-}"
+  preserve_capture_root="${ESHEPHERD_CAPTURE_ROOT+x}"
+  preserve_capture_root_val="${ESHEPHERD_CAPTURE_ROOT-}"
+  preserve_capture_mode="${ESHEPHERD_SOURCE_CAPTURE_MODE+x}"
+  preserve_capture_mode_val="${ESHEPHERD_SOURCE_CAPTURE_MODE-}"
+  preserve_capture_timeout="${ESHEPHERD_SOURCE_CAPTURE_MCP_TIMEOUT_SECONDS+x}"
+  preserve_capture_timeout_val="${ESHEPHERD_SOURCE_CAPTURE_MCP_TIMEOUT_SECONDS-}"
+
   config_exports="$(node --experimental-strip-types "$repo_root/scripts/emit-runtime-config-env.ts" --cwd "${ESHEPHERD_PROJECT_ROOT:-$PWD}" 2>/dev/null || true)"
   if [[ -n "$config_exports" ]]; then
     eval "$config_exports"
+  fi
+
+  if [[ -n "$preserve_capture_keep_local" ]]; then
+    preserve_runtime_override "ESHEPHERD_CAPTURE_KEEP_LOCAL" "$preserve_capture_keep_local_val"
+  fi
+  if [[ -n "$preserve_capture_root" ]]; then
+    preserve_runtime_override "ESHEPHERD_CAPTURE_ROOT" "$preserve_capture_root_val"
+  fi
+  if [[ -n "$preserve_capture_mode" ]]; then
+    preserve_runtime_override "ESHEPHERD_SOURCE_CAPTURE_MODE" "$preserve_capture_mode_val"
+  fi
+  if [[ -n "$preserve_capture_timeout" ]]; then
+    preserve_runtime_override "ESHEPHERD_SOURCE_CAPTURE_MCP_TIMEOUT_SECONDS" "$preserve_capture_timeout_val"
   fi
 fi
 
@@ -98,6 +126,7 @@ mcp_auth_scheme="${MEMPALACE_MCP_AUTH_SCHEME:-}"
 mcp_headers_json="${MEMPALACE_MCP_HEADERS_JSON:-}"
 source_capture_tool_prefix="${ESHEPHERD_SOURCE_CAPTURE_TOOL_PREFIX:-${MEMGRAPH_TOOL_PREFIX:-mempalace_}}"
 source_capture_dedup_enabled="${ESHEPHERD_SOURCE_CAPTURE_DEDUP_ENABLED:-true}"
+mcp_timeout_seconds="${ESHEPHERD_SOURCE_CAPTURE_MCP_TIMEOUT_SECONDS:-60}"
 # Capture mode:
 #   append  -> always write a new timestamped source drawer snapshot
 #   replace -> maintain one stable latest snapshot per session (update in place)
@@ -129,7 +158,7 @@ if [[ ! -s "$tmpfile" ]]; then
   exit 4
 fi
 
-"$PYBIN" - "$tmpfile" "$mcp_url" "$mcp_api_key" "$wing" "$room" "$added_by" "$source_file_append" "$source_file_latest" "$event_type" "$source_capture_mode" "$mcp_auth_header" "$mcp_auth_scheme" "$mcp_headers_json" "$source_capture_tool_prefix" "$source_capture_dedup_enabled" <<'PY'
+"$PYBIN" - "$tmpfile" "$mcp_url" "$mcp_api_key" "$wing" "$room" "$added_by" "$source_file_append" "$source_file_latest" "$event_type" "$source_capture_mode" "$mcp_auth_header" "$mcp_auth_scheme" "$mcp_headers_json" "$source_capture_tool_prefix" "$source_capture_dedup_enabled" "$mcp_timeout_seconds" "$script_dir" <<'PY'
 import json
 import re
 import sys
@@ -151,12 +180,23 @@ import urllib.request
   headers_json,
   tool_prefix,
   dedup_enabled_raw,
-) = sys.argv[1:16]
+  timeout_seconds_raw,
+  script_dir,
+) = sys.argv[1:18]
 session_id = None
 dedup_enabled = dedup_enabled_raw.strip().lower() in {"1", "true", "yes", "on"}
 capture_mode = capture_mode_raw.strip().lower() if capture_mode_raw else "append"
+try:
+  timeout_seconds = float(timeout_seconds_raw)
+except (TypeError, ValueError):
+  timeout_seconds = 60.0
+if timeout_seconds <= 0:
+  timeout_seconds = 60.0
 if capture_mode not in {"append", "replace", "hybrid"}:
   capture_mode = "append"
+
+sys.path.insert(0, script_dir)
+from transcript_capture_normalization import normalize_capture_content
 
 if capture_mode == "append":
   ingest_mode = "append"
@@ -223,7 +263,7 @@ def mcp_post(body: dict) -> dict:
     headers=headers,
     method="POST",
   )
-  with urllib.request.urlopen(req, timeout=60) as resp:
+  with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
     sid = resp.headers.get("Mcp-Session-Id")
     if sid:
       session_id = sid
@@ -299,6 +339,133 @@ def decode_tool_json(response: dict):
     return {}
 
 
+def extract_drawer_id(payload: dict):
+  if not isinstance(payload, dict):
+    return None
+  for key in ("drawer_id", "id", "node_id"):
+    value = payload.get(key)
+    if isinstance(value, str) and value.strip():
+      return value.strip()
+  nested = payload.get("drawer")
+  if isinstance(nested, dict):
+    for key in ("drawer_id", "id", "node_id"):
+      value = nested.get(key)
+      if isinstance(value, str) and value.strip():
+        return value.strip()
+  return None
+
+
+def require_tool_success(payload: dict, action: str) -> None:
+  if not isinstance(payload, dict):
+    return
+  success = payload.get("success")
+  if success is False:
+    error = payload.get("error")
+    detail = str(error).strip() if error is not None else "unknown error"
+    raise RuntimeError(f"{action} failed: {detail}")
+
+
+def chunk_text(text: str, limit: int):
+  if limit <= 0:
+    return [text]
+  out = []
+  start = 0
+  n = len(text)
+  while start < n:
+    out.append(text[start:start + limit])
+    start += limit
+  return out
+
+
+def add_with_chunking(base_args: dict, source_key: str) -> dict:
+  payload = dict(base_args)
+  parsed = decode_tool_json(tool_call(2, tool_add, payload))
+  if isinstance(parsed, dict) and parsed.get("success") is False:
+    error = str(parsed.get("error") or "")
+    if "maximum length" not in error:
+      require_tool_success(parsed, "add_drawer")
+      return {
+        "status": "stored",
+        "mode": ingest_mode,
+        "wing": wing,
+        "room": room,
+        "source_file": source_key,
+        "drawer_id": extract_drawer_id(parsed),
+        "tool_result": parsed,
+      }
+
+    content_value = str(payload.get("content") or "")
+    chunks = chunk_text(content_value, 95_000)
+    if len(chunks) <= 1:
+      require_tool_success(parsed, "add_drawer")
+
+    first_payload = dict(payload)
+    first_payload["content"] = chunks[0]
+    first_parsed = decode_tool_json(tool_call(2, tool_add, first_payload))
+    require_tool_success(first_parsed, "add_drawer")
+    first_id = extract_drawer_id(first_parsed)
+    if not first_id:
+      raise RuntimeError("add_drawer failed: chunked root drawer missing drawer_id")
+
+    child_ids = []
+    for index, piece in enumerate(chunks[1:], start=1):
+      child_payload = dict(payload)
+      child_payload["content"] = piece
+      child_payload["source_file"] = f"{source_key}#chunk-{index + 1:03d}-of-{len(chunks):03d}"
+      child_parsed = decode_tool_json(tool_call(2000 + index, tool_add, child_payload))
+      require_tool_success(child_parsed, "add_drawer")
+      child_id = extract_drawer_id(child_parsed)
+      if child_id:
+        child_ids.append(child_id)
+
+    try:
+      root_existing = None
+      for drawer in iter_drawers_by_source_file(source_key):
+        root_existing = drawer
+        break
+      if root_existing is not None:
+        root_id = str(root_existing.get("drawer_id", "") or "").strip()
+        if root_id:
+          root_content = str(root_existing.get("content", "") or "")
+          marker = {
+            "chunked_capture": True,
+            "chunks": len(chunks),
+            "chunk_ids": [root_id, *child_ids],
+            "source_file": source_key,
+          }
+          update_payload = {
+            "drawer_id": root_id,
+            "content": root_content + "\n\n" + json.dumps(marker),
+          }
+          update_result = decode_tool_json(tool_call(3000, tool_update, update_payload))
+          require_tool_success(update_result, "update_drawer")
+    except Exception:
+      pass
+
+    return {
+      "status": "stored-chunked",
+      "mode": ingest_mode,
+      "wing": wing,
+      "room": room,
+      "source_file": source_key,
+      "drawer_id": first_id,
+      "chunks": len(chunks),
+      "chunk_count": len(chunks),
+      "tool_result": first_parsed,
+    }
+
+  require_tool_success(parsed, "add_drawer")
+  return {
+    "status": "stored",
+    "mode": ingest_mode,
+    "wing": wing,
+    "room": room,
+    "source_file": source_key,
+    "drawer_id": extract_drawer_id(parsed),
+    "tool_result": parsed,
+  }
+
+
 def iter_drawers_by_source_file(source_key: str):
   offset = 0
   limit = 100
@@ -330,7 +497,8 @@ def iter_drawers_by_source_file(source_key: str):
 
 
 with open(payload_path, "r", encoding="utf-8") as fh:
-  content = fh.read().strip()
+  payload_raw = fh.read()
+content = normalize_capture_content(payload_raw)
 
 if not content:
   raise SystemExit("capture-source-transcripts: exported payload is empty")
@@ -349,6 +517,8 @@ if ingest_mode == "append" and dedup_enabled:
     is_dup = bool(dup_parsed.get("is_duplicate", False))
 
   if is_dup:
+    with open(payload_path, "w", encoding="utf-8") as out_f:
+      out_f.write(payload_raw)
     print(json.dumps({
       "status": "skipped-duplicate",
       "mode": ingest_mode,
@@ -389,7 +559,8 @@ if ingest_mode == "replace":
         "content": content,
       },
     )
-    decode_tool_json(update_resp)
+    update_parsed = decode_tool_json(update_resp)
+    require_tool_success(update_parsed, "update_drawer")
     print(json.dumps({
       "status": "updated",
       "mode": ingest_mode,
@@ -397,12 +568,11 @@ if ingest_mode == "replace":
       "room": room,
       "source_file": source_file_latest,
       "drawer_id": existing_id,
+      "tool_result": update_parsed,
     }))
     raise SystemExit(0)
 
-  add_resp = tool_call(
-    2,
-    tool_add,
+  stored = add_with_chunking(
     {
       "wing": wing,
       "room": room,
@@ -410,19 +580,11 @@ if ingest_mode == "replace":
       "source_file": source_file_latest,
       "added_by": added_by,
     },
+    source_file_latest,
   )
-  decode_tool_json(add_resp)
-  print(json.dumps({
-    "status": "stored",
-    "mode": ingest_mode,
-    "wing": wing,
-    "room": room,
-    "source_file": source_file_latest,
-  }))
+  print(json.dumps(stored))
 else:
-  add_resp = tool_call(
-    2,
-    tool_add,
+  stored = add_with_chunking(
     {
       "wing": wing,
       "room": room,
@@ -430,15 +592,9 @@ else:
       "source_file": source_file_append,
       "added_by": added_by,
     },
+    source_file_append,
   )
-  decode_tool_json(add_resp)
-  print(json.dumps({
-    "status": "stored",
-    "mode": ingest_mode,
-    "wing": wing,
-    "room": room,
-    "source_file": source_file_append,
-  }))
+  print(json.dumps(stored))
 PY
 
 if [[ "$capture_keep_local" == "true" ]]; then
