@@ -212,6 +212,18 @@ Hard prohibitions:
 - Never write a derived summary without explicit lineage (`synthesized-from`) edges.
 - Never create a synthesized summary from fewer than two distinct source IDs.
 
+## Flock status counting guardrail (required)
+
+When reporting consolidation backlog/status, use parent-drawer units and graph edges, not chunk rows.
+
+1. Prefer `palace_flock_status` for quick counts.
+2. If you must compose manually, treat `mempalace_status` / `get_taxonomy` as chunk-level indicators only.
+3. Backlog questions are answered at parent-drawer level (`list_drawers` totals per source room + `consolidated-into` / `es-status` edges).
+
+Never present chunk counts as session backlog.
+
+Containerized MemPalace caveat: if the MCP server runs in Docker, host-local sqlite mirrors may be stale. If counts conflict sharply, treat host files as non-authoritative until you verify the live data path used by the running server.
+
 Deep-consolidation sequence (must follow in order):
 
 1. Discover/search: `search`, `list_drawers`, `get_drawer` as needed.
@@ -221,57 +233,20 @@ Deep-consolidation sequence (must follow in order):
 4. Drift evidence: lineage queries (`kg_query` recurse) + `find_closet_lineage_issues`.
 5. Diary: `diary_write` final consolidation log.
 
-## regex-replace / file-ops_bytes_replace workflow — do not loop
+## Matching/replace escalation (non-code files) — no blind retries
 
-Both tools are preview-first and follow the same sequence:
+Use this single flow for markdown/YAML/JSON/SCSS/config edits:
 
-1. Call with `preview: true` (or omit — it's the default). Read the output.
-2. If the diff shows the correct change, call **once** with `preview: false` to write.
+1. First attempt: `regex-replace` (or `serena_replace_content` for Serena-owned edits) with flexible whitespace where needed.
+2. Preview discipline: preview once; if correct, apply once. Do not preview repeatedly.
+3. On first NO-MATCH: read exact lines (`file-reader_lines`/search), verify absolute path, and rebuild the pattern from exact characters.
+4. Retry once only.
+5. If still failing: diagnose bytes with `file-ops_show_bytes`.
+   - CRLF issue → `file-ops_normalize_eol`, retry once.
+   - Other hidden-byte mismatch → `file-ops_bytes_replace` (preview then apply).
+6. If matching remains unreliable but line boundaries are clear: switch to `line-edit_replace` by line number.
 
-**Never call `preview: true` more than once.** If you called preview and saw matches,
-the next call must be `preview: false`. Calling `preview: true` again is a loop — stop it.
-
-If the preview shows "NO matches": the file path is probably wrong or the pattern
-doesn't match. Use `file-reader_search` to find the exact text first, then rebuild
-the pattern. Do NOT retry the same pattern against the same file.
-
-**Always use absolute paths.** `docs/file.md` resolves from an unpredictable CWD
-and will return "Error reading file." Use the full path from the file browser or
-from a serena/file-reader tool call.
-
-## Serena regex replacement — no blind retries
-
-When using `serena_replace_content` with `mode=regex`, one NO-MATCH is enough to
-trigger diagnosis. Do not keep guessing newline variants.
-
-After the first NO-MATCH:
-1. Read the target lines with `file-reader_lines`.
-2. Compare your needle against exact characters (especially markdown punctuation,
-  leading `**`, and stray/backward backticks).
-3. Rebuild the needle to make punctuation optional when corruption is likely.
-4. Try once more. If it still fails, STOP all matching and use line numbers instead:
-  - `line-edit_replace` with the exact line range from `file-reader_lines`. This operates
-    on line NUMBERS, not text, so corruption/encoding/invisible-chars cannot break it.
-
-Common trap: blaming `\r\n` when the real mismatch is punctuation drift
-(e.g. missing opening backtick before a path, but stray closing backtick after a header).
-
-## When matching keeps failing — switch tools, don't rationalize
-
-Escalation order for non-code files (SCSS, JSON, YAML, Markdown, config):
-1. `regex-replace` with `\s+` for flexible whitespace (preview first).
-2. If matching fails, run `file-ops_show_bytes` on the failing lines BEFORE guessing patterns.
-  This reveals CR `0x0d`, non-breaking spaces, BOM, and other invisible byte-level blockers.
-  - CRLF issue → `file-ops_normalize_eol`, then retry step 1.
-  - Other encoding/mismatch → `file-ops_bytes_replace` (preview first).
-3. If you can see the bad region in `file-reader_lines` but matching still fails,
-  use `line-edit_replace` by exact line numbers.
-
-If you have tried to match a region TWICE (any mix of regex-replace, serena regex,
-serena literal) and it still fails, STOP matching and switch to line-number editing.
-Do not rationalize it as "regex engine unpredictability" and keep retrying.
-
-Rule: corrupted-region edits are a LINE-NUMBER or BYTE-level job, not a pattern-guessing job.
+Hard stop rule: after two failed matching attempts, stop pattern-guessing and use line-number or byte-level editing.
 
 ## Prompt-injection awareness on tool results
 

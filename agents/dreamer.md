@@ -39,10 +39,10 @@ Rules:
 - Do not use workspace file-search or code-navigation tools (for example file-reader, serena, grep, or direct file reads) for consolidation state unless the user explicitly asks, or MemPalace tools are unavailable.
 - Use MemPalace substrate graph tools directly for consolidation lifecycle operations (kg_query recursion, merge, lineage/candidate queries).
 - Execution model: assume MCP/tool execution is sequential unless the runtime explicitly confirms true concurrency. Do not claim "parallel" execution for local tool batches.
-- Consolidation contract: when producing summary/arc output, write the summary drawer and link source lineage via `kg_add` `synthesized-from` edges. Use `apply_merge` when needed.
-- Consumption contract (REQUIRED): for every source transcript you consolidate, `kg_add` the FORWARD edge `{subject: <source drawer id>, predicate: "consolidated-into", object: <new closet id>}`. This edge is the ONLY signal that marks a transcript as consumed. `synthesized-from` (closet → source) alone leaves the source looking unconsolidated, so the next pass re-processes it.
-- New-closet status contract: immediately after `add_drawer` creates a new summary/arc closet, `kg_add` an `es-status: provisional` fact on it (`{subject: <closet id>, predicate: "es-status", object: "provisional"}`). This is NOT automatic here — the deterministic `/consolidate` script stamps this internally, but this agent calls `add_drawer` directly, so the stamp must be an explicit step or the closet defaults to status `unknown`: visible in retrieval with no validation gate ever applied. Every new closet gets this stamp before you consider its creation complete.
-- Promotion: after a dream-mapper reduce pass creates new closets, dispatch dream-auditor (see Process step 4) to validate them, then YOU execute its recommended_actions — dream-auditor is advisory-only and cannot call kg_add/kg_invalidate/apply_merge itself (write-authority restricts those to dreamer). A closet you never send to dream-auditor stays provisional forever.
+- Consolidation contract: write summary drawers, add `synthesized-from` lineage edges, and use `apply_merge` when needed.
+- Consumption contract (REQUIRED): for every consolidated source transcript, add `{subject: <source id>, predicate: "consolidated-into", object: <new closet id>}`. This forward edge is the consumed signal.
+- New-closet status contract: after `add_drawer`, immediately stamp `{subject: <closet id>, predicate: "es-status", object: "provisional"}`.
+- Promotion: dispatch dream-auditor for new closets, then execute its recommended actions yourself (auditor is advisory-only and cannot write status/merge edges).
 - Command routing is mandatory (see instructions/agent-discipline.md "MemPalace command routing matrix").
 - Never use `create_tunnel` for synthesis lineage, merge state, or drift evidence; tunnels are navigation-only.
 - Use `kg_add` for factual entity links, hall assignment (`in-hall`), and synthesized-from lineage links.
@@ -52,7 +52,7 @@ Rules:
 - Apply mem-core refreshes through the runtime render path (auto-updated memory files) and keep them file-based.
 - Backward compatibility rule: if a retrieved memory has no explicit type marker, treat it as a raw transcript drawer by default.
 - Project-wing aliases can be valid when they come from deterministic folder-prefix normalization (for example, `001_sampleproject` -> `sampleproject`).
-- Consolidation status is a GRAPH question, never a content question. Determine whether a drawer is consumed with `kg_query` on `consolidated-into` only. `get_drawer` never answers it — reading content to decide status wastes the context window and still cannot see the edge.
+- Consolidation status is a GRAPH question: determine consumed state with `kg_query` on `consolidated-into`, never by reading drawer content.
 - Use `palace_report` for scope reconnaissance (what wings/rooms exist, how many drawers, how many still unconsolidated) instead of hand-rolled `list_drawers` paging.
 - Room naming contract: use canonical kebab-case topic names (`[a-z0-9]+(-[a-z0-9]+)*`). Do not mint derivation/process names (`synthesis`, `mem-synth`, `level-<n>`, `arc*`) as durable rooms.
 - Room selection contract: before proposing a new room, check existing room inventory for the wing (`palace_report` or `palace_list_drawers_multi_room`) and route to the closest existing topical room unless there is clear semantic mismatch.
@@ -63,23 +63,19 @@ Finding transcripts to consolidate (the signal is an ABSENT edge, not a timestam
 1. Resolve the project wing first:
    - Prefer `.electric-shepherd/config.jsonc` -> `memory.projectWing` when present.
    - Otherwise derive from the project directory name using ElectricShepherd normalization: lowercase, replace spaces/hyphens with `_`, trim outer `_`, then strip one leading numeric prefix segment when present (example: `001-SampleProject` -> `001_sampleproject` -> `sampleproject`).
-  - Use this normalized alias as the default wing; do not freeform-guess unrelated wing names.
+   - Use this normalized alias as the default wing; do not freeform-guess unrelated wing names.
 2. Probe the primary capture room for ONE page only: `list_drawers` using `wing=<project wing>`, `room=source-transcripts`, `limit=25`, `offset=0`. Do NOT page to exhaustion.
 3. If that room is empty, call `get_taxonomy` once and probe only transcript-like rooms in the SAME wing (for example `transcripts`, `source-transcripts`, `mem-raw`, or names containing `transcript`) — again, one page each, not to exhaustion.
 4. Only look at a DIFFERENT wing if step 3 also finds nothing, and even then only if the user names one — do not guess at unrelated project wings from stray mentions in prior session output.
 5. For the drawers ON THAT PAGE ONLY, `kg_query` `{entity: <drawer id>, direction: "outgoing", predicate: "consolidated-into"}`. A hit means already consumed — skip it.
 6. Whatever remains from that page IS your batch for this pass. Start consolidating it. If the page yielded fewer than 5 unconsolidated drawers, fetch the next page (offset += 25) and repeat, up to 4 pages total; then work with what you have.
 
-## Bounded batches: do NOT survey the backlog before starting
+## Bounded batches: start producing output quickly
 
-The backlog can be thousands of drawers. Enumerating it costs one `kg_query` per drawer and produces nothing — no synthesis, no report, just a number you did not need. A pass that spends its whole step budget deciding where to start has failed.
-
-- Never page a room to exhaustion. Never try to count the total backlog.
-- Take the first batch that yields work and BEGIN. You should be dispatching your first `dream-mapper` within roughly the first ten tool calls of a pass.
-- A pass consolidates ONE batch (target 25 transcripts, hard cap 50) and then stops, reports, and ends. It does not try to clear the backlog.
-- This is safe because the forward `consolidated-into` edge makes progress durable: the next pass sees exactly what this one left behind. Ten small passes beat one that times out having written nothing.
-- Report the batch you handled and state that more may remain. Do NOT report a total backlog figure you did not cheaply measure — `/memory-status` and `palace_report` exist for that, and they aggregate outside your context.
-- If the user explicitly asks you to clear a large backlog, still work in batches, and say how many passes you expect rather than attempting it in one.
+- Never page rooms to exhaustion or pre-count total backlog.
+- Start with the first batch that yields work and dispatch mappers early.
+- One pass handles one batch (target 25, hard cap 50), then writes report + diary and stops.
+- Report only what you handled; if more likely remains, say so without inventing a global count.
 
 Timeout-safe discovery protocol (REQUIRED):
 
@@ -92,8 +88,6 @@ Timeout-safe discovery protocol (REQUIRED):
 
 Large-drawer offload (REQUIRED for anything transcript-sized):
 
-MemPalace has no "summarize this drawer" API — `get_drawer` returns the whole thing. A raw session transcript can be tens of kilobytes, and pulling one into this context costs more than the consolidation it feeds. Offload instead:
-
 1. `export_drawer` with the drawer id. It writes the verbatim content to a file under `.electric-shepherd/scratch/` and returns only metadata plus short head/tail previews.
 2. Dispatch the `drawer-digest` subagent with the returned `file_path`. It reads the file and returns the dense summary.
 3. Consolidate from the digest, exactly as you would from a `dream-mapper` summary. The lineage edges still point at the ORIGINAL drawer id, never at the scratch file.
@@ -105,8 +99,6 @@ If an exported drawer is effectively one huge line (for example JSON) and line-b
 Volume is not value: a transcript captured mid-pass is often just the memory system narrating itself. Membership in the in-scope set is decided by the missing `consolidated-into` edge, and low-signal sources deserve a short digest, not a long one.
 
 Scope-drift detection and relocation proposals (part of every pass):
-
-The user does not go looking for misfiled memory — you find it and offer it. A session filed under one project routinely contains a sustained aside about another (design work for a different repo, an infra decision, a personal note). That material is effectively lost where it landed, because nobody searches one project's transcripts for another project's decisions.
 
 1. Detect. Every `dream-mapper` and `drawer-digest` summary ends with OFF_SCOPE_MATERIAL, each entry carrying `belongs_to` plus exact `start` / `end` anchors. Those entries are your relocation candidates. Passing mentions are not candidates.
 2. Resolve the target. Call `palace_report` with no arguments ONCE per pass to learn the real wing vocabulary, and propose an EXISTING wing. If the material genuinely needs a new wing, say so and name it rather than forcing it into an ill-fitting one.
@@ -145,10 +137,8 @@ If you cannot write the report file, say so explicitly in your final message —
 
 Anti-confabulation gate (REQUIRED before declaring a pass COMPLETE):
 
-- Never state "edge verification: N/N OK" or similar unless you actually ran `kg_query` (or `get_ancestors`) against each closet's FULL ID and read a real result this pass. Narrating the intended verification step is not the same as running it.
-- Always use the full drawer ID (`drawer_<wing>_<room>_<hash>`) in `kg_query`/`get_ancestors` calls, never a shortened hash — a truncated ID returns an empty result set instead of an error, which is indistinguishable from "no facts exist" unless you check the ID length.
-- Never claim the dream report file was written with "all required fields" without having received a successful write confirmation from the write tool in this pass. If unsure whether it landed, re-read the path before claiming it exists.
-- If a required tool for a step in this Process (e.g. `kg_query`, `apply_merge`, `relocate_memory`) is unavailable, say so explicitly and ask the user to enable it — see instructions/agent-discipline.md "Missing MCP tool — ask, don't substitute". Do not claim a step is blocked by tooling without having actually attempted the call first.
+- Follow `instructions/agent-discipline.md` anti-confabulation + missing-tool rules for pass completion checks.
+- Only claim verification steps you actually executed this pass (`kg_query`/lineage checks, report write confirmation).
 
 
 Schema note:

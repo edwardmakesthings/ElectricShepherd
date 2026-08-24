@@ -20,6 +20,7 @@ export type MemgraphToolMap = {
 
 export type SourceDrawerWorkItem = {
   drawer_id: string;
+  family_drawer_ids?: string[];
   wing?: string;
   room?: string;
   desc?: string;
@@ -78,6 +79,14 @@ export type MemgraphClientOptions = {
   toolMap?: Partial<MemgraphToolMap>;
 };
 
+type ListSourceScopeArgs = {
+  wing?: string;
+  room?: string;
+  limit?: number;
+  offset?: number;
+  pageSize?: number;
+};
+
 export class MemgraphClient {
   private readonly callTool: ToolCaller;
   private readonly tools: MemgraphToolMap;
@@ -89,6 +98,17 @@ export class MemgraphClient {
 
   private async call(name: keyof MemgraphToolMap, args?: JsonMap): Promise<JsonMap> {
     return this.callTool(this.tools[name], args || {});
+  }
+
+  private shouldRetryWithDreamNamespacedTool(err: unknown): boolean {
+    const message = String(err || "").toLowerCase();
+    if (!message) return false;
+    return (
+      message.includes("not allowed") ||
+      message.includes("not found") ||
+      message.includes("unknown tool") ||
+      message.includes("no such tool")
+    );
   }
 
   private asObject(value: unknown): JsonMap {
@@ -192,14 +212,21 @@ export class MemgraphClient {
   private collapseChunkedSourceItems(items: SourceDrawerWorkItem[]): SourceDrawerWorkItem[] {
     const out: SourceDrawerWorkItem[] = [];
     const byBase = new Map<string, SourceDrawerWorkItem>();
+    const familyByBase = new Map<string, Set<string>>();
 
     for (const item of items) {
       const rawSource = this.asString(item.source_file).trim();
       const baseSource = this.normalizeSourceFileKey(rawSource);
       if (!baseSource) {
-        out.push(item);
+        out.push({
+          ...item,
+          family_drawer_ids: [item.drawer_id],
+        });
         continue;
       }
+
+      if (!familyByBase.has(baseSource)) familyByBase.set(baseSource, new Set<string>());
+      familyByBase.get(baseSource)?.add(item.drawer_id);
 
       const existing = byBase.get(baseSource);
       if (!existing) {
@@ -222,7 +249,38 @@ export class MemgraphClient {
       }
     }
 
-    return [...out, ...byBase.values()];
+    const grouped = [...byBase.entries()].map(([baseSource, representative]) => ({
+      ...representative,
+      family_drawer_ids: [...(familyByBase.get(baseSource) || new Set<string>([representative.drawer_id]))],
+    }));
+
+    return [...out, ...grouped];
+  }
+
+  async getOutgoingObjects(entity: string, predicate: string): Promise<string[]> {
+    const result = await this.kgQuery({
+      entity,
+      direction: "outgoing",
+      predicate,
+      recurse: false,
+      max_depth: 1,
+    }).catch(() => ({}));
+    return this.uniqueFromFactsByDirection(this.parseKgFacts(result), "outgoing");
+  }
+
+  async isSourceDrawerConsolidated(drawerId: string): Promise<boolean> {
+    const forward = await this.getOutgoingObjects(drawerId, "consolidated-into");
+    if (forward.length > 0) return true;
+
+    const incoming = await this.kgQuery({
+      entity: drawerId,
+      direction: "incoming",
+      predicate: "synthesized-from",
+      recurse: false,
+      max_depth: 1,
+    }).catch(() => ({}));
+    const incomingSynth = this.uniqueFromFactsByDirection(this.parseKgFacts(incoming), "incoming");
+    return incomingSynth.length > 0;
   }
 
   async createDerivedDrawer(args: {
@@ -512,6 +570,7 @@ export class MemgraphClient {
         wing: rowWing || undefined,
         room: rowRoom || undefined,
         desc: this.asString(row.desc || row.title || row.summary).trim() || undefined,
+        content: this.asString(row.content).trim() || undefined,
         labels,
         height: this.asNumber(heightRes.height, 0),
         retrieval_count: this.asNumber(row.retrieval_count || this.asObject(row.metadata).retrieval_count, 0),
@@ -602,7 +661,16 @@ export class MemgraphClient {
     wing?: string;
     room?: string;
   }) {
-    return this.call("updateDrawer", args as unknown as JsonMap);
+    return this.callWithUpdateDrawerFallback(args as unknown as JsonMap);
+  }
+
+  private async callWithUpdateDrawerFallback(args: JsonMap): Promise<JsonMap> {
+    try {
+      return await this.call("updateDrawer", args);
+    } catch (err) {
+      if (!this.shouldRetryWithDreamNamespacedTool(err)) throw err;
+      return this.callTool("dream_mempalace-mempalace_update_drawer", args);
+    }
   }
 
   kgAdd(args: {
@@ -693,19 +761,30 @@ export class MemgraphClient {
     return this.call("getDrawer", args as unknown as JsonMap);
   }
 
-  async listSourceDrawersByScope(args: {
-    wing?: string;
-    room?: string;
-    limit?: number;
-    offset?: number;
-  }): Promise<SourceDrawerWorkItem[]> {
-    const res = await this.listDrawers({
-      wing: args.wing,
-      room: args.room,
-      limit: args.limit,
-      offset: args.offset,
-    });
-    const candidates = this.parseRawMemoryItems(res);
+  async listSourceDrawersByScope(args: ListSourceScopeArgs): Promise<SourceDrawerWorkItem[]> {
+    const limit = Math.max(1, Math.floor(this.asNumber(args.limit, 200)));
+    const offsetStart = Math.max(0, Math.floor(this.asNumber(args.offset, 0)));
+    const configuredPageSize = Math.max(1, Math.floor(this.asNumber(args.pageSize, 50)));
+    const pageSize = Math.min(limit, configuredPageSize);
+    const candidates: SourceDrawerWorkItem[] = [];
+    let offset = offsetStart;
+
+    while (candidates.length < limit) {
+      const remaining = limit - candidates.length;
+      const requestLimit = Math.max(1, Math.min(pageSize, remaining));
+      const res = await this.listDrawers({
+        wing: args.wing,
+        room: args.room,
+        limit: requestLimit,
+        offset,
+      });
+      const pageCandidates = this.parseRawMemoryItems(res);
+      if (pageCandidates.length === 0) break;
+      candidates.push(...pageCandidates);
+      if (pageCandidates.length < requestLimit) break;
+      offset += requestLimit;
+    }
+
     const out: SourceDrawerWorkItem[] = [];
 
     for (const item of candidates) {
@@ -731,43 +810,13 @@ export class MemgraphClient {
     return this.collapseChunkedSourceItems(out);
   }
 
-  async findUnconsolidatedSourceDrawers(args: {
-    wing?: string;
-    room?: string;
-    limit?: number;
-    offset?: number;
-  }): Promise<SourceDrawerWorkItem[]> {
+  async findUnconsolidatedSourceDrawers(args: ListSourceScopeArgs): Promise<SourceDrawerWorkItem[]> {
     const rawItems = await this.listSourceDrawersByScope(args);
     const out: SourceDrawerWorkItem[] = [];
 
     for (const item of rawItems) {
       try {
-        // P1-3: forward check — if the source has an outgoing consolidated-into edge,
-        // it's already been consumed by a consolidation run; skip it.
-        const forwardEdges = await this.kgQuery({
-          entity: item.drawer_id,
-          direction: "outgoing",
-          predicate: "consolidated-into",
-          recurse: false,
-          max_depth: 1,
-        });
-        const forwardConsolidated = this.uniqueFromFactsByDirection(this.parseKgFacts(forwardEdges), "outgoing");
-        if (forwardConsolidated.length > 0) {
-          continue // already consolidated; skip
-        }
-
-        // Legacy backward check: also exclude if incoming synthesized-from exists
-        const incoming = await this.kgQuery({
-          entity: item.drawer_id,
-          direction: "incoming",
-          predicate: "synthesized-from",
-          recurse: false,
-          max_depth: 1,
-        });
-        const incomingSynth = this.uniqueFromFactsByDirection(this.parseKgFacts(incoming), "incoming");
-        if (incomingSynth.length === 0) {
-          out.push(item);
-        }
+        if (!(await this.isSourceDrawerConsolidated(item.drawer_id))) out.push(item);
       } catch {
         // Conservative fallback: if lineage inspection fails, keep the item in
         // the worklist so consolidation does not silently miss a raw memory.

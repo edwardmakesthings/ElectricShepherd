@@ -75,7 +75,12 @@ async function main(): Promise<void> {
   const mcpHeaders = resolveMCPHeadersFromEnv(runtimeProcess.env);
   const args = parseArgs(runtimeProcess.argv.slice(2));
 
-  const mcp = new MCPHttpClient(mcpURL, mcpHeaders, { clientName: "electric-shepherd-policy" });
+  const mcp = new MCPHttpClient(mcpURL, mcpHeaders, {
+    clientName: "electric-shepherd-policy",
+    requestTimeoutMs: Number(runtimeProcess.env.ESHEPHERD_MCP_REQUEST_TIMEOUT_MS || "60000"),
+    maxRetries: Number(runtimeProcess.env.ESHEPHERD_MCP_MAX_RETRIES || "2"),
+    retryBackoffMs: Number(runtimeProcess.env.ESHEPHERD_MCP_RETRY_BACKOFF_MS || "800"),
+  });
   await mcp.initialize();
 
   const client = createMemgraphClient({

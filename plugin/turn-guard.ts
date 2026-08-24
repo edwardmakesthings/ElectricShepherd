@@ -56,6 +56,7 @@ import deleteDrawersTool from "../tools/delete_drawers.ts"
 import moveDrawersTool from "../tools/move_drawers.ts"
 import captureTranscriptTool from "../tools/capture_transcript.ts"
 import palaceReportTool from "../tools/palace_report.ts"
+import palaceFlockStatusTool from "../tools/palace_flock_status.ts"
 import palaceDiffTool from "../tools/palace_diff.ts"
 import palaceListDrawersMultiRoomTool from "../tools/palace_list_drawers_multi_room.ts"
 import palaceHeightThresholdTool from "../tools/palace_height_threshold.ts"
@@ -1243,6 +1244,34 @@ export const TurnGuard = async ({ client, directory }: any) => {
       return { agent, model }
     }
 
+    const fromSession = await resolveSessionPromptRouting(sid)
+    if (!agent) agent = fromSession.agent
+    if (!model) model = fromSession.model
+
+    const resolved: {
+      agent?: string
+      model?: { providerID: string; modelID: string }
+    } = {}
+    if (agent) resolved.agent = agent
+    if (model) resolved.model = model
+    if (resolved.agent || resolved.model) {
+      activeRoutingBySession.set(sid, resolved)
+    }
+    return resolved
+  }
+
+  async function resolveSessionPromptRouting(sid: string): Promise<{
+    agent?: string
+    model?: { providerID: string; modelID: string }
+  }> {
+    const cached = activeRoutingBySession.get(sid) ?? {}
+    let agent = cached.agent
+    let model = cached.model
+
+    if (agent && model) {
+      return { agent, model }
+    }
+
     try {
       const res: any = await client.session.messages({
         path: { id: sid },
@@ -1502,7 +1531,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
   //     endpoint can never wedge the in-flight flag permanently.
   //   - settle() is idempotent, so exit/error/timeout racing each other only
   //     clears state once.
-  function runConsolidationCommand(sid: string, trigger: string, onStartFailure?: () => void): void {
+  async function runConsolidationCommand(sid: string, trigger: string, onStartFailure?: () => void): Promise<void> {
     const configured = String(process?.env?.ESHEPHERD_AUTO_CONSOLIDATION_CMD || "").trim()
     const startedAt = new Date().toISOString()
     console.log(`[turn-guard] auto-consolidation start sid=${sid} trigger=${trigger}`)
@@ -1537,6 +1566,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
     }
 
     try {
+      const routing = await resolveSessionPromptRouting(sid)
       const childEnv = {
         ...process.env,
         ESHEPHERD_SESSION_ID: sid,
@@ -1548,6 +1578,9 @@ export const TurnGuard = async ({ client, directory }: any) => {
         ESHEPHERD_CONSOLIDATION_LOCK_INHERITED: "1",
         // cwd is the plugin install; the consumer project owns the memory artifacts.
         ESHEPHERD_PROJECT_ROOT: projectRoot,
+        ESHEPHERD_ACTIVE_AGENT: routing.agent,
+        ESHEPHERD_ACTIVE_MODEL_PROVIDER_ID: routing.model?.providerID,
+        ESHEPHERD_ACTIVE_MODEL_ID: routing.model?.modelID,
       }
       // detached:true makes the child a process-group leader on POSIX so the
       // watchdog can kill the entire tree (see killProcessTree); harmless on
@@ -1661,6 +1694,10 @@ export const TurnGuard = async ({ client, directory }: any) => {
     runConsolidationCommand(sid, decision.reason, () => {
       if (previousLastRunAt === null) autoConsolidationLastRunAt.delete(sid)
       else autoConsolidationLastRunAt.set(sid, previousLastRunAt)
+    }).catch((err) => {
+      console.error("[turn-guard] auto-consolidation trigger failed:", err)
+      autoConsolidationInFlight = false
+      releaseAutoConsolidationLock(projectRoot)
     })
   }
 
@@ -2624,6 +2661,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
       move_drawers: moveDrawersTool,
       capture_transcript: captureTranscriptTool,
       palace_report: palaceReportTool,
+      palace_flock_status: palaceFlockStatusTool,
       palace_diff: palaceDiffTool,
       palace_list_drawers_multi_room: palaceListDrawersMultiRoomTool,
       palace_height_threshold: palaceHeightThresholdTool,

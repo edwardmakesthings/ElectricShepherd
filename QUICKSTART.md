@@ -314,16 +314,15 @@ discovered via `OPENCODE_CONFIG_DIR` (the same mechanism that loads the agents i
 this repo uses the singular `command/`.
 
 The commands are **prompts**, not raw script calls — each markdown template is sent
-to the `dreamer` agent. To keep an aside about memory from polluting the codebase
-session you are in, the consolidation commands run as **isolated subagents**
-(`subtask: true`): the dreamer works in its own context and only a short summary
-returns to your session (expand the subtask in the TUI to watch/debug it). The one
-exception is `/memory-refresh`, which deliberately runs **in-session** (`subtask: false`)
-because its whole purpose is to refresh the *current* session's memory.
+to its configured agent (`agent:` in the command frontmatter). To keep an aside about memory
+from polluting the codebase session you are in, commands marked `subtask: true` run as
+**isolated subagents**: that agent works in its own context and only a short summary
+returns to your session (expand the subtask in the TUI to watch/debug it). Commands with
+`subtask: false` run in-session.
 
 | Command | Does | Isolation | CLI / scheduler equivalent |
 |---|---|---|---|
-| `/consolidate` | Standard consolidation: promote unconsolidated source drawers into closets + KG facts (additive only). | isolated subagent | `npm run sheep:count` |
+| `/consolidate` | Standard consolidation: promote unconsolidated source drawers into closets + KG facts (additive only). Supports `apply`, `all`, `retry-failed`, `live`, `room=...`, `processed-room=...`, `failed-room=...`. | isolated subagent | `npm run sheep:count` |
 | `/memory-status` | Round-up/preview: list what is pending and what *would* consolidate — read-only, no writes. | isolated subagent | `npm run sheep:memory-status` |
 | `/consolidate-deep` | Deep pass: consolidate **plus** merge/dedupe existing closets and run a drift audit. | isolated subagent | `npm run sheep:consolidate-deep` |
 | `/memory-refresh` | Refresh and re-inject mem-core for the current scope. | in-session | `npm run sheep:memory-refresh` |

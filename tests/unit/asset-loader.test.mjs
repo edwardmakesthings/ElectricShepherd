@@ -119,7 +119,7 @@ test("real bundled assets parse into the expected dreamer agents and commands", 
   }
   for (const name of ["consolidate", "consolidate-deep", "memory-refresh", "memory-status"]) {
     assert.ok(commands[name], `expected bundled command ${name}`);
-    const expectedAgent = name === "consolidate" ? "build" : "dreamer";
+    const expectedAgent = "dreamer";
     assert.equal(commands[name].agent, expectedAgent);
     assert.ok(typeof commands[name].template === "string" && commands[name].template.length > 0);
   }

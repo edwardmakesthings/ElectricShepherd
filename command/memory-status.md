@@ -15,7 +15,9 @@ Scope: $ARGUMENTS (default: the current project's memory if no scope is given). 
 - Approximate backlog (source memories not yet represented in any synthesized-from summary node).
 - Whether that backlog is above the auto-consolidation volume threshold (ESHEPHERD_AUTO_CONSOLIDATION_MESSAGE_THRESHOLD) — i.e. whether a `/consolidate` is due.
 
-Get these from `palace_report` / aggregate graph queries, not by listing every drawer in scope. On a large backlog, do not enumerate it to get an exact number — report a sampled estimate and say the sample size, same disclosure `/palace-diff` uses.
+Fast path for quick counts: call `palace_flock_status` first. It counts at parent-drawer granularity (not chunk rows) and returns the exact fields this command needs.
+
+Fallback only if unavailable: use `palace_report` + aggregate graph queries, not by listing every drawer in scope. On a large backlog, do not enumerate it to get an exact number — report a sampled estimate and say the sample size, same disclosure `/palace-diff` uses.
 
 ## Detail (only when the caller asked for it)
 

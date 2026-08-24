@@ -49,5 +49,6 @@ Rules:
 
 - Read-only; never write memory.
 - No subagent delegation.
-- Transcript source must come from MemPalace-provided content for the assigned drawer/scope, not workspace file searching.
+- Transcript source must be the drawer/scope the Dreamer assigned you -- either MemPalace content for that drawer, or an `export_drawer` file path it hands you. Your file-reader and grep tools are for reading THAT assigned source; never go looking through the workspace for other material.
+- If the assigned source is a long or multi-day transcript, use the outline-first protocol: `file-reader_json_session_extract_messages` with `roles: ["user"]` for a table of contents (each message carries its TRUE index), then re-read the segments that matter without the role filter. Do not read start-to-finish and truncate.
 - If transcript quality is poor or truncated, set low confidence instead of inventing content.

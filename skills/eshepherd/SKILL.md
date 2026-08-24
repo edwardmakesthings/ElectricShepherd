@@ -113,6 +113,60 @@ consult this table first.
 
 ---
 
+## Electric Shepherd tools (NOT MemPalace MCP — local plugin tools)
+
+These wrap the MCP calls above and do the paging/aggregation OUTSIDE your context. Prefer
+them over hand-rolled `list_drawers` loops, which burn context and time out on big wings.
+
+| What you want to do | Tool |
+|---|---|
+| Fast flock/consolidation backlog quick counts (parent units + provisional) | `palace_flock_status` |
+| Survey wings/rooms/counts without loading content | `palace_report` |
+| What changed recently vs the period before | `palace_diff` |
+| List several rooms in ONE call | `palace_list_drawers_multi_room` |
+| Find drawers at or above a synthesis height | `palace_height_threshold` |
+| Propose room/wing cleanup (read-only) | `palace_organize_memories` |
+| Write a drawer to disk + get metadata only | `export_drawer` |
+| Re-file a drawer, or lift a verbatim excerpt | `relocate_memory` |
+| Move drawers in bulk between scopes | `move_drawers` |
+| Delete drawers by ID or scope | `delete_drawers` |
+| Force-capture THIS session's transcript now | `capture_transcript` |
+
+Large drawers: never `get_drawer` a transcript into context. `export_drawer` writes it to
+`.electric-shepherd/scratch/` and returns metadata plus head/tail previews; dispatch the
+`drawer-digest` subagent against the returned `file_path`.
+
+Flock status fast path: for `/memory-status` quick counts, call `palace_flock_status` first.
+It already normalizes chunk-vs-parent counting and returns unconsolidated sources, summary-node
+count, provisional count, backlog estimate, and threshold decision in one call.
+
+---
+
+## Consumption and status predicates (Electric Shepherd conventions)
+
+These are as load-bearing as `synthesized-from`, and are NOT MemPalace built-ins:
+
+| Predicate | Meaning | Who writes it |
+|---|---|---|
+| `consolidated-into` | `{subject: source drawer, object: closet}`. The ONLY signal that a source is consumed. Without it the next pass re-processes the same transcript, because `synthesized-from` (closet -> source) leaves the source looking untouched. | dreamer / consolidation script |
+| `es-status` | `provisional` at closet creation; promoted to `active` only after validation confirms >= 2 DIRECT sources. Retrieval and mem-core render exclude `provisional` by default. | dreamer / validation pass |
+
+Consolidation status is a GRAPH question, never a content question: answer it with
+`kg_query` on `consolidated-into`. Reading drawer content cannot see the edge.
+
+---
+
+## Room naming
+
+- Wings are `snake_case` (derived from directory normalization); rooms are `kebab-case`.
+- Name rooms for PURPOSE or SUBSYSTEM, never derivation level. `synthesis`, `mem-synth`,
+  `level-<n>`, `arc*` are rejected names — height already encodes level, computed from the
+  `synthesized-from` DAG via `mempalace_get_height`.
+- Call `get_taxonomy` before minting a room and reuse an existing one. Near-duplicate names
+  (`layout` vs `layout-system`) split a topic across rooms that never co-retrieve.
+
+---
+
 ## Command selection rules (use this first)
 
 Choose by intent, not by similarity of names:
@@ -208,9 +262,9 @@ ones (e.g. when a source is superseded).
 
 | Tier | Room convention | Tool |
 |---|---|---|
-| raw transcripts | diary (tagged by session) | Never write — append-only source |
+| raw transcripts | default `source-transcripts` room in the project wing (configurable via source-capture room / consolidation `--room`; legacy setups may use `transcripts`) | `add_drawer` by the capture pipeline only — never hand-write, never edit; append-only source |
 | summaries + facts | any wing, any room except context-blocks | `add_drawer`, `diary_write`, `kg_add`, `kg_invalidate` |
-| mem-core | directory-scoped runtime-rendered files (`.electric-shepherd/memory`) | none directly; runtime render pipeline |
+| mem-core | directory-scoped runtime-rendered files (`.electric-shepherd/memory`) | none directly. Rendered as part of consolidation pipeline runs (`--include-base-pipeline`); `run-mem-core-loader.ts` READS rendered files, it does not produce them. |
 
 The runtime regenerates mem-core outputs from consolidated summaries/facts. mem-core is file-only and loaded by
 directory scope; agents do not write mem-core directly, and it is not mirrored into MemPalace drawers.

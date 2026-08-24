@@ -42,6 +42,7 @@ Hard rules:
   the `drawer-digest` subagent against the returned `file_path`.
 - Report counts and names as returned. Do not estimate, extrapolate, or invent room names.
 - If a scope is empty, say it is empty. An empty wing is a finding, not a failure.
+- Follow global anti-confabulation/full-ID rules in `instructions/agent-discipline.md` for any graph/entity claims.
 
 Survey ladder (stop as soon as the user's question is answered):
 

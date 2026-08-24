@@ -37,6 +37,10 @@ export type MCPHttpClientOptions = {
   clientVersion?: string;
   /** Maximum time in milliseconds to wait for a single request before aborting. */
   requestTimeoutMs?: number;
+  /** Retries for transient transport failures (timeout/network). */
+  maxRetries?: number;
+  /** Base backoff in milliseconds between retries. */
+  retryBackoffMs?: number;
 };
 
 export class MCPHttpClient {
@@ -47,6 +51,8 @@ export class MCPHttpClient {
   private readonly clientName: string;
   private readonly clientVersion: string;
   private readonly requestTimeoutMs: number;
+  private readonly maxRetries: number;
+  private readonly retryBackoffMs: number;
 
   constructor(
     url: string,
@@ -60,6 +66,8 @@ export class MCPHttpClient {
     this.clientName = options.clientName || "electric-shepherd";
     this.clientVersion = options.clientVersion || "0.1.0";
     this.requestTimeoutMs = Number(options.requestTimeoutMs ?? 600000);
+    this.maxRetries = Math.max(0, Math.floor(Number(options.maxRetries ?? 2)));
+    this.retryBackoffMs = Math.max(1, Math.floor(Number(options.retryBackoffMs ?? 800)));
   }
 
   private nextID(): number {
@@ -92,6 +100,21 @@ export class MCPHttpClient {
     return JSON.parse(lastData) as MCPResponse;
   }
 
+  private async sleep(ms: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private shouldRetryError(err: unknown): boolean {
+    const maybe = err as { name?: unknown; message?: unknown };
+    const name = typeof maybe?.name === "string" ? maybe.name : "";
+    if (name === "AbortError") return true;
+
+    if (err instanceof TypeError) return true;
+
+    const message = typeof maybe?.message === "string" ? maybe.message : "";
+    return /timeout|timed out|network|fetch failed/i.test(message);
+  }
+
   private async post(payload: MCPMessage): Promise<MCPResponse> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -102,30 +125,41 @@ export class MCPHttpClient {
       headers["Mcp-Session-Id"] = this.sessionId;
     }
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
 
-    try {
-      const response = await fetch(this.url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
+      try {
+        const response = await fetch(this.url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
 
-      const sessionHeader = response.headers.get("Mcp-Session-Id");
-      if (sessionHeader) {
-        this.sessionId = sessionHeader;
+        const sessionHeader = response.headers.get("Mcp-Session-Id");
+        if (sessionHeader) {
+          this.sessionId = sessionHeader;
+        }
+
+        const text = await response.text();
+        if (!response.ok) {
+          throw new Error(`MCP HTTP ${response.status}: ${text.slice(0, 300)}`);
+        }
+        return this.parseResponsePayload(text);
+      } catch (err) {
+        if (attempt >= this.maxRetries || !this.shouldRetryError(err)) {
+          throw err;
+        }
+        const jitterMs = Math.floor(Math.random() * 120);
+        const backoffMs = Math.min(this.retryBackoffMs * 2 ** attempt + jitterMs, 8000);
+        await this.sleep(backoffMs);
+      } finally {
+        clearTimeout(timeout);
       }
-
-      const text = await response.text();
-      if (!response.ok) {
-        throw new Error(`MCP HTTP ${response.status}: ${text.slice(0, 300)}`);
-      }
-      return this.parseResponsePayload(text);
-    } finally {
-      clearTimeout(timeout);
     }
+
+    throw new Error("MCP request retry loop exhausted");
 
   }
 

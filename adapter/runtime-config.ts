@@ -60,6 +60,9 @@ const DEFAULT_SPIRAL_EXEMPT_MODEL_PREFIXES = ["copilot-"]
 export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
   { envKey: "MEMPALACE_MCP_URL", path: "mcp.url", kind: "string", defaultValue: "http://localhost:8093/mcp" },
   { envKey: "ESHEPHERD_MCP_AUTO_DISCOVER", path: "mcp.autoDiscover", kind: "boolean", defaultValue: true },
+  { envKey: "ESHEPHERD_MCP_REQUEST_TIMEOUT_MS", path: "mcp.requestTimeoutMs", kind: "number", defaultValue: 60000, min: 1 },
+  { envKey: "ESHEPHERD_MCP_MAX_RETRIES", path: "mcp.maxRetries", kind: "number", defaultValue: 2, min: 0 },
+  { envKey: "ESHEPHERD_MCP_RETRY_BACKOFF_MS", path: "mcp.retryBackoffMs", kind: "number", defaultValue: 800, min: 1 },
   { envKey: "ESHEPHERD_PYTHON_BIN", path: "mcp.pythonBin", kind: "string", defaultValue: "python" },
   { envKey: "MEMGRAPH_TOOL_PREFIX", path: "mcp.toolPrefix", kind: "string", defaultValue: "mempalace_" },
   { envKey: "MEMPALACE_MCP_AUTH_HEADER", path: "mcp.authHeader", kind: "string", defaultValue: "Authorization" },

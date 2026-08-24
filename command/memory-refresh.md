@@ -1,16 +1,49 @@
 ---
-description: Memory refresh — re-render mem-core for the current scope
+description: Memory refresh — report what mem-core currently holds for this scope, and whether it is stale
 agent: dreamer
 subtask: false
 ---
-Refresh my working memory for the current scope.
+Show me the working memory that is actually loaded for this scope.
 
 Scope: $ARGUMENTS (default: the current working directory)
 
-Steps:
-1. Re-render the mem-core memory files for this scope from the latest synthesis state.
-2. Report which memory files were loaded — from broad scope (project root) down to narrow scope (current directory) — and a short summary of what changed since they were last rendered.
+## What this command can and cannot do
 
-Note: rendering excludes `es-status: provisional` closets by default (unvalidated syntheses don't reach mem-core). If you just ran /consolidate-deep or /consolidate and expect to see brand-new content here, it may still be provisional — run /memory-status to check, or dispatch dream-auditor to validate and promote it first.
+mem-core is NOT independently re-renderable. The render happens inside the consolidation
+script (`run-memory-consolidation-and-validation.ts`), gated on `--include-base-pipeline`
+and on that run actually producing consolidation output — with no output it reports
+`missing consolidation outputs` and writes nothing. There is no standalone render entry
+point. So this command REPORTS the current state; `/consolidate` is what refreshes it.
 
-Refresh and report only — do not synthesize or merge in this command.
+Do not attempt to re-render here, and do not synthesize or merge.
+
+## Steps
+
+1. Load the scoped memory files from repo root:
+
+   `node --experimental-strip-types scripts/run-mem-core-loader.ts --start-dir "<scope>" --format json`
+
+   Omit `--start-dir` to use the current directory. Add `--strict` to exit non-zero when
+   nothing is found.
+
+2. Report from that output:
+   - Each loaded file: path, `sourceType` (`direct` = a `memory.md` sitting in the scope
+     directory, `store` = the rendered file under `.electric-shepherd/memory`),
+     `scopeDirectory`, and size.
+   - The scope ladder, broad (workspace root) to narrow (current directory) — this is the
+     order they merge in, so a narrow file refines a broad one.
+   - Total bytes loaded. Call it out if it is large; mem-core rides in every prompt.
+
+3. Judge staleness and say so plainly:
+   - If NO files loaded: mem-core has never been rendered for this scope. Say that
+     directly rather than reporting an empty success.
+   - Compare the newest rendered file's timestamp against recent consolidation activity
+     (`/memory-status`). If consolidation has run since the last render, mem-core is
+     behind.
+
+4. End with the next action:
+   - Stale or empty -> `/consolidate` (renders mem-core as part of the pass).
+   - Content missing that you expected -> it may still be `es-status: provisional`;
+     rendering excludes provisional closets by default. Run `/memory-status` to check, or
+     dispatch dream-auditor to validate and promote it.
+   - Current -> say so and stop.

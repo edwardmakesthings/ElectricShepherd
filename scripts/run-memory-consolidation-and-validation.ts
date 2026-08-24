@@ -29,6 +29,8 @@ import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-c
 import { loadRuntimeEnv } from "./runtime-env.ts";
 import { acquireConsolidationLock, releaseConsolidationLock } from "./consolidation-lock.ts";
 
+let activeRunProgressPath = "";
+
 declare const process: {
   argv: string[];
   env: Record<string, string | undefined>;
@@ -84,6 +86,21 @@ type WorklistOptions = {
   mode: WorklistMode;
   limit: number;
   batchSize: number;
+  sourceRoom: string;
+  processedRoom: string;
+  failedRoom: string;
+  retryFailedOnly: boolean;
+  moveAlreadyConsolidated: boolean;
+};
+
+type PromptModelRouting = {
+  providerID: string;
+  modelID: string;
+};
+
+type PromptRouting = {
+  agent?: string;
+  model?: PromptModelRouting;
 };
 
 function getArg(argv: string[], flag: string): string | undefined {
@@ -116,6 +133,37 @@ function asString(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+function parsePositiveInt(value: string | undefined, fallback: number, min = 1): number {
+  const parsed = Number(value || "");
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.floor(parsed));
+}
+
+function getActivePromptRoutingFromEnv(env: Record<string, string | undefined>): PromptRouting {
+  const agent = (env.ESHEPHERD_ACTIVE_AGENT || "").trim() || undefined;
+  const providerID = (env.ESHEPHERD_ACTIVE_MODEL_PROVIDER_ID || "").trim();
+  const modelID = (env.ESHEPHERD_ACTIVE_MODEL_ID || "").trim();
+  const model = providerID && modelID ? { providerID, modelID } : undefined;
+  return { agent, model };
+}
+
+function formatPromptModelArg(model: PromptModelRouting | undefined): string | undefined {
+  if (!model) return undefined;
+  return `${model.providerID},${model.modelID}`;
+}
+
+function parseMCPHttpOptions(env: Record<string, string | undefined>): {
+  requestTimeoutMs: number;
+  maxRetries: number;
+  retryBackoffMs: number;
+} {
+  return {
+    requestTimeoutMs: parsePositiveInt(env.ESHEPHERD_MCP_REQUEST_TIMEOUT_MS, 60000),
+    maxRetries: parsePositiveInt(env.ESHEPHERD_MCP_MAX_RETRIES, 2, 0),
+    retryBackoffMs: parsePositiveInt(env.ESHEPHERD_MCP_RETRY_BACKOFF_MS, 800),
+  };
+}
+
 function tryReadFile(path: string): string | undefined {
   if (!existsSync(path)) return undefined;
   return readFileSync(path, "utf8");
@@ -130,6 +178,25 @@ function tryWriteFile(path: string, content: string): void {
   const tmpPath = `${path}.${process.pid}.tmp`;
   writeFileSync(tmpPath, content, "utf8");
   renameSync(tmpPath, path);
+}
+
+function resolveRunProgressPath(runId: string): string {
+  const projectRoot = process.env.ESHEPHERD_PROJECT_ROOT || process.cwd();
+  return join(projectRoot, ".electric-shepherd", "runs", `${runId}.progress.json`);
+}
+
+function markRunProgressFailed(path: string, error: string): void {
+  const existingRaw = tryReadFile(path);
+  const base = existingRaw ? asObject(JSON.parse(existingRaw)) : {};
+  const output = {
+    ...base,
+    status: "failed",
+    phase: "failed",
+    error,
+    updatedAt: new Date().toISOString(),
+    completedAt: new Date().toISOString(),
+  };
+  tryWriteFile(path, JSON.stringify(output, null, 2));
 }
 
 function parseMapperSummariesFromFile(path: string | undefined): TranscriptInsightSummary[] | undefined {
@@ -320,9 +387,14 @@ function releaseHeldConsolidationGuards(): void {
 function runSubagentViaOpenCode(args: {
   opencodeBin: string;
   agentName: string;
+  modelArg?: string;
   prompt: string;
 }): string {
-  return execFileSync(args.opencodeBin, ["run", args.prompt, "--agent", args.agentName], {
+  const commandArgs = ["run", args.prompt, "--agent", args.agentName];
+  if (args.modelArg) {
+    commandArgs.push("--model", args.modelArg);
+  }
+  return execFileSync(args.opencodeBin, commandArgs, {
     encoding: "utf8",
     maxBuffer: 2 * 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
@@ -389,6 +461,7 @@ async function callSubagentMapper(args: {
   mcp: MCPHttpClient;
   toolPrefix: string;
   mapperAgentName: string;
+  activeModel?: PromptModelRouting;
   query: string;
   wing: string;
   room: string;
@@ -437,6 +510,7 @@ async function callSubagentMapper(args: {
     const output = runSubagentViaOpenCode({
       opencodeBin: args.opencodeBin,
       agentName: args.mapperAgentName,
+      modelArg: formatPromptModelArg(args.activeModel),
       prompt: taskPrompt,
     });
     const parsedJSON = parseEmbeddedJSON(output);
@@ -456,6 +530,7 @@ async function callSubagentMapper(args: {
 async function callSubagentAuditor(args: {
   mcp: MCPHttpClient;
   auditorAgentName: string;
+  activeModel?: PromptModelRouting;
   consolidationResult: unknown;
   validationResult: unknown;
   opencodeBin: string;
@@ -513,6 +588,7 @@ async function callSubagentAuditor(args: {
     const output = runSubagentViaOpenCode({
       opencodeBin: args.opencodeBin,
       agentName: args.auditorAgentName,
+      modelArg: formatPromptModelArg(args.activeModel),
       prompt: taskPrompt,
     });
     const parsed = asObject(parseEmbeddedJSON(output));
@@ -584,10 +660,23 @@ function parseWorklistOptions(argv: string[]): WorklistOptions {
   const allMode = hasFlag(argv, "--all") || hasFlag(argv, "--full-scope") || hasFlag(argv, "--reprocess-all");
   const limit = Number(getArg(argv, "--worklist-limit") || getArg(argv, "--search-limit") || "200");
   const batchSize = Math.max(1, Number(getArg(argv, "--batch-size") || "25"));
+  const defaultSourceRoom =
+    (process.env.ESHEPHERD_SOURCE_CAPTURE_ROOM || "").trim() ||
+    "source-transcripts";
+  const scopeRoom = getArg(argv, "--room") || getArg(argv, "--target-room") || getArg(argv, "--scope-room") || defaultSourceRoom;
+  const processedRoom = getArg(argv, "--processed-room") || `${scopeRoom}-processed`;
+  const failedRoom = getArg(argv, "--failed-room") || `${scopeRoom}-failed`;
+  const retryFailedOnly = hasFlag(argv, "--retry-failed-only");
+  const moveAlreadyConsolidated = !hasFlag(argv, "--no-move-already-consolidated");
   return {
     mode: allMode ? "all" : "unconsolidated",
     limit: Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 200,
     batchSize,
+    sourceRoom: scopeRoom,
+    processedRoom,
+    failedRoom,
+    retryFailedOnly,
+    moveAlreadyConsolidated,
   };
 }
 
@@ -629,24 +718,86 @@ async function ensureRawEntriesForChunk(
 ): Promise<{ entries: Array<{ id: string; text: string }>; skipped: Array<{ drawer_id: string; reason: string }> }> {
   const out: Array<{ id: string; text: string }> = [];
   const skipped: Array<{ drawer_id: string; reason: string }> = [];
+  const seen = new Set<string>();
   for (const item of items) {
-    const existing = asString(item.content).trim();
-    if (existing) {
-      out.push({ id: item.drawer_id, text: existing });
-      continue;
-    }
-    try {
-      const raw = await client.getDrawer({ drawer_id: item.drawer_id });
-      const parsed = parseDrawerPayload(raw);
-      const text = asString(parsed?.content).trim();
-      if (text) out.push({ id: item.drawer_id, text });
-      else skipped.push({ drawer_id: item.drawer_id, reason: "empty-content" });
-    } catch {
-      // P3-3: record fetch failure instead of silently dropping
-      skipped.push({ drawer_id: item.drawer_id, reason: "drawer-fetch-failed" });
+    const familyIds = getFamilyDrawerIds(item);
+    for (const drawerId of familyIds) {
+      if (seen.has(drawerId)) continue;
+      seen.add(drawerId);
+
+      const existing = drawerId === item.drawer_id ? asString(item.content).trim() : "";
+      if (existing) {
+        out.push({ id: drawerId, text: existing });
+        continue;
+      }
+      try {
+        const raw = await client.getDrawer({ drawer_id: drawerId });
+        const parsed = parseDrawerPayload(raw);
+        const text = asString(parsed?.content).trim();
+        if (text) out.push({ id: drawerId, text });
+        else skipped.push({ drawer_id: drawerId, reason: "empty-content" });
+      } catch {
+        // P3-3: record fetch failure instead of silently dropping
+        skipped.push({ drawer_id: drawerId, reason: "drawer-fetch-failed" });
+      }
     }
   }
   return { entries: out, skipped };
+}
+
+function getFamilyDrawerIds(item: SourceDrawerWorkItem): string[] {
+  const family = asArray(item.family_drawer_ids)
+    .map((value) => asString(value).trim())
+    .filter(Boolean);
+  if (family.length > 0) return [...new Set(family)];
+  return [item.drawer_id];
+}
+
+async function moveDrawerFamily(
+  client: ReturnType<typeof createMemgraphClient>,
+  args: {
+    item: SourceDrawerWorkItem;
+    targetRoom: string;
+    targetWing: string;
+    applyWrites: boolean;
+  },
+): Promise<{ moved: string[]; attempted: string[]; errors: Array<{ drawer_id: string; error: string }> }> {
+  const attempted = getFamilyDrawerIds(args.item);
+  if (!args.applyWrites) return { moved: [], attempted, errors: [] };
+
+  const moved: string[] = [];
+  const errors: Array<{ drawer_id: string; error: string }> = [];
+  for (const drawerId of attempted) {
+    try {
+      await client.updateDrawer({
+        drawer_id: drawerId,
+        wing: (args.item.wing || "").trim() || args.targetWing,
+        room: args.targetRoom,
+      });
+      moved.push(drawerId);
+    } catch (err) {
+      errors.push({ drawer_id: drawerId, error: String(err) });
+    }
+  }
+
+  return { moved, attempted, errors };
+}
+
+async function getConsolidatedIdsForFamily(
+  client: ReturnType<typeof createMemgraphClient>,
+  item: SourceDrawerWorkItem,
+): Promise<{ consolidated: string[]; unconsolidated: string[] }> {
+  const consolidated: string[] = [];
+  const unconsolidated: string[] = [];
+  for (const drawerId of getFamilyDrawerIds(item)) {
+    try {
+      if (await client.isSourceDrawerConsolidated(drawerId)) consolidated.push(drawerId);
+      else unconsolidated.push(drawerId);
+    } catch {
+      unconsolidated.push(drawerId);
+    }
+  }
+  return { consolidated, unconsolidated };
 }
 
 function parseValidationOptions(argv: string[], consolidation: SynthesisConsolidationOptions): ValidationMergeReviewOptions {
@@ -810,6 +961,39 @@ function factBullets(values: string[], max: number): string[] {
   return out;
 }
 
+// Deterministic, idempotent fact source: real synthesis nodes (synthesized-from
+// >= 2 distinct sources) scoped to a wing/room, filtered to height >= minHeight,
+// ranked by height desc (tie-break connection_degree then retrieval_count), capped
+// at `limit`. This replaces the raw per-drawer heuristic fallback for facts, which
+// has height 0 (never synthesized) and is the source of garbled mem-core bullets.
+async function fetchHighHeightFacts(
+  client: MemgraphClient,
+  args: { wing: string; room: string; minHeight?: number; limit?: number },
+): Promise<string[]> {
+  const minHeight = Math.max(0, Number(args.minHeight) || 2);
+  const limit = Math.max(1, Number(args.limit) || 8);
+  try {
+    const result = await client.listScopedDerivedDrawers({
+      scope_wing: args.wing,
+      scope_room: args.room,
+      limit: 200,
+    });
+    const nodes = asArray((result as Record<string, unknown>).nodes) as Array<Record<string, unknown>>;
+    const ranked = nodes
+      .map((node) => ({
+        text: normalizeSummaryLine(asString(node.desc || node.content)),
+        height: Number(node.height) || 0,
+        connectionDegree: Number(node.connection_degree) || 0,
+        retrievalCount: Number(node.retrieval_count) || 0,
+      }))
+      .filter((node) => node.text && node.height >= minHeight && !looksLikeToolOutputFragment(node.text))
+      .sort((a, b) => b.height - a.height || b.connectionDegree - a.connectionDegree || b.retrievalCount - a.retrievalCount);
+    return [...new Set(ranked.map((node) => node.text))].slice(0, limit);
+  } catch {
+    return [];
+  }
+}
+
 function buildMemcoreMarkdown(args: {
   query: string;
   consolidation: SynthesisConsolidationResult;
@@ -819,6 +1003,7 @@ function buildMemcoreMarkdown(args: {
   includeFacts?: boolean;
   includePointers?: boolean;
   maxFactsPerSection?: number;
+  highHeightFacts?: string[];
 }): string {
   const includeFacts = args.includeFacts !== false;
   const includePointers = args.includePointers !== false;
@@ -837,6 +1022,9 @@ function buildMemcoreMarkdown(args: {
   );
   const auditorPointer = args.auditor ? `available in run trace (via=${args.auditor.via})` : "(not-run)";
 
+  const highHeightFacts = args.highHeightFacts || [];
+  const projectStateFacts = highHeightFacts.length > 0 ? highHeightFacts : args.consolidation.consolidationDraft.durableFacts || [];
+
   const lines: string[] = ["# Labeled memory blocks (always in context)", ""];
 
   if (includeFacts) {
@@ -845,7 +1033,7 @@ function buildMemcoreMarkdown(args: {
       "",
       "## [project-state]",
       `- Latest synthesis: ${draftTitle}`,
-      ...factBullets(args.consolidation.consolidationDraft.durableFacts || [], maxFacts),
+      ...factBullets(projectStateFacts, maxFacts),
       "",
       "## [active-conventions]",
       ...factBullets(args.consolidation.consolidationDraft.decisions || [], maxFacts),
@@ -896,8 +1084,13 @@ function usage(): string {
     "  --use-live-mapper                (invoke dream-mapper via task tool)",
     "  --mapper-agent <name>            (default: dream-mapper)",
     "  --all | --full-scope             (worklist mode: reprocess all source drawers in scope)",
+    "  --room <room>                    (source room; default: ESHEPHERD_SOURCE_CAPTURE_ROOM or source-transcripts)",
+    "  --retry-failed-only              (source room becomes <room>-failed or --failed-room)",
     "  --batch-size <n>                 (chunk worklist into batch consolidation calls; default: 25)",
     "  --worklist-limit <n>             (max source drawers enumerated; default: 200)",
+    "  --processed-room <room>          (default: <room>-processed)",
+    "  --failed-room <room>             (default: <room>-failed)",
+    "  --no-move-already-consolidated   (do not auto-move already-consolidated sources)",
     "  --labels <csv>",
     "  --apply                          (creates derived drawers if checks pass; default is dry-run)",
     "",
@@ -968,6 +1161,34 @@ async function main(): Promise<void> {
     return;
   }
 
+  const runProgressPath = resolveRunProgressPath(runId);
+  activeRunProgressPath = runProgressPath;
+  const runProgressState: Record<string, unknown> = {
+    runId,
+    status: "running",
+    phase: "startup",
+    startedAt: new Date(startTime).toISOString(),
+    updatedAt: new Date().toISOString(),
+    counters: {
+      examinedCount: 0,
+      processedCount: 0,
+      failedCount: 0,
+      errorCount: 0,
+      createdNodeCount: 0,
+      chunkIndex: 0,
+      chunkTotal: 0,
+    },
+  };
+  const flushRunProgress = (patch: Record<string, unknown> = {}, counterPatch?: Record<string, number>) => {
+    const currentCounters = asObject(runProgressState.counters);
+    if (counterPatch && Object.keys(counterPatch).length > 0) {
+      runProgressState.counters = { ...currentCounters, ...counterPatch };
+    }
+    Object.assign(runProgressState, patch, { updatedAt: new Date().toISOString() });
+    tryWriteFile(runProgressPath, JSON.stringify(runProgressState, null, 2));
+  };
+  flushRunProgress({ phase: "lock-acquire" });
+
   let consolidationCoordMode: ConsolidationCoordMode = "bypassed";
 
   // Cross-process lock so a plugin-triggered run, a cron run, and an n8n run can
@@ -997,6 +1218,7 @@ async function main(): Promise<void> {
         heldNativeConsolidationLease = { projectRoot: lockRoot, runId };
         consolidationCoordMode = "native-queue";
       } else if (nativeLease.state === "held") {
+        flushRunProgress({ status: "skipped", phase: "blocked-native-coordination", reason: "consolidation-native-coord-held" });
         process.stdout.write(
           `${JSON.stringify({ skipped: true, reason: "consolidation-native-coord-held", detail: nativeLease.reason }, null, 2)}\n`,
         );
@@ -1006,6 +1228,7 @@ async function main(): Promise<void> {
 
     if (consolidationCoordMode !== "native-queue") {
       if (!acquireConsolidationLock(lockRoot, { source: "run-memory-consolidation-and-validation", runId }, staleMs)) {
+        flushRunProgress({ status: "skipped", phase: "blocked-lock-held", reason: "consolidation-lock-held" });
         process.stdout.write(`${JSON.stringify({ skipped: true, reason: "consolidation-lock-held" }, null, 2)}\n`);
         return;
       }
@@ -1028,9 +1251,14 @@ async function main(): Promise<void> {
   const mcpURL = (process.env.MEMPALACE_MCP_URL || discoveredMCP?.url || "http://localhost:8093/mcp").trim();
   const toolPrefix = process.env.MEMGRAPH_TOOL_PREFIX || "mempalace_";
   const mcpHeaders = resolveMCPHeadersFromEnv(process.env);
+  const mcpHttpOptions = parseMCPHttpOptions(process.env);
+  const activeRouting = getActivePromptRoutingFromEnv(process.env);
 
   const mcp = new MCPHttpClient(mcpURL, mcpHeaders, {
     clientName: "electric-shepherd-memory-system",
+    requestTimeoutMs: mcpHttpOptions.requestTimeoutMs,
+    maxRetries: mcpHttpOptions.maxRetries,
+    retryBackoffMs: mcpHttpOptions.retryBackoffMs,
   });
   await mcp.initialize();
 
@@ -1042,6 +1270,7 @@ async function main(): Promise<void> {
   const runCadence = hasFlag(argv, "--run-cadence");
   const includeBasePipeline = !runCadence || hasFlag(argv, "--include-base-pipeline");
   const opencodeBin = getArg(argv, "--opencode-bin") || "opencode";
+  flushRunProgress({ phase: "discovering-worklist" });
 
   let mapper: MapperEnvelope | undefined;
   const mapperBatches: MapperEnvelope[] = [];
@@ -1054,16 +1283,19 @@ async function main(): Promise<void> {
   const enumerateAll = worklistOptions.mode === "all";
   let worklist: SourceDrawerWorkItem[] = [];
   if (includeBasePipeline) {
+    const sourceRoom = worklistOptions.retryFailedOnly ? worklistOptions.failedRoom : worklistOptions.sourceRoom;
     worklist = enumerateAll
       ? await client.listSourceDrawersByScope({
           wing: consolidationOptions.targetWing,
-          room: consolidationOptions.targetRoom,
+          room: sourceRoom,
           limit: worklistOptions.limit,
+          pageSize: parsePositiveInt(process.env.ESHEPHERD_WORKLIST_PAGE_SIZE, 50),
         })
       : await client.findUnconsolidatedSourceDrawers({
           wing: consolidationOptions.targetWing,
-          room: consolidationOptions.targetRoom,
+          room: sourceRoom,
           limit: worklistOptions.limit,
+          pageSize: parsePositiveInt(process.env.ESHEPHERD_WORKLIST_PAGE_SIZE, 50),
         });
   }
 
@@ -1075,8 +1307,15 @@ async function main(): Promise<void> {
     note: includeBasePipeline
       ? enumerateAll
         ? "full-scope override active: this run may reprocess already-consolidated source drawers"
-        : "default mode: source drawers with no incoming synthesized-from edges"
+        : worklistOptions.retryFailedOnly
+          ? "retry mode: unconsolidated source drawers selected from failed room"
+          : "default mode: unconsolidated source drawers selected from source room"
       : "cadence-only run: base worklist pipeline not executed",
+    sourceRoom: worklistOptions.retryFailedOnly ? worklistOptions.failedRoom : worklistOptions.sourceRoom,
+    processedRoom: worklistOptions.processedRoom,
+    failedRoom: worklistOptions.failedRoom,
+    retryFailedOnly: worklistOptions.retryFailedOnly,
+    moveAlreadyConsolidated: worklistOptions.moveAlreadyConsolidated,
     items: worklist.map((item) => ({
       drawer_id: item.drawer_id,
       wing: item.wing,
@@ -1088,9 +1327,23 @@ async function main(): Promise<void> {
     })),
   };
 
+  flushRunProgress(
+    {
+      phase: includeBasePipeline ? "consolidation" : "cadence-only",
+      includeBasePipeline,
+      worklistMode: worklistOptions.mode,
+    },
+    {
+      examinedCount: worklist.length,
+    },
+  );
+
   if (includeBasePipeline) {
     const worklistChunks = chunkItems(worklist, worklistOptions.batchSize);
     const useLiveMapper = hasFlag(argv, "--use-live-mapper");
+    const movedToProcessed: Array<{ drawer_id: string; family_drawer_ids: string[]; reason: string }> = [];
+    const movedToFailed: Array<{ drawer_id: string; family_drawer_ids: string[]; reason: string }> = [];
+    const moveErrors: Array<{ drawer_id: string; phase: "processed" | "failed"; error: string }> = [];
 
     if (worklistChunks.length === 0) {
       // Even with no new source drawers selected, render mem-core from the
@@ -1102,11 +1355,78 @@ async function main(): Promise<void> {
         runId,
       });
       consolidationBatches.push(emptyConsolidation);
+      flushRunProgress(
+        { phase: "consolidation-empty-worklist" },
+        {
+          chunkIndex: 0,
+          chunkTotal: 0,
+          createdNodeCount: consolidationBatches.map((c) => asString(c.createdNodeId).trim()).filter(Boolean).length,
+        },
+      );
     }
 
 
-    for (const chunk of worklistChunks) {
-      const chunkIds = chunk.map((item) => item.drawer_id);
+    for (const [chunkIndex, chunk] of worklistChunks.entries()) {
+      flushRunProgress(
+        {
+          phase: "chunk-processing",
+          currentChunk: chunkIndex + 1,
+          totalChunks: worklistChunks.length,
+          chunkItems: chunk.length,
+        },
+        {
+          chunkIndex: chunkIndex + 1,
+          chunkTotal: worklistChunks.length,
+          processedCount: movedToProcessed.length,
+          failedCount: movedToFailed.length,
+          errorCount: moveErrors.length,
+          createdNodeCount: consolidationBatches.map((c) => asString(c.createdNodeId).trim()).filter(Boolean).length,
+        },
+      );
+      process.stderr.write(
+        `[memory-consolidation-validation] chunk ${chunkIndex + 1}/${worklistChunks.length} start (items=${chunk.length})\n`,
+      );
+      const actionable: SourceDrawerWorkItem[] = [];
+
+      for (const item of chunk) {
+        const consolidated = await getConsolidatedIdsForFamily(client, item);
+        if (consolidated.unconsolidated.length === 0) {
+          if (worklistOptions.moveAlreadyConsolidated) {
+            const moveResult = await moveDrawerFamily(client, {
+              item,
+              targetRoom: worklistOptions.processedRoom,
+              targetWing: consolidationOptions.targetWing,
+              applyWrites: consolidationOptions.applyWrites,
+            });
+            movedToProcessed.push({
+              drawer_id: item.drawer_id,
+              family_drawer_ids: moveResult.attempted,
+              reason: "already-consolidated",
+            });
+            moveErrors.push(
+              ...moveResult.errors.map((entry) => ({
+                drawer_id: entry.drawer_id,
+                phase: "processed" as const,
+                error: entry.error,
+              })),
+            );
+          }
+          continue;
+        }
+        actionable.push({
+          ...item,
+          family_drawer_ids: consolidated.unconsolidated,
+        });
+      }
+
+      if (actionable.length === 0) continue;
+
+      flushRunProgress({ phase: "chunk-actionable", actionableCount: actionable.length });
+
+      process.stderr.write(
+        `[memory-consolidation-validation] chunk ${chunkIndex + 1}/${worklistChunks.length} actionable=${actionable.length}\n`,
+      );
+
       let chunkMapper: MapperEnvelope | undefined;
 
       if (useLiveMapper) {
@@ -1114,16 +1434,17 @@ async function main(): Promise<void> {
           mcp,
           toolPrefix,
           mapperAgentName: getArg(argv, "--mapper-agent") || "dream-mapper",
+          activeModel: activeRouting.model,
           query: consolidationOptions.query,
           wing: consolidationOptions.targetWing,
-          room: consolidationOptions.targetRoom,
-          worklistIds: chunkIds,
+          room: worklistOptions.retryFailedOnly ? worklistOptions.failedRoom : worklistOptions.sourceRoom,
+          worklistIds: actionable.map((item) => item.drawer_id),
           opencodeBin,
         });
         mapperBatches.push(chunkMapper);
       }
 
-      const { entries: rawEntries, skipped: chunkSkipped } = await ensureRawEntriesForChunk(client, chunk);
+      const { entries: rawEntries, skipped: chunkSkipped } = await ensureRawEntriesForChunk(client, actionable);
       if (chunkSkipped.length > 0) allSkipped.push(...chunkSkipped);
       const chunkConsolidation = await runSynthesisConsolidation(client, {
         ...consolidationOptions,
@@ -1137,6 +1458,88 @@ async function main(): Promise<void> {
       // apply is skipped (it is gated on `consolidation`), and the trace envelope
       // reports createdNodeCount: 0 even though closets were actually written.
       consolidationBatches.push(chunkConsolidation);
+      flushRunProgress(
+        {
+          phase: "chunk-consolidated",
+          lastCreatedNodeId: asString(chunkConsolidation.createdNodeId).trim() || undefined,
+        },
+        {
+          createdNodeCount: consolidationBatches.map((c) => asString(c.createdNodeId).trim()).filter(Boolean).length,
+        },
+      );
+      process.stderr.write(
+        `[memory-consolidation-validation] chunk ${chunkIndex + 1}/${worklistChunks.length} consolidation createdNodeId=${asString(chunkConsolidation.createdNodeId).trim() || "<none>"}\n`,
+      );
+
+      if (!consolidationOptions.applyWrites) continue;
+
+      const createdNodeId = asString(chunkConsolidation.createdNodeId).trim();
+      if (!createdNodeId) {
+        for (const item of actionable) {
+          const moveResult = await moveDrawerFamily(client, {
+            item,
+            targetRoom: worklistOptions.failedRoom,
+            targetWing: consolidationOptions.targetWing,
+            applyWrites: true,
+          });
+          movedToFailed.push({ drawer_id: item.drawer_id, family_drawer_ids: moveResult.attempted, reason: "no-created-node" });
+          moveErrors.push(
+            ...moveResult.errors.map((entry) => ({
+              drawer_id: entry.drawer_id,
+              phase: "failed" as const,
+              error: entry.error,
+            })),
+          );
+        }
+        process.stderr.write(
+          `[memory-consolidation-validation] chunk ${chunkIndex + 1}/${worklistChunks.length} moved-to-failed=${actionable.length} reason=no-created-node\n`,
+        );
+        flushRunProgress(
+          { phase: "chunk-move-failed-no-created-node" },
+          {
+            processedCount: movedToProcessed.length,
+            failedCount: movedToFailed.length,
+            errorCount: moveErrors.length,
+          },
+        );
+        continue;
+      }
+
+      for (const item of actionable) {
+        const consolidated = await getConsolidatedIdsForFamily(client, item);
+        const targetRoom = consolidated.unconsolidated.length === 0 ? worklistOptions.processedRoom : worklistOptions.failedRoom;
+        const phase = targetRoom === worklistOptions.processedRoom ? "processed" : "failed";
+        const reason = phase === "processed" ? "edge-verified" : "missing-consolidated-edge";
+        const moveResult = await moveDrawerFamily(client, {
+          item,
+          targetRoom,
+          targetWing: consolidationOptions.targetWing,
+          applyWrites: true,
+        });
+        if (phase === "processed") {
+          movedToProcessed.push({ drawer_id: item.drawer_id, family_drawer_ids: moveResult.attempted, reason });
+        } else {
+          movedToFailed.push({ drawer_id: item.drawer_id, family_drawer_ids: moveResult.attempted, reason });
+        }
+        moveErrors.push(
+          ...moveResult.errors.map((entry) => ({
+            drawer_id: entry.drawer_id,
+            phase,
+            error: entry.error,
+          })),
+        );
+      }
+      process.stderr.write(
+        `[memory-consolidation-validation] chunk ${chunkIndex + 1}/${worklistChunks.length} post-verify moves processed=${movedToProcessed.length} failed=${movedToFailed.length} errors=${moveErrors.length}\n`,
+      );
+      flushRunProgress(
+        { phase: "chunk-post-verify" },
+        {
+          processedCount: movedToProcessed.length,
+          failedCount: movedToFailed.length,
+          errorCount: moveErrors.length,
+        },
+      );
     }
 
     if (consolidationBatches.length > 0) {
@@ -1156,7 +1559,15 @@ async function main(): Promise<void> {
       };
     }
 
+    (worklistOutput as Record<string, unknown>).moves = {
+      processed: movedToProcessed,
+      failed: movedToFailed,
+      errors: moveErrors.length > 0 ? moveErrors : undefined,
+      applyWrites: consolidationOptions.applyWrites,
+    };
+
     const touchedNodeIds = [...new Set(consolidationBatches.map((c) => c.createdNodeId).filter(Boolean))] as string[];
+    flushRunProgress({ phase: "validation-merge-review", touchedNodeCount: touchedNodeIds.length });
     if (touchedNodeIds.length > 0) {
       validationMergeReview = await runValidationMergeReview(client, {
         ...validationOptions,
@@ -1172,6 +1583,7 @@ async function main(): Promise<void> {
     auditor = await callSubagentAuditor({
       mcp,
       auditorAgentName: getArg(argv, "--auditor-agent") || "dream-auditor",
+      activeModel: activeRouting.model,
       consolidationResult: consolidation,
       validationResult: validationMergeReview,
       opencodeBin,
@@ -1180,6 +1592,7 @@ async function main(): Promise<void> {
 
   let memCoreApplyResult: Record<string, unknown> | undefined;
   if (memcoreApply.enabled && includeBasePipeline && consolidation) {
+    flushRunProgress({ phase: "memcore-apply" });
     const validationForRender: ValidationMergeReviewResult = validationMergeReview || {
       phase: "validation-merge-review",
       downwardValidation: [],
@@ -1192,6 +1605,13 @@ async function main(): Promise<void> {
       },
     };
 
+    const highHeightFacts = await fetchHighHeightFacts(client, {
+      wing: consolidationOptions.targetWing,
+      room: consolidationOptions.targetRoom,
+      minHeight: Number(process.env.ESHEPHERD_MEMCORE_MIN_FACT_HEIGHT) || 2,
+      limit: Number(process.env.ESHEPHERD_MEMCORE_RENDER_MAX_FACTS) || 8,
+    });
+
     const markdown = buildMemcoreMarkdown({
       query: consolidation.query,
       consolidation,
@@ -1201,6 +1621,7 @@ async function main(): Promise<void> {
       includeFacts: !isFalsyFlag(process.env.ESHEPHERD_MEMCORE_RENDER_INCLUDE_FACTS),
       includePointers: !isFalsyFlag(process.env.ESHEPHERD_MEMCORE_RENDER_INCLUDE_POINTERS),
       maxFactsPerSection: Number(process.env.ESHEPHERD_MEMCORE_RENDER_MAX_FACTS) || 8,
+      highHeightFacts,
     });
 
     const targetFilePath = resolveMemcoreFilePath({
@@ -1296,6 +1717,21 @@ async function main(): Promise<void> {
 
   // P2-1: write trace envelope to stdout
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+  const moveSummary = asObject((worklistOutput as Record<string, unknown>).moves);
+  flushRunProgress(
+    {
+      status: "completed",
+      phase: "completed",
+      completedAt: new Date().toISOString(),
+      durationMs,
+    },
+    {
+      examinedCount,
+      processedCount: asArray(moveSummary.processed).length,
+      failedCount: asArray(moveSummary.failed).length,
+      createdNodeCount: createdNodes.length,
+    },
+  );
 
   // P1-2: append run journal entry for crash-safe resume
   try {
@@ -1318,9 +1754,17 @@ async function main(): Promise<void> {
   }
 
   releaseHeldConsolidationGuards();
+  activeRunProgressPath = "";
 }
 
 main().catch((err) => {
+  if (activeRunProgressPath) {
+    try {
+      markRunProgressFailed(activeRunProgressPath, String(err));
+    } catch {
+      // best-effort; preserve original error path
+    }
+  }
   releaseHeldConsolidationGuards();
   process.stderr.write(`[memory-consolidation-validation] ${String(err)}\n`);
   process.exit(1);
