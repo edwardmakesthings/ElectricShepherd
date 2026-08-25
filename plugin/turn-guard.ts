@@ -63,6 +63,7 @@ import palaceHeightThresholdTool from "../tools/palace_height_threshold.ts"
 import palaceOrganizeMemoriesTool from "../tools/palace_organize_memories.ts"
 import exportDrawerTool from "../tools/export_drawer.ts"
 import relocateMemoryTool from "../tools/relocate_memory.ts"
+import palaceStampSourceTypeTool from "../tools/palace_stamp_source_type.ts"
 
 // Absolute path to the ElectricShepherd install root (the plugin's own repo).
 // Runtime scripts must run from HERE — not the consumer project's cwd — so
@@ -2668,6 +2669,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
       palace_organize_memories: palaceOrganizeMemoriesTool,
       export_drawer: exportDrawerTool,
       relocate_memory: relocateMemoryTool,
+      palace_stamp_source_type: palaceStampSourceTypeTool,
     },
   } as any
 }

@@ -247,3 +247,240 @@ test("listSourceDrawersByScope paginates list_drawers calls", async () => {
   assert.deepEqual(listCalls.map((call) => call.args.offset), [0, 2]);
   assert.deepEqual(listCalls.map((call) => call.args.limit), [2, 1]);
 });
+
+// ── Phase 1: es-source-type axis (orthogonal to es-status) ───────────────────
+
+function makeRecordingClient(handlers = {}) {
+  const calls = [];
+  const client = createMemgraphClient({
+    callTool: async (name, args) => {
+      calls.push({ name, args });
+      for (const [suffix, handler] of Object.entries(handlers)) {
+        if (name.endsWith(suffix)) return handler(args || {}, calls);
+      }
+      return {};
+    },
+  });
+  return { client, calls };
+}
+
+test("createDerivedDrawer stamps both es-status=provisional and es-source-type=synthesis", async () => {
+  const { client, calls } = makeRecordingClient({
+    add_drawer: () => ({ drawer_id: "drawer-new" }),
+  });
+
+  const result = await client.createDerivedDrawer({
+    wing: "w",
+    room: "synthesis",
+    content: "c",
+    source_drawer_ids: ["drawer-a"],
+    desc: "d",
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.drawer_id, "drawer-new");
+
+  const kgAdds = calls.filter((call) => call.name.endsWith("kg_add"));
+  const statusStamps = kgAdds.filter((call) => call.args.predicate === "es-status");
+  const typeStamps = kgAdds.filter((call) => call.args.predicate === "es-source-type");
+
+  assert.equal(statusStamps.length, 1);
+  assert.equal(statusStamps[0].args.subject, "drawer-new");
+  assert.equal(statusStamps[0].args.object, "provisional");
+  assert.equal(statusStamps[0].args.source_closet, "drawer-new");
+  assert.equal(typeStamps.length, 1);
+  assert.equal(typeStamps[0].args.subject, "drawer-new");
+  assert.equal(typeStamps[0].args.object, "synthesis");
+  assert.equal(typeStamps[0].args.source_closet, "drawer-new");
+});
+
+test("createDerivedDrawer: a failed es-status stamp does not block the es-source-type stamp", async () => {
+  const { client, calls } = makeRecordingClient({
+    add_drawer: () => ({ drawer_id: "drawer-new" }),
+    kg_add: (args) => {
+      if (args.predicate === "es-status") throw new Error("kg_add es-status exploded");
+      return {};
+    },
+  });
+
+  const result = await client.createDerivedDrawer({
+    wing: "w",
+    room: "synthesis",
+    content: "c",
+    source_drawer_ids: [],
+    desc: "d",
+  });
+
+  assert.equal(result.success, true);
+  const kgAdds = calls.filter((call) => call.name.endsWith("kg_add"));
+  // The es-source-type stamp still went out even though es-status failed.
+  assert.ok(kgAdds.some((call) => call.args.predicate === "es-source-type" && call.args.object === "synthesis"));
+});
+
+test("createDerivedDrawer: a failed es-source-type stamp does not block the es-status stamp", async () => {
+  const { client, calls } = makeRecordingClient({
+    add_drawer: () => ({ drawer_id: "drawer-new" }),
+    kg_add: (args) => {
+      if (args.predicate === "es-source-type") throw new Error("kg_add es-source-type exploded");
+      return {};
+    },
+  });
+
+  const result = await client.createDerivedDrawer({
+    wing: "w",
+    room: "synthesis",
+    content: "c",
+    source_drawer_ids: [],
+    desc: "d",
+  });
+
+  assert.equal(result.success, true);
+  const kgAdds = calls.filter((call) => call.name.endsWith("kg_add"));
+  // The es-status stamp still went out even though es-source-type failed.
+  assert.ok(kgAdds.some((call) => call.args.predicate === "es-status" && call.args.object === "provisional"));
+});
+
+test("getClosetSourceType reads the stamped value and returns null when unstamped", async () => {
+  const { client } = makeRecordingClient({
+    kg_query: (args) => {
+      if (args.predicate !== "es-source-type") return { facts: [] };
+      if (args.entity === "stamped") {
+        return { facts: [{ current: true, subject: "stamped", predicate: "es-source-type", object: "transcript" }] };
+      }
+      return { facts: [] };
+    },
+  });
+
+  assert.equal(await client.getClosetSourceType("stamped"), "transcript");
+  assert.equal(await client.getClosetSourceType("unstamped"), null);
+});
+
+test("getClosetSourceType returns null on read failure (never throws)", async () => {
+  const { client } = makeRecordingClient({
+    kg_query: () => {
+      throw new Error("kg_query exploded");
+    },
+  });
+
+  assert.equal(await client.getClosetSourceType("broken"), null);
+});
+
+test("setClosetSourceType invalidates the previous value then adds the new one", async () => {
+  const { client, calls } = makeRecordingClient({
+    kg_query: (args) => {
+      if (args.predicate === "es-source-type") {
+        return { facts: [{ current: true, subject: "drawer-1", predicate: "es-source-type", object: "doc" }] };
+      }
+      return { facts: [] };
+    },
+  });
+
+  const ok = await client.setClosetSourceType("drawer-1", "synthesis", "run-9");
+  assert.equal(ok, true);
+
+  const invalidates = calls.filter((call) => call.name.endsWith("kg_invalidate"));
+  assert.equal(invalidates.length, 1);
+  assert.deepEqual(invalidates[0].args, { subject: "drawer-1", predicate: "es-source-type", object: "doc" });
+
+  const adds = calls.filter((call) => call.name.endsWith("kg_add"));
+  assert.equal(adds.length, 1);
+  assert.deepEqual(adds[0].args, {
+    subject: "drawer-1",
+    predicate: "es-source-type",
+    object: "synthesis",
+    source_closet: "drawer-1",
+    source_run_id: "run-9",
+  });
+});
+
+test("setClosetSourceType skips invalidation when the value is already current", async () => {
+  const { client, calls } = makeRecordingClient({
+    kg_query: (args) => {
+      if (args.predicate === "es-source-type") {
+        return { facts: [{ current: true, subject: "drawer-1", predicate: "es-source-type", object: "transcript" }] };
+      }
+      return { facts: [] };
+    },
+  });
+
+  const ok = await client.setClosetSourceType("drawer-1", "transcript");
+  assert.equal(ok, true);
+  assert.equal(calls.filter((call) => call.name.endsWith("kg_invalidate")).length, 0);
+});
+
+test("setClosetSourceType returns false on failure without throwing", async () => {
+  const { client } = makeRecordingClient({
+    kg_add: () => {
+      throw new Error("kg_add exploded");
+    },
+  });
+
+  assert.equal(await client.setClosetSourceType("drawer-1", "skill"), false);
+});
+
+test("es-status and es-source-type are independently settable (no cross-predicate invalidation)", async () => {
+  const { client, calls } = makeRecordingClient({
+    kg_query: (args) => {
+      if (args.predicate === "es-status") {
+        return { facts: [{ current: true, subject: "drawer-1", predicate: "es-status", object: "provisional" }] };
+      }
+      if (args.predicate === "es-source-type") {
+        return { facts: [{ current: true, subject: "drawer-1", predicate: "es-source-type", object: "transcript" }] };
+      }
+      return { facts: [] };
+    },
+  });
+
+  await client.setClosetStatus("drawer-1", "active");
+  await client.setClosetSourceType("drawer-1", "synthesis");
+
+  const invalidates = calls.filter((call) => call.name.endsWith("kg_invalidate"));
+  // Each setter only ever invalidates facts on ITS OWN predicate.
+  for (const call of invalidates) {
+    assert.ok(
+      ["es-status", "es-source-type"].includes(call.args.predicate),
+      `unexpected invalidate predicate: ${call.args.predicate}`,
+    );
+  }
+  const statusInvalidates = invalidates.filter((call) => call.args.predicate === "es-status");
+  const typeInvalidates = invalidates.filter((call) => call.args.predicate === "es-source-type");
+  // setClosetStatus("active") invalidated the opposite es-status value.
+  assert.equal(statusInvalidates.length, 1);
+  assert.equal(statusInvalidates[0].args.object, "provisional");
+  // setClosetSourceType invalidated the previous source-type value.
+  assert.equal(typeInvalidates.length, 1);
+  assert.equal(typeInvalidates[0].args.object, "transcript");
+
+  // The es-status setter never touched an es-source-type fact and vice versa.
+  assert.ok(!invalidates.some((call) => call.args.predicate === "es-status" && call.args.object !== "provisional"));
+  assert.ok(!invalidates.some((call) => call.args.predicate === "es-source-type" && call.args.object !== "transcript"));
+});
+
+test("setClosetStatus never invalidates an es-source-type fact", async () => {
+  const { client, calls } = makeRecordingClient({});
+
+  await client.setClosetStatus("drawer-1", "active");
+
+  const invalidates = calls.filter((call) => call.name.endsWith("kg_invalidate"));
+  for (const call of invalidates) {
+    assert.equal(call.args.predicate, "es-status");
+  }
+});
+
+test("setClosetSourceType never invalidates an es-status fact", async () => {
+  const { client, calls } = makeRecordingClient({
+    kg_query: (args) => {
+      if (args.predicate === "es-source-type") {
+        return { facts: [{ current: true, subject: "drawer-1", predicate: "es-source-type", object: "doc" }] };
+      }
+      return { facts: [] };
+    },
+  });
+
+  await client.setClosetSourceType("drawer-1", "transcript");
+
+  const invalidates = calls.filter((call) => call.name.endsWith("kg_invalidate"));
+  for (const call of invalidates) {
+    assert.equal(call.args.predicate, "es-source-type");
+  }
+});

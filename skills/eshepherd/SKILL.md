@@ -128,6 +128,7 @@ them over hand-rolled `list_drawers` loops, which burn context and time out on b
 | Propose room/wing cleanup (read-only) | `palace_organize_memories` |
 | Write a drawer to disk + get metadata only | `export_drawer` |
 | Re-file a drawer, or lift a verbatim excerpt | `relocate_memory` |
+| Backfill the `es-source-type` axis on existing drawers (bounded, dry-run first) | `palace_stamp_source_type` |
 | Move drawers in bulk between scopes | `move_drawers` |
 | Delete drawers by ID or scope | `delete_drawers` |
 | Force-capture THIS session's transcript now | `capture_transcript` |
@@ -150,6 +151,7 @@ These are as load-bearing as `synthesized-from`, and are NOT MemPalace built-ins
 |---|---|---|
 | `consolidated-into` | `{subject: source drawer, object: closet}`. The ONLY signal that a source is consumed. Without it the next pass re-processes the same transcript, because `synthesized-from` (closet -> source) leaves the source looking untouched. | dreamer / consolidation script |
 | `es-status` | `provisional` at closet creation; promoted to `active` only after validation confirms >= 2 DIRECT sources. Retrieval and mem-core render exclude `provisional` by default. | dreamer / validation pass |
+| `es-source-type` | What KIND of material a drawer holds: `transcript` \| `doc` \| `synthesis` \| `skill`. ORTHOGONAL to `es-status` (kind vs validated) — never conflate them. Stamped at write time; missing = "unknown authority", never a default type. Backfill infers `transcript` from transcript-like rooms and `synthesis` from outgoing `synthesized-from` edges, and leaves everything else unstamped. | capture pipeline / consolidation / `palace_stamp_source_type` backfill |
 
 Consolidation status is a GRAPH question, never a content question: answer it with
 `kg_query` on `consolidated-into`. Reading drawer content cannot see the edge.

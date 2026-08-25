@@ -442,6 +442,10 @@ def add_with_chunking(base_args: dict, source_key: str) -> dict:
     except Exception:
       pass
 
+    # Phase 1: stamp root + children (best-effort; never fails capture).
+    for stamped_id in [first_id, *child_ids]:
+      stamp_source_type(stamped_id)
+
     return {
       "status": "stored-chunked",
       "mode": ingest_mode,
@@ -455,13 +459,16 @@ def add_with_chunking(base_args: dict, source_key: str) -> dict:
     }
 
   require_tool_success(parsed, "add_drawer")
+  drawer_id = extract_drawer_id(parsed)
+  # Phase 1: stamp the new source drawer (best-effort; never fails capture).
+  stamp_source_type(drawer_id)
   return {
     "status": "stored",
     "mode": ingest_mode,
     "wing": wing,
     "room": room,
     "source_file": source_key,
-    "drawer_id": extract_drawer_id(parsed),
+    "drawer_id": drawer_id,
     "tool_result": parsed,
   }
 
@@ -508,6 +515,25 @@ maybe_initialize()
 tool_check = f"{tool_prefix}check_duplicate"
 tool_add = f"{tool_prefix}add_drawer"
 tool_update = f"{tool_prefix}update_drawer"
+tool_kg = f"{tool_prefix}kg_add"
+
+# Phase 1 (unified memory): stamp captured source drawers with es-source-type=transcript.
+# Best-effort only — a failed stamp must never fail the capture (same contract as the
+# chunked marker update above). Uses the same tool prefix as every other call here.
+# The request-id counter is a mutable default so it survives being exec'd in any
+# namespace (a `global` would NameError and be swallowed by the except below).
+def stamp_source_type(drawer_id: str, _state: dict = {"id": 9000}) -> None:
+  if not drawer_id:
+    return
+  try:
+    _state["id"] += 1
+    tool_call(_state["id"], tool_kg, {
+      "subject": drawer_id,
+      "predicate": "es-source-type",
+      "object": "transcript",
+    })
+  except Exception:
+    pass
 
 if ingest_mode == "append" and dedup_enabled:
   dup_resp = tool_call(1, tool_check, {"content": content})

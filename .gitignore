@@ -227,3 +227,4 @@ __marimo__/
 /memory/
 node_modules/
 .serena/
+.opencode/

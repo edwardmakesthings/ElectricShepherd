@@ -18,6 +18,11 @@ export type MemgraphToolMap = {
   getDrawer: string;
 };
 
+// Phase 1 (unified memory): the `es-source-type` axis — orthogonal to `es-status`.
+export type ClosetSourceType = "transcript" | "doc" | "synthesis" | "skill";
+
+const CLOSET_SOURCE_TYPES: readonly string[] = ["transcript", "doc", "synthesis", "skill"];
+
 export type SourceDrawerWorkItem = {
   drawer_id: string;
   family_drawer_ids?: string[];
@@ -347,6 +352,21 @@ export class MemgraphClient {
         subject: id,
         predicate: "es-status",
         object: "provisional",
+        source_closet: id,
+        source_run_id: args.source_run_id,
+      });
+    } catch {
+      // non-fatal: leave the closet unstamped rather than fail creation
+    }
+
+    // Phase 1: stamp the new closet `synthesis` on the es-source-type axis.
+    // Independent of the es-status stamp above — separate try/catch so one
+    // failure never masks the other; a failed stamp leaves the axis "unknown".
+    try {
+      await this.kgAdd({
+        subject: id,
+        predicate: "es-source-type",
+        object: "synthesis",
         source_closet: id,
         source_run_id: args.source_run_id,
       });
@@ -809,6 +829,58 @@ export class MemgraphClient {
       source_closet: closetId,
       source_run_id: sourceRunId,
     });
+  }
+
+  // ── Phase 1: es-source-type stamp (orthogonal to es-status) ────────────────
+  // The `es-source-type` KG fact records what KIND of material a closet holds
+  // (transcript | doc | synthesis | skill). It is stamped at write time, never
+  // conflated with `es-status` — each setter scopes its kg_invalidate to its own
+  // predicate, so the two axes are independently settable by construction.
+
+  /** Read a closet's es-source-type. Returns null when unstamped or on read failure. */
+  async getClosetSourceType(closetId: string): Promise<ClosetSourceType | null> {
+    try {
+      const result = await this.kgQuery({
+        entity: closetId,
+        direction: "outgoing",
+        predicate: "es-source-type",
+        recurse: false,
+        max_depth: 1,
+      });
+      const values = this.uniqueFromFactsByDirection(this.parseKgFacts(result), "outgoing");
+      for (const value of values) {
+        if ((CLOSET_SOURCE_TYPES as readonly string[]).includes(value)) return value as ClosetSourceType;
+      }
+      return null;
+    } catch {
+      // non-fatal: a failed read reads as "unstamped", not an error
+      return null;
+    }
+  }
+
+  /**
+   * Set a closet's es-source-type, invalidating any previous value first
+   * (best-effort). Returns true on success, false on failure — never throws in
+   * the normal flow. Does not touch `es-status` facts.
+   */
+  async setClosetSourceType(closetId: string, sourceType: ClosetSourceType, sourceRunId?: string): Promise<boolean> {
+    try {
+      const previous = await this.getClosetSourceType(closetId);
+      if (previous && previous !== sourceType) {
+        await this.kgInvalidate({ subject: closetId, predicate: "es-source-type", object: previous }).catch(() => ({}));
+      }
+      await this.kgAdd({
+        subject: closetId,
+        predicate: "es-source-type",
+        object: sourceType,
+        source_closet: closetId,
+        source_run_id: sourceRunId,
+      });
+      return true;
+    } catch {
+      // non-fatal: leave the closet unstamped rather than fail the caller
+      return false;
+    }
   }
 
   search(query: string, limit = 5, wing?: string, room?: string) {

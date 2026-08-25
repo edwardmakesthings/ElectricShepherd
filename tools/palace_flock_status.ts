@@ -259,7 +259,9 @@ function extractOutgoingObjects(entity: string, facts: Record<string, unknown>[]
   return [...out];
 }
 
-async function mapLimit<T, R>(items: T[], concurrency: number, worker: (item: T) => Promise<R>): Promise<R[]> {
+// Exported so other tools can reuse the same fixed-slot pool for per-drawer KG
+// traffic (concurrency 8 is the only validated level in this repo).
+export async function mapLimit<T, R>(items: T[], concurrency: number, worker: (item: T) => Promise<R>): Promise<R[]> {
   if (items.length === 0) return [];
   const results: R[] = new Array(items.length);
   let cursor = 0;
