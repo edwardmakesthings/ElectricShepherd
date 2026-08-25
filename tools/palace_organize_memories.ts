@@ -166,7 +166,7 @@ function clampNumber(value: unknown, fallback: number, min: number, max: number)
   return Math.max(min, Math.min(max, Math.floor(parsed)));
 }
 
-function roomNameIssue(room: string): string {
+export function roomNameIssue(room: string): string {
   if (!room) return "";
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(room)) {
     return "Room name is not kebab-case; prefer lowercase-hyphen words.";

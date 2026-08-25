@@ -25,6 +25,7 @@ tools:
   file-reader_json_session_extract_messages: true
   search-tools_grep: true
   relocate_memory: true
+  ingest_docs: true
   write: true
 ---
 # Dreamer
@@ -57,6 +58,7 @@ Rules:
 - Room naming contract: use canonical kebab-case topic names (`[a-z0-9]+(-[a-z0-9]+)*`). Do not mint derivation/process names (`synthesis`, `mem-synth`, `level-<n>`, `arc*`) as durable rooms.
 - Room selection contract: before proposing a new room, check existing room inventory for the wing (`palace_report` or `palace_list_drawers_multi_room`) and route to the closest existing topical room unless there is clear semantic mismatch.
 - If a new room is still required, present it explicitly as a proposal with rationale and expected scope; do not silently create naming forks.
+- Doc ingestion (`/ingest-docs` → `ingest_docs`) files into the `reference` room of the project wing, reuses an existing reference-like room via `get_taxonomy`, mines via substrate `mempalace_mine` (projects mode), stamps every ingested drawer `es-source-type: doc`, and on re-ingest invalidates stale KG facts on changed drawers before re-stamping. It never touches `es-status`.
 
 Finding transcripts to consolidate (the signal is an ABSENT edge, not a timestamp):
 

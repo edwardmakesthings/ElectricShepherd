@@ -129,6 +129,7 @@ them over hand-rolled `list_drawers` loops, which burn context and time out on b
 | Write a drawer to disk + get metadata only | `export_drawer` |
 | Re-file a drawer, or lift a verbatim excerpt | `relocate_memory` |
 | Backfill the `es-source-type` axis on existing drawers (bounded, dry-run first) | `palace_stamp_source_type` |
+| Ingest a docs dir into the reference room + stamp es-source-type: doc (mine + staleness invalidation, dry-run first) | `ingest_docs` |
 | Move drawers in bulk between scopes | `move_drawers` |
 | Delete drawers by ID or scope | `delete_drawers` |
 | Force-capture THIS session's transcript now | `capture_transcript` |
