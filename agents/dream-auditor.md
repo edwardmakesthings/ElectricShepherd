@@ -1,6 +1,6 @@
 ---
 description: Bidirectional synthesis validator (policy escalation gate)
-mode: subagent
+mode: all
 model: "litellm/implementer-qwen3.8-27b"
 temperature: 0.1
 top_p: 0.8

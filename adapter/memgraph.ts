@@ -377,7 +377,36 @@ export class MemgraphClient {
     return this.call("resolveCanonical", { node_id: nodeId, max_hops: maxHops });
   }
 
-  kgQuery(args: {
+  /**
+   * True once the server has rejected the graph-traversal parameters, meaning we
+   * are talking to a build older than `179c613 feat: align graph tools to closet
+   * lineage model`. Cached so one rejection costs one wasted round trip, not one
+   * per call.
+   */
+  private kgQueryTraversalUnsupported = false;
+
+  private isUnknownParameterError(err: unknown): boolean {
+    const message = String(err || "").toLowerCase();
+    return message.includes("-32602") || message.includes("unknown parameter");
+  }
+
+  /**
+   * Current MemPalace `kg_query` supports server-side `predicate` filtering and
+   * recursive traversal (`recurse` / `max_depth`); see `mcp_server.py`'s
+   * `mempalace_kg_query` schema.
+   *
+   * Older deployed builds accept only `entity` / `direction` / `as_of` and reject
+   * the whole call with `-32602 Unknown parameters`. Every caller here wraps this
+   * in `.catch(() => ({}))`, so against such a server the rejection surfaced as
+   * "this entity has no facts" and made every consolidated source look
+   * permanently unconsolidated. That silent-false-negative is why we degrade
+   * explicitly instead of assuming a fixed contract.
+   *
+   * So: prefer the server, and fall back to a client-side predicate filter when
+   * it can't. The fallback is single-hop only — `recurse` / `max_depth` cannot be
+   * emulated here — so a stale server yields shallow lineage rather than none.
+   */
+  async kgQuery(args: {
     entity: string;
     as_of?: string;
     direction?: "incoming" | "outgoing" | "both";
@@ -385,7 +414,35 @@ export class MemgraphClient {
     recurse?: boolean;
     max_depth?: number;
   }) {
-    return this.call("kgQuery", args as unknown as JsonMap);
+    const predicate = this.asString(args.predicate).trim();
+    const wireArgs: JsonMap = { entity: args.entity };
+    if (args.direction) wireArgs.direction = args.direction;
+    if (args.as_of) wireArgs.as_of = args.as_of;
+
+    let result: JsonMap | undefined;
+
+    if (!this.kgQueryTraversalUnsupported) {
+      const fullArgs: JsonMap = { ...wireArgs };
+      if (predicate) fullArgs.predicate = predicate;
+      if (args.recurse) fullArgs.recurse = true;
+      if (typeof args.max_depth === "number") fullArgs.max_depth = args.max_depth;
+
+      try {
+        result = await this.call("kgQuery", fullArgs);
+      } catch (err) {
+        if (!this.isUnknownParameterError(err)) throw err;
+        this.kgQueryTraversalUnsupported = true;
+      }
+    }
+
+    if (result === undefined) result = await this.call("kgQuery", wireArgs);
+    if (!predicate) return result;
+
+    // Re-filter even when the server already did: it keeps both paths behaving
+    // identically, so a traversal-capable server can't quietly widen what
+    // callers like `isSourceDrawerConsolidated` treat as a match.
+    const facts = this.parseKgFacts(result).filter((fact) => this.asString(fact.predicate).trim() === predicate);
+    return { ...this.asObject(result), facts, count: facts.length };
   }
 
   async getLineageSources(nodeId: string, maxDepth = 20) {
@@ -669,7 +726,19 @@ export class MemgraphClient {
       return await this.call("updateDrawer", args);
     } catch (err) {
       if (!this.shouldRetryWithDreamNamespacedTool(err)) throw err;
-      return this.callTool("dream_mempalace-mempalace_update_drawer", args);
+      const fallbackNames = [
+        "mempalace-mempalace_update_drawer",
+        "dream_mempalace-mempalace_update_drawer",
+      ];
+      let lastErr: unknown = err;
+      for (const toolName of fallbackNames) {
+        try {
+          return await this.callTool(toolName, args);
+        } catch (fallbackErr) {
+          lastErr = fallbackErr;
+        }
+      }
+      throw lastErr;
     }
   }
 

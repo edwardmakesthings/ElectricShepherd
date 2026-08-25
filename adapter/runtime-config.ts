@@ -16,7 +16,7 @@ type RuntimeConfigSpec = {
   allowedValues?: readonly string[]
 }
 
-type ConfigValueSource = "default" | "config"
+type ConfigValueSource = "default" | "config" | "env"
 
 export type LoadedRuntimeConfig = {
   configPath?: string
@@ -371,6 +371,17 @@ export function loadRuntimeConfig(args: {
   const sourceByEnvKey: Record<string, ConfigValueSource> = {}
 
   for (const spec of RUNTIME_CONFIG_SPECS) {
+    // Precedence: explicit env > config file > default. An explicitly-set env var
+    // must win, otherwise a caller cannot isolate a spawned run from project
+    // config (e.g. one-shot consolidation subagents that must start clean of
+    // mem-core injection).
+    const fromEnv = normalizeSpecValue(spec, args.env[spec.envKey])
+    if (typeof fromEnv === "string") {
+      valuesByEnvKey[spec.envKey] = fromEnv
+      sourceByEnvKey[spec.envKey] = "env"
+      continue
+    }
+
     const fromConfig = normalizeSpecValue(spec, getByPath(rawConfig, spec.path))
     if (typeof fromConfig === "string") {
       valuesByEnvKey[spec.envKey] = fromConfig

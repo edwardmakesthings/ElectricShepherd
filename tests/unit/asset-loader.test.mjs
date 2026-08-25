@@ -115,7 +115,10 @@ test("real bundled assets parse into the expected dreamer agents and commands", 
   for (const name of ["dreamer", "dream-mapper", "dream-auditor"]) {
     assert.ok(agents[name], `expected bundled agent ${name}`);
     assert.ok(typeof agents[name].prompt === "string" && agents[name].prompt.length > 0);
-    assert.ok(agents[name].mode === "primary" || agents[name].mode === "subagent");
+    // "all" is required for dream-mapper/dream-auditor: `opencode run --agent <name>`
+    // cannot target a `mode: subagent` agent, and the consolidation script invokes
+    // them exactly that way.
+    assert.ok(["primary", "subagent", "all"].includes(agents[name].mode));
   }
   for (const name of ["consolidate", "consolidate-deep", "memory-refresh", "memory-status"]) {
     assert.ok(commands[name], `expected bundled command ${name}`);
@@ -124,7 +127,9 @@ test("real bundled assets parse into the expected dreamer agents and commands", 
     assert.ok(typeof commands[name].template === "string" && commands[name].template.length > 0);
   }
   // Converted keys must be current, not deprecated.
-  assert.equal(agents.dreamer.steps, 120);
+  // Raised from 120: the model was giving up before finishing long consolidation
+  // runs. Keep in sync with `steps:` in agents/dreamer.md.
+  assert.equal(agents.dreamer.steps, 400);
   assert.deepEqual(agents.dreamer.permission, {
     read: "allow",
     edit: "deny",

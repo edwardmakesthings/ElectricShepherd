@@ -3,6 +3,7 @@ import test, { after, before } from "node:test";
 
 import { runSynthesisConsolidation } from "../../adapter/synthesis-consolidation.ts";
 import { expandScopedRetrieval } from "../../adapter/retrieval-expansion.ts";
+import { runValidationMergeReview } from "../../adapter/validation-merge-review.ts";
 import { createTestRoom, isIntegrationEnabled } from "../helpers/mempalace-room-fixture.mjs";
 
 /**
@@ -15,6 +16,12 @@ import { createTestRoom, isIntegrationEnabled } from "../helpers/mempalace-room-
  * derived drawer is BOTH (a) discoverable by scope via
  * `listScopedDerivedDrawers` — a hard, similarity-independent guarantee — and
  * (b) surfaced by the retrieval-expansion adapter for the room.
+ *
+ * Note the validation step between the two: under P2-2 a new closet is stamped
+ * `es-status = provisional` at creation and is deliberately filtered out of
+ * default retrieval until validation promotes it to `active` on >= 2 direct
+ * sources. So consolidation alone is NOT expected to make a node retrievable —
+ * running validation is part of the real end-to-end path, not test scaffolding.
  *
  * We provide mapper summaries keyed to the seeded drawer ids so the derived
  * drawer references genuine source drawers, while keeping the test independent of
@@ -104,7 +111,31 @@ test("source drawers consolidate into a derived drawer that is then discoverable
     `listScopedDerivedDrawers did not return the new node. got: ${JSON.stringify(scopedIds)}`
   );
 
-  // 4) The retrieval-expansion adapter surfaces the same node for the room.
+  // 4) The new closet starts provisional, so default retrieval must NOT show it
+  //    yet. Asserting this first keeps the promotion below honest: without it,
+  //    step 5 would still pass if the provisional gate silently stopped working.
+  assert.equal(
+    await room.client.getClosetStatus(consolidation.createdNodeId),
+    "provisional",
+    "a newly created closet must be stamped provisional"
+  );
+
+  // 5) Validation promotes it to active, because it has two direct sources.
+  await runValidationMergeReview(room.client, {
+    scopeRoom: room.room,
+    scopeWing: room.wing,
+    filterWing: room.wing,
+    filterRoom: room.room,
+    candidateNodeIds: [consolidation.createdNodeId],
+    applyMerges: false,
+  });
+  assert.equal(
+    await room.client.getClosetStatus(consolidation.createdNodeId),
+    "active",
+    "validation must promote a closet with >= 2 direct sources"
+  );
+
+  // 6) Now that it is active, the retrieval-expansion adapter surfaces it.
   const retrieval = await expandScopedRetrieval(room.client, {
     query: "inflation guard dedup gate consolidation",
     scope_room: room.room,

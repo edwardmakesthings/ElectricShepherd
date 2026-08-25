@@ -29,7 +29,7 @@ import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-c
 import { loadRuntimeEnv } from "./runtime-env.ts";
 import { acquireConsolidationLock, releaseConsolidationLock } from "./consolidation-lock.ts";
 
-let activeRunProgressPath = "";
+let activeRunId = "";
 
 declare const process: {
   argv: string[];
@@ -42,6 +42,10 @@ declare const process: {
 };
 
 const NATIVE_COORD_HELPER_PATH = fileURLToPath(new URL("./native-consolidation-coord.py", import.meta.url));
+
+// Raw subagent stdout is written here when it cannot be parsed, so an unusable
+// answer can be diagnosed without re-running a multi-minute mapper pass.
+const SUBAGENT_DEBUG_DIR = ".electric-shepherd/scratch/subagent-output";
 
 // Project root whose shared consolidation lock this process currently holds (null when it
 // does not hold one, e.g. the lock was inherited from the spawning plugin). Used
@@ -64,7 +68,7 @@ function isFalsyFlag(value: string | undefined): boolean {
 type MapperEnvelope = {
   summaries: TranscriptInsightSummary[];
   raw: unknown;
-  via: "task-tool" | "opencode-run" | "none";
+  via: "opencode-run" | "none";
 };
 
 type AuditorEnvelope = {
@@ -72,7 +76,7 @@ type AuditorEnvelope = {
   findings: string[];
   recommendedActions: string[];
   raw: unknown;
-  via: "task-tool" | "opencode-run" | "none";
+  via: "opencode-run" | "none";
 };
 
 type CadenceState = {
@@ -134,9 +138,40 @@ function asString(value: unknown): string {
 }
 
 function parsePositiveInt(value: string | undefined, fallback: number, min = 1): number {
-  const parsed = Number(value || "");
+  const raw = String(value ?? "").trim();
+  if (!raw) return fallback;
+  const parsed = Number(raw);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.max(min, Math.floor(parsed));
+}
+
+function resolveConsolidationMCPURLs(baseURL: string): { readURL: string; writeURL: string } {
+  const readURL = baseURL.trim();
+  if (!readURL) return { readURL, writeURL: readURL };
+  if (!/\/toolset\/thinking\/mcp\/?$/i.test(readURL)) return { readURL, writeURL: readURL };
+  const writeURL = readURL.replace(/\/toolset\/thinking\/mcp\/?$/i, "/toolset/dreaming/mcp");
+  return { readURL, writeURL };
+}
+
+const GRAPH_WRITE_TOOL_BASES = new Set([
+  "apply_merge",
+  "resolve_canonical",
+  "kg_query",
+  "get_height",
+  "find_merge_candidates",
+  "find_closet_lineage_issues",
+  "update_drawer",
+  "kg_add",
+  "kg_invalidate",
+]);
+
+function isGraphWriteToolName(name: string): boolean {
+  const normalized = name.trim().toLowerCase();
+  if (!normalized) return false;
+  for (const base of GRAPH_WRITE_TOOL_BASES) {
+    if (normalized === base || normalized.endsWith(`_${base}`) || normalized.endsWith(`-${base}`)) return true;
+  }
+  return false;
 }
 
 function getActivePromptRoutingFromEnv(env: Record<string, string | undefined>): PromptRouting {
@@ -180,23 +215,14 @@ function tryWriteFile(path: string, content: string): void {
   renameSync(tmpPath, path);
 }
 
-function resolveRunProgressPath(runId: string): string {
+function resolveRunEventLogPath(): string {
   const projectRoot = process.env.ESHEPHERD_PROJECT_ROOT || process.cwd();
-  return join(projectRoot, ".electric-shepherd", "runs", `${runId}.progress.json`);
+  return join(projectRoot, ".electric-shepherd", "consolidation-runs.ndjson");
 }
 
-function markRunProgressFailed(path: string, error: string): void {
-  const existingRaw = tryReadFile(path);
-  const base = existingRaw ? asObject(JSON.parse(existingRaw)) : {};
-  const output = {
-    ...base,
-    status: "failed",
-    phase: "failed",
-    error,
-    updatedAt: new Date().toISOString(),
-    completedAt: new Date().toISOString(),
-  };
-  tryWriteFile(path, JSON.stringify(output, null, 2));
+function appendRunEvent(path: string, event: Record<string, unknown>): void {
+  mkdirSync(dirname(path), { recursive: true });
+  appendFileSync(path, `${JSON.stringify(event)}\n`, "utf8");
 }
 
 function parseMapperSummariesFromFile(path: string | undefined): TranscriptInsightSummary[] | undefined {
@@ -232,16 +258,25 @@ function toSummaryFromRaw(raw: unknown): TranscriptInsightSummary[] {
   const out: TranscriptInsightSummary[] = [];
   const arr = asArray(raw);
   for (const item of arr) {
+    // Mappers emit the agreed field names in whatever casing their prompt
+    // template used — camelCase, snake_case, or UPPER_SNAKE. Match on the
+    // letters only so casing and separators stop being a parse failure.
     const obj = asObject(item);
-    const transcriptId = asString(obj.transcriptId || obj.transcript_id || obj.id).trim();
+    const byNormalizedKey = new Map<string, unknown>();
+    for (const [key, value] of Object.entries(obj)) {
+      byNormalizedKey.set(key.toLowerCase().replace(/[^a-z0-9]/g, ""), value);
+    }
+    const field = (name: string): unknown => byNormalizedKey.get(name);
+
+    const transcriptId = asString(field("transcriptid") ?? field("id")).trim();
     if (!transcriptId) continue;
 
-    const pickList = (camel: string, snake: string): string[] => {
-      const src = asArray(obj[camel] ?? obj[snake]);
-      return src.map((v) => asString(v).trim()).filter(Boolean);
-    };
+    const pickList = (name: string): string[] =>
+      asArray(field(name))
+        .map((v) => asString(v).trim())
+        .filter(Boolean);
 
-    const confidenceRaw = asString(obj.confidence).trim().toLowerCase();
+    const confidenceRaw = asString(field("confidence")).trim().toLowerCase();
     const confidence =
       confidenceRaw === "high" || confidenceRaw === "medium" || confidenceRaw === "low"
         ? (confidenceRaw as "high" | "medium" | "low")
@@ -250,39 +285,65 @@ function toSummaryFromRaw(raw: unknown): TranscriptInsightSummary[] {
     out.push({
       transcriptId,
       confidence,
-      durableFacts: pickList("durableFacts", "durable_facts"),
-      decisions: pickList("decisions", "decisions"),
-      rootCausesAndWorkedExamples: pickList("rootCausesAndWorkedExamples", "root_causes_and_worked_examples"),
-      subsystemsAndFiles: pickList("subsystemsAndFiles", "subsystems_and_files"),
-      openItems: pickList("openItems", "open_items"),
-      rawExcerpt: asString(obj.rawExcerpt || obj.raw_excerpt) || undefined,
+      durableFacts: pickList("durablefacts"),
+      decisions: pickList("decisions"),
+      rootCausesAndWorkedExamples: pickList("rootcausesandworkedexamples"),
+      subsystemsAndFiles: pickList("subsystemsandfiles"),
+      openItems: pickList("openitems"),
+      rawExcerpt: asString(field("rawexcerpt")) || undefined,
     });
   }
   return out;
 }
 
-function parseEmbeddedJSON(text: string): unknown {
-  const trimmed = text.trim();
+// eslint-disable-next-line no-control-regex
+const ANSI_ESCAPE_PATTERN = /\u001B\[[0-9;]*[A-Za-z]/g;
+const FENCED_BLOCK_PATTERN = /```(?:json)?\s*([\s\S]*?)```/g;
+
+/**
+ * Extract the agent's JSON answer from opencode stdout.
+ *
+ * `accept` is what makes this safe: subagent stdout is full of incidental JSON
+ * (the turn-guard startup banner alone contains `["dreamer"]`), and any of it
+ * can parse successfully *before* the real payload. Without a shape check the
+ * first valid fragment wins and the answer is silently discarded.
+ */
+function parseEmbeddedJSON(text: string, accept: (value: unknown) => boolean = () => true): unknown {
+  // opencode writes ANSI-coloured chrome around the agent's answer. Those escape
+  // sequences contain "[", which the bracket scan below would otherwise latch
+  // onto instead of the real payload.
+  const trimmed = text.replace(ANSI_ESCAPE_PATTERN, "").trim();
   if (!trimmed) return undefined;
 
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    // Continue to bracket scan fallback.
+  const tryParse = (candidate: string): { value: unknown } | undefined => {
+    try {
+      const value = JSON.parse(candidate);
+      return accept(value) ? { value } : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  const whole = tryParse(trimmed);
+  if (whole) return whole.value;
+
+  // Agents commonly wrap the answer in a ```json fence and follow it with prose.
+  for (const match of trimmed.matchAll(FENCED_BLOCK_PATTERN)) {
+    const body = (match[1] ?? "").trim();
+    if (!body) continue;
+    const fenced = tryParse(body);
+    if (fenced) return fenced.value;
   }
 
-  const firstBrace = trimmed.indexOf("{");
-  const firstBracket = trimmed.indexOf("[");
-  const candidates = [firstBrace, firstBracket].filter((n) => n >= 0).sort((a, b) => a - b);
-  for (const start of candidates) {
-    const endChar = trimmed[start] === "[" ? "]" : "}";
-    const end = trimmed.lastIndexOf(endChar);
-    if (end <= start) continue;
-    const snippet = trimmed.slice(start, end + 1);
-    try {
-      return JSON.parse(snippet);
-    } catch {
-      // Keep trying other candidates.
+  // Last resort: scan structural openers from the END backwards. The agent's
+  // final answer is the last thing printed, while log chrome precedes it.
+  for (let start = trimmed.length - 1; start >= 0; start -= 1) {
+    const openChar = trimmed[start];
+    if (openChar !== "[" && openChar !== "{") continue;
+    const endChar = openChar === "[" ? "]" : "}";
+    for (let end = trimmed.lastIndexOf(endChar); end > start; end = trimmed.lastIndexOf(endChar, end - 1)) {
+      const scanned = tryParse(trimmed.slice(start, end + 1));
+      if (scanned) return scanned.value;
     }
   }
 
@@ -384,21 +445,58 @@ function releaseHeldConsolidationGuards(): void {
   }
 }
 
+/**
+ * Environment for one-shot subagent runs.
+ *
+ * These runs must be clean of external context: the mapper/auditor see only the
+ * prompt we hand them. It is also what makes them terminate — mem-core
+ * reinjection on idle injects a fresh user turn after every completed turn, so
+ * a non-interactive `opencode run` never reaches a final state and dies on the
+ * spawn timeout instead of returning output.
+ */
+function buildIsolatedSubagentEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return {
+    ...env,
+    // No external context injected into the subagent session.
+    ESHEPHERD_MEMCORE_REINJECT_ENABLED: "false",
+    ESHEPHERD_MEMCORE_REINJECT_ON_IDLE: "false",
+    ESHEPHERD_MEMCORE_REINJECT_ON_START: "false",
+    ESHEPHERD_MEMCORE_REINJECT_ON_COMPACT: "false",
+    // A consolidation run must not recursively trigger consolidation.
+    ESHEPHERD_AUTO_CONSOLIDATION_ENABLED: "false",
+    ESHEPHERD_AUTO_CONSOLIDATION_ON_IDLE: "false",
+    ESHEPHERD_AUTO_CONSOLIDATION_ON_COMPACT: "false",
+  };
+}
+
 function runSubagentViaOpenCode(args: {
   opencodeBin: string;
-  agentName: string;
+  agentName?: string;
   modelArg?: string;
   prompt: string;
+  timeoutMs: number;
 }): string {
-  const commandArgs = ["run", args.prompt, "--agent", args.agentName];
+  const commandArgs = ["run", args.prompt];
+  if (args.agentName) {
+    commandArgs.push("--agent", args.agentName);
+  }
   if (args.modelArg) {
     commandArgs.push("--model", args.modelArg);
   }
   return execFileSync(args.opencodeBin, commandArgs, {
     encoding: "utf8",
+    timeout: args.timeoutMs,
     maxBuffer: 2 * 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
+    env: buildIsolatedSubagentEnv(process.env),
   });
+}
+
+// A mapper pass reads every worklist drawer over MCP before it answers; a
+// two-drawer batch measured ~250s, so 180s guaranteed a timeout kill on work
+// that was progressing normally. Budget for real batches, not the empty case.
+function resolveSubagentTimeoutMs(env: Record<string, string | undefined>): number {
+  return parsePositiveInt(env.ESHEPHERD_SUBAGENT_TIMEOUT_MS, 900000, 1000);
 }
 
 type MemcoreApplyOptions = {
@@ -458,7 +556,6 @@ function resolveMemcoreFilePath(args: {
 }
 
 async function callSubagentMapper(args: {
-  mcp: MCPHttpClient;
   toolPrefix: string;
   mapperAgentName: string;
   activeModel?: PromptModelRouting;
@@ -467,6 +564,7 @@ async function callSubagentMapper(args: {
   room: string;
   worklistIds: string[];
   opencodeBin: string;
+  timeoutMs: number;
 }): Promise<MapperEnvelope> {
   const getDrawerTool = `${args.toolPrefix}get_drawer`;
   const orderedIds = args.worklistIds.filter(Boolean);
@@ -481,59 +579,60 @@ async function callSubagentMapper(args: {
   ].join("\n");
 
   try {
-    const response = await args.mcp.callTool("task", {
-      description: `Mapper summaries for ${args.query}`,
-      prompt: taskPrompt,
-      subagent_type: args.mapperAgentName,
-    });
-
-    const parsed = toSummaryFromRaw(response);
-    if (parsed.length > 0) {
-      return { summaries: parsed, raw: response, via: "task-tool" };
-    }
-
-    const text = asString((response as Record<string, unknown>).text || (response as Record<string, unknown>).result);
-    if (text) {
-      const parsedJSON = parseEmbeddedJSON(text);
-      if (parsedJSON) {
-        const summaries = toSummaryFromRaw(parsedJSON);
-        if (summaries.length > 0) {
-          return { summaries, raw: response, via: "task-tool" };
-        }
-      }
-    }
-  } catch {
-    // Fall through to opencode-run fallback.
-  }
-
-  try {
+    const startedAt = Date.now();
+    process.stderr.write(
+      `[memory-consolidation-validation] mapper opencode-run start agent=${args.mapperAgentName} timeoutMs=${args.timeoutMs}\n`,
+    );
     const output = runSubagentViaOpenCode({
       opencodeBin: args.opencodeBin,
       agentName: args.mapperAgentName,
       modelArg: formatPromptModelArg(args.activeModel),
       prompt: taskPrompt,
+      timeoutMs: args.timeoutMs,
     });
-    const parsedJSON = parseEmbeddedJSON(output);
+    // Only accept a fragment that actually yields mapper summaries; incidental
+    // JSON in the log chrome (e.g. `["dreamer"]`) parses fine but is not the answer.
+    const parsedJSON = parseEmbeddedJSON(output, (value) => toSummaryFromRaw(value).length > 0);
     if (parsedJSON) {
       const summaries = toSummaryFromRaw(parsedJSON);
       if (summaries.length > 0) {
+        process.stderr.write(
+          `[memory-consolidation-validation] mapper opencode-run done summaries=${summaries.length} durationMs=${Date.now() - startedAt}\n`,
+        );
         return { summaries, raw: output, via: "opencode-run" };
       }
     }
-  } catch {
-    // Keep empty and let caller continue with non-subagent flow.
+    // The mapper ran but we could not use its answer. Persist the raw stdout —
+    // without it "mapper unavailable" is indistinguishable from a crash, and the
+    // run costs minutes to reproduce.
+    const debugPath = `${SUBAGENT_DEBUG_DIR}/mapper-${Date.now()}.txt`;
+    try {
+      mkdirSync(SUBAGENT_DEBUG_DIR, { recursive: true });
+      writeFileSync(debugPath, output, "utf8");
+      process.stderr.write(
+        `[memory-consolidation-validation] mapper output unusable parsed=${parsedJSON ? "yes" : "no"} raw=${debugPath}\n`,
+      );
+    } catch {
+      // Debug capture is best-effort.
+    }
+  } catch (err) {
+    process.stderr.write(
+      `[memory-consolidation-validation] mapper opencode-run failed err=${String(err)}\n`,
+    );
   }
+
+  process.stderr.write("[memory-consolidation-validation] mapper unavailable (no parseable opencode output)\n");
 
   return { summaries: [], raw: null, via: "none" };
 }
 
 async function callSubagentAuditor(args: {
-  mcp: MCPHttpClient;
   auditorAgentName: string;
   activeModel?: PromptModelRouting;
   consolidationResult: unknown;
   validationResult: unknown;
   opencodeBin: string;
+  timeoutMs: number;
 }): Promise<AuditorEnvelope> {
   const taskPrompt = [
     "Audit consolidation and validation outputs.",
@@ -550,48 +649,25 @@ async function callSubagentAuditor(args: {
   let recommendedActions: string[] = [];
 
   try {
-    const response = await args.mcp.callTool("task", {
-      description: "Audit consolidation and validation outputs",
-      prompt: taskPrompt,
-      subagent_type: args.auditorAgentName,
-    });
-
-    const directObj = asObject(response);
-    const maybeVerdict = asString(directObj.verdict).toLowerCase();
-    if (maybeVerdict === "pass" || maybeVerdict === "revise" || maybeVerdict === "escalate") {
-      verdict = maybeVerdict;
-      findings = asArray(directObj.findings).map((v) => asString(v)).filter(Boolean);
-      recommendedActions = asArray(directObj.recommendedActions || directObj.recommended_actions)
-        .map((v) => asString(v))
-        .filter(Boolean);
-      return { verdict, findings, recommendedActions, raw: response, via: "task-tool" };
-    }
-
-    const text = asString(directObj.text || directObj.result);
-    if (text) {
-      const parsed = asObject(parseEmbeddedJSON(text));
-      const parsedVerdict = asString(parsed.verdict).toLowerCase();
-      if (parsedVerdict === "pass" || parsedVerdict === "revise" || parsedVerdict === "escalate") {
-        verdict = parsedVerdict;
-      }
-      findings = asArray(parsed.findings).map((v) => asString(v)).filter(Boolean);
-      recommendedActions = asArray(parsed.recommendedActions || parsed.recommended_actions)
-        .map((v) => asString(v))
-        .filter(Boolean);
-      return { verdict, findings, recommendedActions, raw: response, via: "task-tool" };
-    }
-  } catch {
-    // Fall through to opencode-run fallback.
-  }
-
-  try {
+    const startedAt = Date.now();
+    process.stderr.write(
+      `[memory-consolidation-validation] auditor opencode-run start agent=${args.auditorAgentName} timeoutMs=${args.timeoutMs}\n`,
+    );
     const output = runSubagentViaOpenCode({
       opencodeBin: args.opencodeBin,
       agentName: args.auditorAgentName,
       modelArg: formatPromptModelArg(args.activeModel),
       prompt: taskPrompt,
+      timeoutMs: args.timeoutMs,
     });
-    const parsed = asObject(parseEmbeddedJSON(output));
+    // Same trap as the mapper: require the fragment to carry a real verdict
+    // rather than accepting the first parseable JSON in the log chrome.
+    const parsed = asObject(
+      parseEmbeddedJSON(output, (value) => {
+        const candidate = asString(asObject(value).verdict).toLowerCase();
+        return candidate === "pass" || candidate === "revise" || candidate === "escalate";
+      }),
+    );
     if (Object.keys(parsed).length > 0) {
       const parsedVerdict = asString(parsed.verdict).toLowerCase();
       if (parsedVerdict === "pass" || parsedVerdict === "revise" || parsedVerdict === "escalate") {
@@ -601,16 +677,23 @@ async function callSubagentAuditor(args: {
       recommendedActions = asArray(parsed.recommendedActions || parsed.recommended_actions)
         .map((v) => asString(v))
         .filter(Boolean);
+      process.stderr.write(
+        `[memory-consolidation-validation] auditor opencode-run done verdict=${verdict} findings=${findings.length} durationMs=${Date.now() - startedAt}\n`,
+      );
       return { verdict, findings, recommendedActions, raw: output, via: "opencode-run" };
     }
-  } catch {
-    // Return a structured fallback so pipeline remains usable.
+  } catch (err) {
+    process.stderr.write(
+      `[memory-consolidation-validation] auditor opencode-run failed err=${String(err)}\n`,
+    );
   }
+
+  process.stderr.write("[memory-consolidation-validation] auditor unavailable (no parseable opencode output)\n");
 
   return {
     verdict: "escalate",
-    findings: ["auditor output unavailable; no task tool or parseable subagent output"],
-    recommendedActions: ["retry with --use-live-auditor once subagent runtime is available"],
+    findings: ["auditor output unavailable; no parseable subagent output"],
+    recommendedActions: ["retry with --use-live-auditor after confirming agent output format"],
     raw: null,
     via: "none",
   };
@@ -659,7 +742,10 @@ function parseConsolidationOptions(argv: string[]): SynthesisConsolidationOption
 function parseWorklistOptions(argv: string[]): WorklistOptions {
   const allMode = hasFlag(argv, "--all") || hasFlag(argv, "--full-scope") || hasFlag(argv, "--reprocess-all");
   const limit = Number(getArg(argv, "--worklist-limit") || getArg(argv, "--search-limit") || "200");
-  const batchSize = Math.max(1, Number(getArg(argv, "--batch-size") || "25"));
+  // Default 1: one transcript family per subagent run. A single desktop runs one
+  // agent at a time, so larger batches buy no parallelism -- they only widen the
+  // blast radius, since a timeout loses the entire batch rather than one item.
+  const batchSize = Math.max(1, Number(getArg(argv, "--batch-size") || "1"));
   const defaultSourceRoom =
     (process.env.ESHEPHERD_SOURCE_CAPTURE_ROOM || "").trim() ||
     "source-transcripts";
@@ -1081,12 +1167,12 @@ function usage(): string {
     "  --min-section-count <n>",
     "  --mapper-confidence-floor <high|medium|low>",
     "  --mapper-summaries-file <path-to-json-array>",
-    "  --use-live-mapper                (invoke dream-mapper via task tool)",
+    "  --use-live-mapper                (invoke dream-mapper via opencode run)",
     "  --mapper-agent <name>            (default: dream-mapper)",
     "  --all | --full-scope             (worklist mode: reprocess all source drawers in scope)",
     "  --room <room>                    (source room; default: ESHEPHERD_SOURCE_CAPTURE_ROOM or source-transcripts)",
     "  --retry-failed-only              (source room becomes <room>-failed or --failed-room)",
-    "  --batch-size <n>                 (chunk worklist into batch consolidation calls; default: 25)",
+    "  --batch-size <n>                 (transcript families per subagent run; default: 1)",
     "  --worklist-limit <n>             (max source drawers enumerated; default: 200)",
     "  --processed-room <room>          (default: <room>-processed)",
     "  --failed-room <room>             (default: <room>-failed)",
@@ -1105,7 +1191,7 @@ function usage(): string {
     "  --apply-merges                   (applies auto-merge decisions; default is read-only)",
     "  --ntfy-url <url>",
     "  --escalation-topic <topic>",
-    "  --use-live-auditor               (invoke dream-auditor via task tool)",
+    "  --use-live-auditor               (invoke dream-auditor via opencode run)",
     "  --auditor-agent <name>           (default: dream-auditor)",
     "",
     "Mem-core apply flags:",
@@ -1161,8 +1247,8 @@ async function main(): Promise<void> {
     return;
   }
 
-  const runProgressPath = resolveRunProgressPath(runId);
-  activeRunProgressPath = runProgressPath;
+  const runEventLogPath = resolveRunEventLogPath();
+  activeRunId = runId;
   const runProgressState: Record<string, unknown> = {
     runId,
     status: "running",
@@ -1185,8 +1271,22 @@ async function main(): Promise<void> {
       runProgressState.counters = { ...currentCounters, ...counterPatch };
     }
     Object.assign(runProgressState, patch, { updatedAt: new Date().toISOString() });
-    tryWriteFile(runProgressPath, JSON.stringify(runProgressState, null, 2));
+    appendRunEvent(runEventLogPath, {
+      ts: new Date().toISOString(),
+      runId,
+      event: "progress",
+      status: runProgressState.status,
+      phase: runProgressState.phase,
+      counters: runProgressState.counters,
+      ...(runProgressState.noWorkReason ? { noWorkReason: runProgressState.noWorkReason } : {}),
+    });
   };
+  appendRunEvent(runEventLogPath, {
+    ts: new Date(startTime).toISOString(),
+    runId,
+    event: "start",
+    mode: hasFlag(argv, "--run-cadence") ? "cadence" : "full-pipeline",
+  });
   flushRunProgress({ phase: "lock-acquire" });
 
   let consolidationCoordMode: ConsolidationCoordMode = "bypassed";
@@ -1249,21 +1349,34 @@ async function main(): Promise<void> {
   }
 
   const mcpURL = (process.env.MEMPALACE_MCP_URL || discoveredMCP?.url || "http://localhost:8093/mcp").trim();
+  const { readURL: readMCPURL, writeURL: writeMCPURL } = resolveConsolidationMCPURLs(mcpURL);
   const toolPrefix = process.env.MEMGRAPH_TOOL_PREFIX || "mempalace_";
   const mcpHeaders = resolveMCPHeadersFromEnv(process.env);
   const mcpHttpOptions = parseMCPHttpOptions(process.env);
   const activeRouting = getActivePromptRoutingFromEnv(process.env);
+  const subagentTimeoutMs = resolveSubagentTimeoutMs(process.env);
 
-  const mcp = new MCPHttpClient(mcpURL, mcpHeaders, {
+  const readMCP = new MCPHttpClient(readMCPURL, mcpHeaders, {
     clientName: "electric-shepherd-memory-system",
     requestTimeoutMs: mcpHttpOptions.requestTimeoutMs,
     maxRetries: mcpHttpOptions.maxRetries,
     retryBackoffMs: mcpHttpOptions.retryBackoffMs,
   });
-  await mcp.initialize();
+  await readMCP.initialize();
+
+  const writeMCP = writeMCPURL === readMCPURL
+    ? readMCP
+    : new MCPHttpClient(writeMCPURL, mcpHeaders, {
+        clientName: "electric-shepherd-memory-system-write",
+        requestTimeoutMs: mcpHttpOptions.requestTimeoutMs,
+        maxRetries: mcpHttpOptions.maxRetries,
+        retryBackoffMs: mcpHttpOptions.retryBackoffMs,
+      });
+  if (writeMCP !== readMCP) await writeMCP.initialize();
 
   const client = createMemgraphClient({
-    callTool: (name, args) => mcp.callTool(name, args),
+    callTool: (name, args) =>
+      (isGraphWriteToolName(name) ? writeMCP : readMCP).callTool(name, args),
     toolPrefix,
   });
 
@@ -1356,7 +1469,13 @@ async function main(): Promise<void> {
       });
       consolidationBatches.push(emptyConsolidation);
       flushRunProgress(
-        { phase: "consolidation-empty-worklist" },
+        {
+          phase: "consolidation-empty-worklist",
+          noWorkReason:
+            worklistOptions.retryFailedOnly
+              ? `no-items-in-${worklistOptions.failedRoom}`
+              : `no-items-in-${worklistOptions.sourceRoom}`,
+        },
         {
           chunkIndex: 0,
           chunkTotal: 0,
@@ -1431,7 +1550,6 @@ async function main(): Promise<void> {
 
       if (useLiveMapper) {
         chunkMapper = await callSubagentMapper({
-          mcp,
           toolPrefix,
           mapperAgentName: getArg(argv, "--mapper-agent") || "dream-mapper",
           activeModel: activeRouting.model,
@@ -1440,6 +1558,7 @@ async function main(): Promise<void> {
           room: worklistOptions.retryFailedOnly ? worklistOptions.failedRoom : worklistOptions.sourceRoom,
           worklistIds: actionable.map((item) => item.drawer_id),
           opencodeBin,
+          timeoutMs: subagentTimeoutMs,
         });
         mapperBatches.push(chunkMapper);
       }
@@ -1551,11 +1670,7 @@ async function main(): Promise<void> {
       mapper = {
         summaries: mergedSummaries,
         raw: mapperBatches.map((batch) => batch.raw),
-        via: mapperBatches.every((batch) => batch.via === "task-tool")
-          ? "task-tool"
-          : mapperBatches.some((batch) => batch.via === "opencode-run")
-            ? "opencode-run"
-            : "none",
+        via: mapperBatches.some((batch) => batch.via === "opencode-run") ? "opencode-run" : "none",
       };
     }
 
@@ -1581,12 +1696,12 @@ async function main(): Promise<void> {
   let auditor: AuditorEnvelope | undefined;
   if (includeBasePipeline && hasFlag(argv, "--use-live-auditor") && consolidation && validationMergeReview) {
     auditor = await callSubagentAuditor({
-      mcp,
       auditorAgentName: getArg(argv, "--auditor-agent") || "dream-auditor",
       activeModel: activeRouting.model,
       consolidationResult: consolidation,
       validationResult: validationMergeReview,
       opencodeBin,
+      timeoutMs: subagentTimeoutMs,
     });
   }
 
@@ -1732,6 +1847,15 @@ async function main(): Promise<void> {
       createdNodeCount: createdNodes.length,
     },
   );
+  appendRunEvent(runEventLogPath, {
+    ts: new Date().toISOString(),
+    runId,
+    event: "finish",
+    status: "completed",
+    durationMs,
+    examinedCount,
+    createdNodeCount: createdNodes.length,
+  });
 
   // P1-2: append run journal entry for crash-safe resume
   try {
@@ -1754,16 +1878,20 @@ async function main(): Promise<void> {
   }
 
   releaseHeldConsolidationGuards();
-  activeRunProgressPath = "";
+  activeRunId = "";
 }
 
 main().catch((err) => {
-  if (activeRunProgressPath) {
-    try {
-      markRunProgressFailed(activeRunProgressPath, String(err));
-    } catch {
-      // best-effort; preserve original error path
-    }
+  try {
+    appendRunEvent(resolveRunEventLogPath(), {
+      ts: new Date().toISOString(),
+      runId: activeRunId || undefined,
+      event: "finish",
+      status: "failed",
+      error: String(err),
+    });
+  } catch {
+    // best-effort
   }
   releaseHeldConsolidationGuards();
   process.stderr.write(`[memory-consolidation-validation] ${String(err)}\n`);

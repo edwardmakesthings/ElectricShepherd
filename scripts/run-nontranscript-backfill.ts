@@ -63,7 +63,8 @@ function parseArgs(argv: string[], env: Record<string, string | undefined>): Par
     includeTranscriptLike: hasFlag(argv, "--include-transcript-like"),
     apply: hasFlag(argv, "--apply"),
     applyMerges: hasFlag(argv, "--apply-merges"),
-    batchSize: Math.max(1, Number(getArg(argv, "--batch-size") || "25")),
+    // Default 1 to match the consolidation script: one item per subagent run.
+    batchSize: Math.max(1, Number(getArg(argv, "--batch-size") || "1")),
     worklistLimit: Math.max(1, Number(getArg(argv, "--worklist-limit") || "200")),
     query: getArg(argv, "--query") || "non-transcript memory consolidation",
   };

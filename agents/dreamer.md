@@ -84,7 +84,7 @@ Timeout-safe discovery protocol (REQUIRED):
 - On timeout, retry once with half the page size (for example `50 -> 25`) for the same room/page.
 - If a room times out twice consecutively, mark that room as blocked and continue with the next candidate room; do not loop on the same failing request.
 - If all candidate rooms are blocked by timeout, stop and report blocked with this deterministic fallback command:
-  `node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts --query "memory consolidation candidates" --batch-size 25 --worklist-limit 200`
+  `node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts --query "memory consolidation candidates" --batch-size 1 --worklist-limit 200`
 
 Large-drawer offload (REQUIRED for anything transcript-sized):
 

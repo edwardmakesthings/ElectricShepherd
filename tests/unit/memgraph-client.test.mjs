@@ -106,16 +106,70 @@ test("listSourceDrawersByScope collapses chunk families and preserves family ids
   assert.ok(family.includes("drawer-chunk-2"));
 });
 
+test("kg_query uses server-side predicate filtering and traversal when supported", async () => {
+  const seen = [];
+  const client = createMemgraphClient({
+    callTool: async (name, args) => {
+      if (name.endsWith("kg_query")) seen.push(args || {});
+      return { facts: [] };
+    },
+  });
+
+  await client.getLineageSources("closet-1", 7);
+
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].predicate, "synthesized-from");
+  assert.equal(seen[0].recurse, true);
+  assert.equal(seen[0].max_depth, 7);
+});
+
+test("kg_query degrades to a single-hop client-side filter on -32602, and stops retrying", async () => {
+  const seen = [];
+  const client = createMemgraphClient({
+    callTool: async (name, args) => {
+      if (!name.endsWith("kg_query")) return { facts: [] };
+      seen.push(args || {});
+      // Pre-179c613 servers reject the traversal parameters outright.
+      if ("predicate" in args || "recurse" in args || "max_depth" in args) {
+        throw new Error("MCP error -32602: Unknown parameters: predicate, recurse, max_depth");
+      }
+      return {
+        facts: [
+          { current: true, subject: "closet-1", predicate: "in-hall", object: "hall-x" },
+          { current: true, subject: "closet-1", predicate: "synthesized-from", object: "drawer-1" },
+        ],
+      };
+    },
+  });
+
+  const first = await client.getLineageSources("closet-1", 7);
+  // Rejected traversal call, then the legacy retry.
+  assert.equal(seen.length, 2);
+  // The unrelated in-hall fact is dropped by the client-side filter.
+  assert.deepEqual(first.ancestors, [{ node_id: "drawer-1" }]);
+
+  // The unsupported-server verdict is cached: no second wasted round trip.
+  await client.getLineageSources("closet-2", 7);
+  assert.equal(seen.length, 3);
+  for (const args of seen.slice(1)) {
+    assert.equal("predicate" in args, false);
+    assert.equal("recurse" in args, false);
+    assert.equal("max_depth" in args, false);
+  }
+});
+
 test("isSourceDrawerConsolidated returns true when outgoing consolidated-into exists", async () => {
   const client = createMemgraphClient({
     callTool: async (name, args) => {
-      if (name.endsWith("kg_query") && args?.predicate === "consolidated-into") {
-        return { facts: [{ current: true, subject: "drawer-1", predicate: "consolidated-into", object: "closet-1" }] };
+      if (name.endsWith("kg_query") && args?.direction === "outgoing") {
+        return {
+          facts: [
+            { current: true, subject: "drawer-1", predicate: "in-hall", object: "hall-x" },
+            { current: true, subject: "drawer-1", predicate: "consolidated-into", object: "closet-1" },
+          ],
+        };
       }
-      if (name.endsWith("kg_query") && args?.predicate === "synthesized-from") {
-        return { facts: [] };
-      }
-      return {};
+      return { facts: [] };
     },
   });
 
@@ -123,13 +177,20 @@ test("isSourceDrawerConsolidated returns true when outgoing consolidated-into ex
   assert.equal(consolidated, true);
 });
 
+test("isSourceDrawerConsolidated ignores outgoing facts with other predicates", async () => {
+  const client = createMemgraphClient({
+    callTool: async () => ({
+      facts: [{ current: true, subject: "drawer-3", predicate: "in-hall", object: "hall-x" }],
+    }),
+  });
+
+  assert.equal(await client.isSourceDrawerConsolidated("drawer-3"), false);
+});
+
 test("isSourceDrawerConsolidated falls back to incoming synthesized-from", async () => {
   const client = createMemgraphClient({
     callTool: async (name, args) => {
-      if (name.endsWith("kg_query") && args?.predicate === "consolidated-into") {
-        return { facts: [] };
-      }
-      if (name.endsWith("kg_query") && args?.predicate === "synthesized-from" && args?.direction === "incoming") {
+      if (name.endsWith("kg_query") && args?.direction === "incoming") {
         return { facts: [{ current: true, subject: "closet-legacy", predicate: "synthesized-from", object: "drawer-2" }] };
       }
       return { facts: [] };

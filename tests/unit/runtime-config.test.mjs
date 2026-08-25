@@ -49,7 +49,12 @@ test("runtime config reads .electric-shepherd/config.jsonc and maps to env keys"
   assert.equal(env.MEMPALACE_MCP_URL, "http://example.local/mcp");
   assert.equal(env.MEMPALACE_MCP_AUTH_HEADER, "x-litellm-api-key");
   assert.equal(env.MEMPALACE_MCP_AUTH_SCHEME, "Bearer");
-  assert.equal(env.ESHEPHERD_SOURCE_CAPTURE_MODE, "replace");
+  // Precedence is env > config > default. An explicit env value wins over
+  // config.jsonc so a spawned child can be isolated from the repo's own config
+  // purely through its environment -- config.jsonc is read from the same repo
+  // root by parent and child alike, so config-first would make isolation
+  // impossible.
+  assert.equal(env.ESHEPHERD_SOURCE_CAPTURE_MODE, "append");
   assert.equal(env.ESHEPHERD_SOURCE_CAPTURE_DEDUP_ENABLED, "false");
   assert.equal(env.ESHEPHERD_SOURCE_CAPTURE_TIMEOUT_MS, "25000");
   assert.equal(env.ESHEPHERD_LOOPGUARD_EXEMPT_TOOLS, "compress,my-tool");
@@ -57,7 +62,7 @@ test("runtime config reads .electric-shepherd/config.jsonc and maps to env keys"
   rmSync(root, { recursive: true, force: true });
 });
 
-test("runtime config ignores behavior env overrides (config-only)", () => {
+test("runtime config falls back to config/default when no env override is set", () => {
   const root = makeTempDir("eshepherd-config-default-");
   const env = {
     ESHEPHERD_SOURCE_CAPTURE_MODE: "append",

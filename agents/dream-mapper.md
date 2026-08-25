@@ -1,6 +1,6 @@
 ---
 description: Read-only per-transcript summarizer for Dreamer map phase
-mode: subagent
+mode: all
 model: "litellm/implementer-qwen3.8-27b"
 temperature: 0.1
 top_p: 0.85

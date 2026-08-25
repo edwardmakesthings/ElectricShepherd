@@ -28,7 +28,7 @@ Useful args:
 - `--rooms room-a,room-b`
 - `--exclude-rooms source-transcripts,transcripts`
 - `--max-rooms 40`
-- `--batch-size 25`
+- `--batch-size 1`
 - `--worklist-limit 200`
 - `--query "non-transcript memory consolidation"`
 - `--apply`
