@@ -1,7 +1,11 @@
 import { createMemgraphClient } from "../adapter/memgraph.ts";
 import { MCPHttpClient, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-client.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
-import { expandScopedRetrieval, type RetrievalExpansionOptions } from "../adapter/retrieval-expansion.ts";
+import {
+  expandScopedRetrieval,
+  type RetrievalExpansionOptions,
+  type RetrievalIntent,
+} from "../adapter/retrieval-expansion.ts";
 import { loadRuntimeEnv } from "./runtime-env.ts";
 
 const runtimeProcess = (globalThis as unknown as {
@@ -42,6 +46,16 @@ function parseArgs(argv: string[]): RetrievalExpansionOptions {
   const expansionDepth = Number(get("--expansion-depth") || "2");
   const seedSearchLimit = Number(get("--seed-search-limit") || "10");
 
+  const intentRaw = get("--intent");
+  let intent: RetrievalIntent | undefined;
+  if (intentRaw !== undefined) {
+    if (intentRaw === "factual" || intentRaw === "historical" || intentRaw === "procedural") {
+      intent = intentRaw;
+    } else {
+      throw new Error(`Invalid --intent "${intentRaw}": expected factual, historical, or procedural`);
+    }
+  }
+
   return {
     query: requiredQuery,
     scope_room: requiredScopeRoom,
@@ -59,6 +73,7 @@ function parseArgs(argv: string[]): RetrievalExpansionOptions {
     expansion_depth: expansionDepth,
     top_n: topN,
     always_include_labels: ["pinned"],
+    intent,
   };
 }
 

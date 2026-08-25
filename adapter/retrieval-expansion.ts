@@ -1,4 +1,4 @@
-import type { MemgraphClient } from "./memgraph.ts";
+import type { ClosetSourceType, MemgraphClient } from "./memgraph.ts";
 
 export type RetrievalWeights = {
   height: number;
@@ -9,7 +9,15 @@ export type RetrievalWeights = {
   seedBoost: number;
   neighborhoodBoost: number;
   alwaysLabeledBoost: number;
+  authority: number;
 };
+
+// Phase 2 (unified memory): optional retrieval intent. Omitted = no preference.
+export type RetrievalIntent = "factual" | "historical" | "procedural";
+
+// Authority dimension: the es-source-type axis, with "unknown" for unstamped nodes
+// or read failures (spec: unstamped is never a default type).
+export type NodeAuthority = ClosetSourceType | "unknown";
 
 export type RetrievalExpansionOptions = {
   query: string;
@@ -30,6 +38,7 @@ export type RetrievalExpansionOptions = {
   top_n?: number;
   always_include_labels?: string[];
   weights?: Partial<RetrievalWeights>;
+  intent?: RetrievalIntent;
 };
 
 export type RankedScopedNode = {
@@ -42,6 +51,7 @@ export type RankedScopedNode = {
   retrieval_count: number;
   connection_degree: number;
   lineage_match_count: number;
+  source_type: NodeAuthority;
   score: number;
   selected: boolean;
 };
@@ -61,6 +71,7 @@ export type RetrievalExpansionResult = {
     labeled_only: boolean;
     include_merged: boolean;
     include_provisional: boolean;
+    intent?: RetrievalIntent;
     max_depth: number;
     limit: number;
     offset: number;
@@ -94,7 +105,59 @@ const DEFAULT_WEIGHTS: RetrievalWeights = {
   seedBoost: 2,
   neighborhoodBoost: 1,
   alwaysLabeledBoost: 2,
+  authority: 1,
 };
+
+// Phase 2 (unified memory): intent -> per-authority-type boost table.
+// Magnitudes are secondary to the factual floor below; they only shape ordering
+// within what the floor permits. Spec: factual boosts doc then synthesis with
+// transcript weakest; historical boosts synthesis and transcript; procedural
+// boosts skill then synthesis.
+const INTENT_AUTHORITY_BOOSTS: Record<RetrievalIntent, Record<NodeAuthority, number>> = {
+  factual: { doc: 2, synthesis: 1, transcript: -1, skill: 0, unknown: 0 },
+  historical: { doc: 0, synthesis: 2, transcript: 1, skill: 0, unknown: 0 },
+  procedural: { doc: 0, synthesis: 1, transcript: 0, skill: 2, unknown: 0 },
+};
+
+/**
+ * Phase 2 hard rule (spec): on a factual query a provisional synthesis must never
+ * outrank a doc. Encoded as a floor, not a weight — weights can be overwhelmed by a
+ * high-height node, so this clamps AFTER all score terms are summed.
+ *
+ * - FLOOR class: source_type === "doc" (docs are authoritative on arrival; status is
+ *   irrelevant for docs).
+ * - CEILING class: source_type === "synthesis" && es-status === "provisional".
+ * - If both classes are non-empty, every CEILING node scoring above the minimum FLOOR
+ *   score is clamped down to that floor. Within-class ordering and all tie-breaks are
+ *   untouched; a provisional synth still ranks first when no doc is in the candidate set.
+ * - Unstamped ("unknown") nodes are neither class — they rank by score as today.
+ *
+ * Returns the set of node_ids whose effective sort score was clamped (envelope honesty).
+ */
+function applyFactualFloor(
+  nodes: RankedScopedNode[],
+  statuses: ReadonlyMap<string, string>,
+): Set<string> {
+  const applied = new Set<string>();
+  if (nodes.length === 0) return applied;
+
+  let floorMin = Number.POSITIVE_INFINITY;
+  for (const node of nodes) {
+    if (node.source_type === "doc" && node.score < floorMin) {
+      floorMin = node.score;
+    }
+  }
+  if (!Number.isFinite(floorMin)) return applied; // no doc in candidates -> nothing to outrank
+
+  for (const node of nodes) {
+    const isCeiling = node.source_type === "synthesis" && statuses.get(node.node_id) === "provisional";
+    if (isCeiling && node.score > floorMin) {
+      node.score = floorMin;
+      applied.add(node.node_id);
+    }
+  }
+  return applied;
+}
 
 function normalizeLabel(label: unknown): string | null {
   if (typeof label !== "string") return null;
@@ -181,6 +244,7 @@ function extractScopedNodes(result: unknown): RankedScopedNode[] {
       retrieval_count: asNumber(n.retrieval_count),
       connection_degree: asNumber(n.connection_degree),
       lineage_match_count: asNumber(n.lineage_match_count),
+      source_type: "unknown",
       score: 0,
       selected: false,
     });
@@ -199,12 +263,21 @@ function computeNodeScore(args: {
   canonicalSeedIDs: Set<string>;
   neighborhoodIDs: Set<string>;
   alwaysIncludeLabels: Set<string>;
+  authorityBoost: number;
 }): number {
-  const { node, weights, wantedLabels, canonicalSeedIDs, neighborhoodIDs, alwaysIncludeLabels } = args;
+  const {
+    node,
+    weights,
+    wantedLabels,
+    canonicalSeedIDs,
+    neighborhoodIDs,
+    alwaysIncludeLabels,
+    authorityBoost,
+  } = args;
 
   let score = 0;
   score += node.height * weights.height;
-  score += Math.log1p(Math.max(0, node.retrieval_count)) * weights.retrieval;
+  score += Math.log(1 + Math.max(0, node.retrieval_count)) * weights.retrieval;
   score += Math.max(0, node.connection_degree) * weights.connection;
   score += Math.max(0, node.lineage_match_count) * weights.lineage;
 
@@ -222,6 +295,10 @@ function computeNodeScore(args: {
   if (node.labels.some((label) => alwaysIncludeLabels.has(label))) {
     score += weights.alwaysLabeledBoost;
   }
+
+  // Phase 2: intent-based authority term. Zero when no intent is set, so the
+  // default path stays byte-identical to the pre-Phase-2 formula.
+  score += authorityBoost * weights.authority;
 
   return score;
 }
@@ -312,16 +389,38 @@ export async function expandScopedRetrieval(
   const alwaysIncludeLabelSet = new Set(alwaysIncludeLabels);
 
   const includeProvisional = Boolean(options.include_provisional);
+  const intent = options.intent;
   let scopedNodes = extractScopedNodes(scopedResult);
   // P2-2: drop provisional closets before ranking so top-N is computed over active
   // (+ legacy/unstamped "unknown") nodes only. One-hop es-status query per node,
   // run in parallel — vanilla-only. include_provisional=true skips it entirely (zero
   // cost). "unknown" (pre-P2-2 closets) is kept: absence of a stamp is not provisional.
-  if (!includeProvisional && scopedNodes.length > 0) {
-    const statuses = await Promise.all(
-      scopedNodes.map((node) => client.getClosetStatus(node.node_id).catch(() => "unknown" as const)),
-    );
-    scopedNodes = scopedNodes.filter((_node, i) => statuses[i] !== "provisional");
+  // Phase 2: the factual floor also needs es-status when provisionals are included, so
+  // the status fetch runs whenever intent === "factual". es-source-type is fetched for
+  // every node (one parallel one-hop kg_query each, same pattern/cost profile as the
+  // existing P2-2 fan-out) so ranked_nodes always expose the authority attribute.
+  const needStatuses = !includeProvisional || intent === "factual";
+  const statusMap = new Map<string, string>();
+  if (scopedNodes.length > 0) {
+    const [statuses, sourceTypes] = await Promise.all([
+      needStatuses
+        ? Promise.all(
+            scopedNodes.map((node) => client.getClosetStatus(node.node_id).catch(() => "unknown" as const)),
+          )
+        : Promise.resolve([]),
+      Promise.all(
+        scopedNodes.map((node) =>
+          client.getClosetSourceType(node.node_id).then((t) => (t ?? "unknown") as NodeAuthority),
+        ),
+      ),
+    ]);
+    scopedNodes.forEach((node, i) => {
+      node.source_type = sourceTypes[i];
+      if (needStatuses) statusMap.set(node.node_id, statuses[i]);
+    });
+  }
+  if (!includeProvisional) {
+    scopedNodes = scopedNodes.filter((node) => statusMap.get(node.node_id) !== "provisional");
   }
 
   const rankedNodes = scopedNodes.map((node) => {
@@ -332,12 +431,29 @@ export async function expandScopedRetrieval(
       canonicalSeedIDs,
       neighborhoodIDs: neighborhoodSet,
       alwaysIncludeLabels: alwaysIncludeLabelSet,
+      authorityBoost: intent ? INTENT_AUTHORITY_BOOSTS[intent][node.source_type] : 0,
     });
     return node;
   });
 
+  // Phase 2 hard rule: on factual intent a provisional synthesis must never outrank a
+  // doc. Applied AFTER scoring (a floor, not a weight) and BEFORE the sort so all
+  // within-class ordering and tie-breaks are preserved. The clamped set doubles as a
+  // tie-break guard: when a provisional synth is clamped to EXACTLY a doc's score the two
+  // tie, and without this the height tie-break would present the (wrong) synthesis above
+  // the actual API reference — precisely the failure mode the rule exists to prevent. So
+  // on an equal score, docs sort before clamped provisional synths.
+  let clampedFloorIds: ReadonlySet<string> = new Set<string>();
+  if (intent === "factual") {
+    clampedFloorIds = applyFactualFloor(rankedNodes, statusMap);
+  }
+
   rankedNodes.sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score;
+    // Factual floor tie-break: a clamped provisional synth must not present above a doc.
+    const aClamped = clampedFloorIds.has(a.node_id);
+    const bClamped = clampedFloorIds.has(b.node_id);
+    if (aClamped !== bClamped) return aClamped ? 1 : -1;
     if (b.height !== a.height) return b.height - a.height;
     if (b.retrieval_count !== a.retrieval_count) return b.retrieval_count - a.retrieval_count;
     if (b.connection_degree !== a.connection_degree) return b.connection_degree - a.connection_degree;
@@ -377,6 +493,7 @@ export async function expandScopedRetrieval(
       labeled_only: labeledOnly,
       include_merged: includeMerged,
       include_provisional: includeProvisional,
+      intent,
       max_depth: maxDepth,
       limit,
       offset,
