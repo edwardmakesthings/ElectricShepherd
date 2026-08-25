@@ -54,7 +54,12 @@ export type RankedScopedNode = {
   source_type: NodeAuthority;
   score: number;
   selected: boolean;
+  // Phase 4: how this node entered the ranked pool. "scoped" = admitted by the
+  // derived-drawer scope query; "concern" = admitted as a one-hop `concerns`
+  // target of a synthesis already in the pool (its authority doc).
+  via?: "scoped" | "concern";
 };
+
 
 export type RetrievalExpansionResult = {
   scope: {
@@ -75,17 +80,18 @@ export type RetrievalExpansionResult = {
     max_depth: number;
     limit: number;
     offset: number;
-  };
-  policy: {
-    enforced: boolean;
-    allowed_labels: string[];
+    // Phase 4: envelope honesty for concerns-neighbor expansion.
+    concerns_expansion?: { enabled: boolean; targets_admitted: number };
   };
   seeds: {
     query: string;
     raw_seed_ids: string[];
     canonical_seed_ids: string[];
     neighborhood_node_ids: string[];
+    // Phase 4: one-hop `concerns` targets admitted into the pool this run.
+    concern_neighbor_ids: string[];
   };
+
   ranking: {
     weights: RetrievalWeights;
     top_n: number;
@@ -423,6 +429,74 @@ export async function expandScopedRetrieval(
     scopedNodes = scopedNodes.filter((node) => statusMap.get(node.node_id) !== "provisional");
   }
 
+  // Phase 4: concerns-neighbor expansion. A hit on a synthesis should surface its
+  // authority docs, so one-hop `concerns` targets of synthesis-typed pool nodes are
+  // admitted into the ranked pool (via: "concern") and get the neighborhood boost.
+  // Bounded by construction: one one-hop kg_query per synthesis node in the already-
+  // bounded pool (≤ limit, default 50) — same cost profile as the P2-2 fan-out above.
+  // Scope guard mirrors listScopedDerivedDrawers (memgraph.ts): a concern target in
+  // another wing/room must not leak into this scope's results. The `listScopedDerivedDrawers`
+  // gate itself is untouched — docs never enter the pool by loosening it.
+  const concernsEnabled = typeof client.getConcerns === "function";
+  let concernNeighborIds: string[] = [];
+  if (concernsEnabled && scopedNodes.length > 0) {
+    const synthesisIndices = scopedNodes
+      .map((node, i) => (node.source_type === "synthesis" ? i : -1))
+      .filter((i) => i >= 0);
+    if (synthesisIndices.length > 0) {
+      const targets = await Promise.all(
+        synthesisIndices.map((i) => client.getConcerns(scopedNodes[i].node_id).catch(() => ({ node_ids: [] as string[] }))),
+      );
+      const seen = new Set<string>();
+      for (const t of targets) {
+        for (const id of t.node_ids) {
+          if (!id || seen.has(id)) continue;
+          seen.add(id);
+          concernNeighborIds.push(id);
+        }
+      }
+
+      const fresh = concernNeighborIds.filter((id) => !scopedNodes.some((n) => n.node_id === id));
+      if (fresh.length > 0) {
+        // Retrieve-then-filter: fetch each target once (wing/room/desc), keep only
+        // doc-stamped targets that pass the scope filter. No room scan — one get_drawer
+        // per candidate, proportional to edge count, never to room size.
+        const drawerResults = await Promise.all(
+          fresh.map((id) => {
+            const drawerP = client.getDrawer({ drawer_id: id }).catch(() => ({}));
+            const typeP = client.getClosetSourceType(id).then((t) => t ?? "unknown");
+            return Promise.all([drawerP, typeP]);
+          }),
+        );
+        drawerResults.forEach(([drawerRaw, sourceType], i) => {
+          const id = fresh[i];
+          if (sourceType !== "doc") return; // hard check: only doc-stamped targets qualify
+          const drawer = asObject(drawerRaw);
+          const wing = asString(drawer.wing || asObject(drawer.metadata).wing);
+          const room = asString(drawer.room || asObject(drawer.metadata).room);
+          if (options.scope_wing && wing && wing !== options.scope_wing) return;
+          if (scope_room && room && room !== scope_room) return;
+          scopedNodes.push({
+            node_id: id,
+            labels: [],
+            wing,
+            room,
+            desc: asString(drawer.desc || drawer.title || drawer.summary),
+            height: 0, // concerns is not lineage — height stays pure synthesized-from
+            retrieval_count: asNumber(drawer.retrieval_count || asObject(drawer.metadata).retrieval_count),
+            connection_degree: 0,
+            lineage_match_count: 0,
+            source_type: "doc",
+            score: 0,
+            selected: false,
+            via: "concern",
+          });
+          neighborhoodSet.add(id); // +neighborhoodBoost, same as lineage neighbors
+        });
+      }
+    }
+  }
+
   const rankedNodes = scopedNodes.map((node) => {
     node.score = computeNodeScore({
       node,
@@ -497,6 +571,10 @@ export async function expandScopedRetrieval(
       max_depth: maxDepth,
       limit,
       offset,
+      concerns_expansion: {
+        enabled: concernsEnabled,
+        targets_admitted: scopedNodes.filter((n) => n.via === "concern").length,
+      },
     },
     policy: {
       enforced,
@@ -507,7 +585,9 @@ export async function expandScopedRetrieval(
       raw_seed_ids: rawSeedIDs,
       canonical_seed_ids: [...canonicalSeedSet].sort(),
       neighborhood_node_ids: [...neighborhoodSet].sort(),
+      concern_neighbor_ids: [...new Set(concernNeighborIds)].sort(),
     },
+
     ranking: {
       weights,
       top_n: topN,

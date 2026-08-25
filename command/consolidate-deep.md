@@ -22,5 +22,6 @@ Steps:
 4. Run a drift audit against the memory blocks.
 5. Refresh the affected mem-core files and write one dream-log diary entry covering the syntheses, the validations/promotions, the merges, and the drift findings.
 6. Surface relocation proposals: any off-scope asides found while mapping, as a single numbered list with proposed target wing/room, for the user to approve or decline. Apply only what is approved; never relocate unasked.
+7. Surface concern proposals: doc references (DOC_REFERENCES) found while mapping, resolved against the reference room and dry-run through `propose_concerns`, in the SAME numbered list with proposed doc drawer id and one-line reason. Apply only what is approved by number with `dry_run:false`; never auto-link.
 
 This is the heavier pass: additive synthesis PLUS merges are allowed here. Never modify code or raw transcripts.

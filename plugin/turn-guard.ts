@@ -65,6 +65,7 @@ import exportDrawerTool from "../tools/export_drawer.ts"
 import relocateMemoryTool from "../tools/relocate_memory.ts"
 import palaceStampSourceTypeTool from "../tools/palace_stamp_source_type.ts"
 import ingestDocsTool from "../tools/ingest_docs.ts"
+import proposeConcernsTool from "../tools/propose_concerns.ts"
 
 // Absolute path to the ElectricShepherd install root (the plugin's own repo).
 // Runtime scripts must run from HERE — not the consumer project's cwd — so
@@ -2672,6 +2673,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
       relocate_memory: relocateMemoryTool,
       palace_stamp_source_type: palaceStampSourceTypeTool,
       ingest_docs: ingestDocsTool,
+      propose_concerns: proposeConcernsTool,
     },
   } as any
 }

@@ -310,3 +310,126 @@ test("pinned provisional synthesis cannot outrank an unpinned doc on factual int
     `selected order violated: ${JSON.stringify(selectedIds)}`
   );
 });
+
+/**
+ * Phase 4 (unified memory): concerns-neighbor expansion. A synthesis hit should pull its
+ * one-hop `concerns` targets (authority docs) into the ranked pool, bounded and safe:
+ * only doc-stamped targets pass, scope-guarded, with envelope honesty (via / seeds / filters).
+ */
+
+function makeConcernClient({ concerns = {}, drawers = {}, statuses = {}, sourceTypes = {} } = {}) {
+  const base = makeClient({ statuses, sourceTypes });
+  base.getConcerns = async (id) => ({ node_ids: concerns[id] ?? [], count: (concerns[id] ?? []).length });
+  base.getDrawer = async ({ drawer_id }) => drawers[drawer_id] ?? {};
+  return base;
+}
+
+test("synthesis seed pulls its one-hop concerns doc into the pool with via: 'concern' and neighborhood boost", async () => {
+  const nodes = [
+    { node_id: "prov-synth", labels: [], wing: "w", room: "unit-room", desc: "d", height: 5, retrieval_count: 6, connection_degree: 4, lineage_match_count: 4 },
+  ];
+  const client = makeConcernClient({
+    statuses: { "prov-synth": "provisional" },
+    sourceTypes: { "prov-synth": "synthesis", "authority-doc": "doc" },
+    concerns: { "prov-synth": ["authority-doc"] },
+    drawers: { "authority-doc": { drawer_id: "authority-doc", wing: "w", room: "unit-room", desc: "Gateway API reference" } },
+  });
+  client.listScopedDerivedDrawers = async () => ({ nodes });
+
+  const result = await expandScopedRetrieval(client, { ...BASE_OPTIONS, include_provisional: true });
+  const byId = Object.fromEntries(result.ranked_nodes.map((n) => [n.node_id, n]));
+
+  assert.ok(byId["authority-doc"], `doc should be admitted via concerns: ${JSON.stringify(ids(result))}`);
+  assert.equal(byId["authority-doc"].via, "concern");
+  assert.equal(byId["prov-synth"].via, undefined); // scoped nodes keep no via marker
+  assert.equal(byId["authority-doc"].source_type, "doc");
+
+  // Score: doc base = log(1+0) + 0 + 0 + 0 = 0, + neighborhoodBoost 1 (it is in the
+  // neighborhood set now), no intent boost -> exactly 1. The synthesis keeps its raw
+  // score (no intent): 3*5 + log(1+6) + 4 + 8 + seedBoost 2 (it IS the canonical seed —
+  // search returns nothing, so resolveCanonical falls back to the id itself) = 28.945910.
+  assert.ok(Math.abs(byId["authority-doc"].score - 1) < 1e-9, `doc concern score off: ${byId["authority-doc"].score}`);
+  assert.ok(Math.abs(byId["prov-synth"].score - 28.94591014905531) < 1e-9, `synth score off: ${byId["prov-synth"].score}`);
+
+  // Envelope honesty.
+  assert.deepEqual(result.seeds.concern_neighbor_ids, ["authority-doc"]);
+  assert.equal(result.filters.concerns_expansion.enabled, true);
+  assert.equal(result.filters.concerns_expansion.targets_admitted, 1);
+});
+
+test("factual intent: a concerns-linked doc outranks its provisional synthesis (floor now has real members)", async () => {
+  const nodes = [
+    // High-height provisional synth that would otherwise dominate on raw score.
+    { node_id: "prov-synth", labels: ["pinned"], wing: "w", room: "unit-room", desc: "d", height: 5, retrieval_count: 6, connection_degree: 4, lineage_match_count: 4 },
+  ];
+  const client = makeConcernClient({
+    statuses: { "prov-synth": "provisional" },
+    sourceTypes: { "prov-synth": "synthesis", "authority-doc": "doc" },
+    concerns: { "prov-synth": ["authority-doc"] },
+    drawers: { "authority-doc": { drawer_id: "authority-doc", wing: "w", room: "unit-room", desc: "Gateway API reference" } },
+  });
+  client.listScopedDerivedDrawers = async () => ({ nodes });
+
+  const result = await expandScopedRetrieval(client, { ...BASE_OPTIONS, intent: "factual", include_provisional: true });
+  const byId = Object.fromEntries(result.ranked_nodes.map((n) => [n.node_id, n]));
+
+  // doc: base 0 + neighborhood 1 + factual doc boost 2 = 3.
+  // prov-synth raw: 30.945910 + synthesis boost 1 = 31.945910 -> clamped to floorMin = 3.
+  assert.ok(Math.abs(byId["authority-doc"].score - 3) < 1e-9, `doc score off: ${byId["authority-doc"].score}`);
+  assert.ok(Math.abs(byId["prov-synth"].score - 3) < 1e-9, `clamped synth score off: ${byId["prov-synth"].score}`);
+
+  // The hard rule with a REAL doc in the pool (pre-Phase-4 the floor's FLOOR class was
+  // usually empty): even a pinned provisional synthesis must not present above its own
+  // authority doc on a factual query.
+  assert.deepEqual(ids(result), ["authority-doc", "prov-synth"], `factual concerns ordering violated: ${JSON.stringify(ids(result))}`);
+
+  console.log(
+    `[worked-example] factual + concerns: authority-doc=${byId["authority-doc"].score.toFixed(6)}, ` +
+      `prov-synth=${byId["prov-synth"].score.toFixed(6)} (raw 31.945910, clamped to floor ${byId["authority-doc"].score.toFixed(6)})`
+  );
+});
+
+test("concerns targets that are not doc-stamped or out of scope are NOT admitted", async () => {
+  const nodes = [
+    { node_id: "synth-a", labels: [], wing: "w", room: "unit-room", desc: "d", height: 1, retrieval_count: 0, connection_degree: 0, lineage_match_count: 1 },
+  ];
+  const client = makeConcernClient({
+    statuses: { "synth-a": "active" },
+    sourceTypes: { "synth-a": "synthesis", "not-a-doc": "transcript", "other-wing-doc": "doc" },
+    concerns: { "synth-a": ["not-a-doc", "other-wing-doc"] },
+    drawers: {
+      "not-a-doc": { drawer_id: "not-a-doc", wing: "w", room: "unit-room", desc: "a transcript" },
+      "other-wing-doc": { drawer_id: "other-wing-doc", wing: "other-w", room: "unit-room", desc: "cross-project doc" },
+    },
+  });
+  client.listScopedDerivedDrawers = async () => ({ nodes });
+
+  // scope_wing engages the cross-wing guard (BASE_OPTIONS has no wing filter).
+  const result = await expandScopedRetrieval(client, { ...BASE_OPTIONS, scope_wing: "w" });
+  assert.deepEqual(ids(result), ["synth-a"], `no concern target should be admitted: ${JSON.stringify(ids(result))}`);
+  // The edge was still SEEN (envelope honesty), but nothing was admitted.
+  assert.deepEqual(result.seeds.concern_neighbor_ids, ["not-a-doc", "other-wing-doc"]);
+  assert.equal(result.filters.concerns_expansion.targets_admitted, 0);
+});
+
+test("default path with no concerns configured is byte-identical in ordering to pre-Phase-4", async () => {
+  const client = makeClient({
+    statuses: { "prov-synth": "provisional", "active-synth": "active" },
+    sourceTypes: { "doc-node": "doc", "prov-synth": "synthesis" },
+  });
+
+  // No getConcerns on the stub client -> concerns expansion is disabled entirely;
+  // ordering and scores must match the pre-Phase-4 values exactly.
+  const result = await expandScopedRetrieval(client, { ...BASE_OPTIONS, include_provisional: true });
+  assert.deepEqual(
+    ids(result),
+    ["prov-synth", "doc-node", "active-synth"],
+    `no-concerns ordering changed: ${JSON.stringify(ids(result))}`
+  );
+  const byId = Object.fromEntries(result.ranked_nodes.map((n) => [n.node_id, n]));
+  assert.ok(Math.abs(byId["prov-synth"].score - 30.94591014905531) < 1e-9, `prov score changed: ${byId["prov-synth"].score}`);
+  assert.equal(result.filters.concerns_expansion.enabled, false);
+  assert.equal(result.filters.concerns_expansion.targets_admitted, 0);
+  assert.deepEqual(result.seeds.concern_neighbor_ids, []);
+});
+

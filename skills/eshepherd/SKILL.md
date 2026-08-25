@@ -130,6 +130,7 @@ them over hand-rolled `list_drawers` loops, which burn context and time out on b
 | Re-file a drawer, or lift a verbatim excerpt | `relocate_memory` |
 | Backfill the `es-source-type` axis on existing drawers (bounded, dry-run first) | `palace_stamp_source_type` |
 | Ingest a docs dir into the reference room + stamp es-source-type: doc (mine + staleness invalidation, dry-run first) | `ingest_docs` |
+| Propose/apply `concerns` edges between a synthesis and its authority docs (validates endpoints; dry-run first; apply only approved) | `propose_concerns` |
 | Move drawers in bulk between scopes | `move_drawers` |
 | Delete drawers by ID or scope | `delete_drawers` |
 | Force-capture THIS session's transcript now | `capture_transcript` |
@@ -255,9 +256,11 @@ Do not use these predicates for unrelated facts — they are consumed by travers
 |---|---|
 | `synthesized-from` | B synthesized from A (B → A, upward toward sources) |
 | `merged-into` | B was merged away; A is canonical |
+| `concerns` | Synthesis → doc: cross-type authority pointer. ONE-HOP ONLY and NOT lineage — it does not affect height or feed lineage traversal. Written via `propose_concerns` (approval-gated, dry-run first); retrieval expansion pulls one-hop concerns targets into the ranked pool so a synthesis hit surfaces its authority doc. |
 
 Use `mempalace_kg_add` to add these edges. Use `mempalace_kg_invalidate` to retire stale
-ones (e.g. when a source is superseded).
+ones (e.g. when a source is superseded). Retiring a wrong `concerns` edge is one
+`kg_invalidate {subject, predicate: "concerns", object}` — no drawer content is ever touched.
 
 ---
 

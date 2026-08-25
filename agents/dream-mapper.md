@@ -32,6 +32,7 @@ Output sections:
 - SUBSYSTEMS_AND_FILES
 - OPEN_ITEMS
 - OFF_SCOPE_MATERIAL
+- DOC_REFERENCES
 
 Finish with: CONFIDENCE: high|medium|low - one-line reason.
 
@@ -44,6 +45,16 @@ A session filed under one project routinely contains a sustained aside about a d
 - The `start` and `end` values must be copied EXACTLY from the transcript. They are used to slice the passage verbatim later; an approximated line makes the passage unrecoverable.
 - Only report sustained passages worth retrieving on their own. A one-line mention of another project is not off-scope material.
 - Write `- (none)` when the transcript stays on topic. Do not manufacture candidates.
+
+DOC_REFERENCES (how a synthesis's authority docs get linked):
+
+Report each library, API, or documented concept this transcript SUSTAINEDLY discusses and that would plausibly exist as an ingested doc in this project's reference room:
+
+`- <concept name> | mentioned_as: "<verbatim phrase from the transcript>"`
+
+- `mentioned_as` must be copied EXACTLY from the transcript — it is the one-line reason the user judges each proposed link by.
+- Passing mentions are not candidates. A one-line mention of a library is not a doc reference.
+- Write `- (none)` when nothing qualifies. Do not manufacture candidates.
 
 Rules:
 

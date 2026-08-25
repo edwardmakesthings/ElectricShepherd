@@ -153,6 +153,31 @@ npm run policy:cycle -- \
 This executes probabilistic-entry + deterministic-expansion via MemPalace scoped
 lineage and labels tools, and prints a JSON result payload for policy consumption.
 
+### 3a. Intent-aware retrieval
+
+Retrieval is intent-aware: pass `--intent factual|historical|procedural` to rank the
+candidate pool by what kind of answer you want.
+
+```bash
+npm run policy:cycle -- \
+  --query "what does the config schema define" \
+  --scope-room context-blocks \
+  --intent factual
+```
+
+The intent shapes per-source-type boosts over the `es-source-type` axis (see §4):
+`factual` favors `doc` then `synthesis`, `historical` favors `synthesis` then
+`transcript`, `procedural` favors `skill` then `synthesis`.
+
+**Factual hard rule:** on a factual intent, a provisional synthesis can never outrank a
+doc — if any doc-stamped node is in the candidate set, provisional syntheses are clamped
+down to the lowest doc score (a weight-based floor, applied after all scoring). A
+provisional synthesis still ranks first when no doc is in the candidate set.
+
+Retrieval also surfaces **one-hop `concerns` neighbors**: a hit on a synthesis admits its
+linked authority docs into the ranked pool, so a synthesis hit carries its grounding docs
+along (see §4 for how those links are created).
+
 ## 3b. Run consolidation + validation pipeline
 
 ```bash
@@ -196,6 +221,20 @@ For cadence history across runs, add:
 ```bash
 --cadence-state-file ./.electric-shepherd-cadence-state.json
 ```
+
+## 3c2. Ingest a docs directory (`/ingest-docs`)
+
+Docs are first-class sources, not just transcripts. `/ingest-docs <path>` mines a docs
+directory into the project wing's `reference` room (reusing an existing reference-like
+room before minting one) and stamps every ingested drawer with `es-source-type: doc`.
+
+It is **dry-run-first**: the first call previews the resolved wing/room and target path
+without writing; only after you approve does it run for real. On apply, changed files are
+purged+reinserted under the same drawer IDs (unchanged files are skipped), open outgoing
+KG facts on changed drawers are invalidated as a staleness pass, and `es-source-type: doc`
+is re-stamped. Partial failures are reported; re-running converges (every step is
+idempotent). It never touches the `es-status` axis — that stays orthogonal to
+`es-source-type`.
 
 ## 3d. Enable consolidation plumbing
 
@@ -327,6 +366,7 @@ returns to your session (expand the subtask in the TUI to watch/debug it). Comma
 | `/consolidate-deep` | Deep pass: consolidate **plus** merge/dedupe existing closets and run a drift audit. | isolated subagent | `npm run sheep:consolidate-deep` |
 | `/memory-refresh` | Refresh and re-inject mem-core for the current scope. | in-session | `npm run sheep:memory-refresh` |
 | `/memory-status` | Quick counts of pending source vs existing derived memories. | isolated subagent | — |
+| `/ingest-docs <path>` | Mine a docs directory into the project wing's `reference` room and stamp `es-source-type: doc`. Dry-run-first (see §3c2). | in-session | — |
 
 Each command takes an optional scope argument, e.g. `/consolidate context-blocks`.
 
@@ -385,6 +425,21 @@ These map onto MemPalace's **native** layers — Electric Shepherd doesn't inven
 Raw drawers are never altered. "Synthesize" creates closets + KG edges; it doesn't rewrite the
 verbatim store. Removing Electric Shepherd leaves all of the above as valid native MemPalace
 data — see the README's "Non-invasive by design."
+
+### 4a. The `es-source-type` axis and cross-type linking
+
+Every drawer can carry an `es-source-type` stamp: `transcript | doc | synthesis | skill`.
+It is **orthogonal to `es-status`** — a node's source type (where it came from) is
+independent of its consolidation status (how settled it is). Retrieval reads this axis to
+apply intent-based boosts (§3a); unstamped nodes rank as `"unknown"`.
+
+On top of lineage, synthesis closets can link to their authority docs with **`concerns`
+edges** (`{subject: <synthesis id>, predicate: "concerns", object: <doc id>}`). These are
+created by the `propose_concerns` tool as **approval-gated proposals**: it validates both
+endpoints (the synthesis must have `synthesized-from` lineage; each target must carry
+`es-source-type: doc`; self-links and duplicates are rejected), prints a numbered proposal
+list, and applies only the items you approve. Retrieval then surfaces one-hop `concerns`
+neighbors (§3a), so a synthesis hit carries its grounding docs into the ranked pool.
 
 ## 4b. How mem-core scope is chosen
 

@@ -15,18 +15,26 @@ Current repo status: core policy runtime is in place (plugin, commands, snippets
 adapter, deterministic runtime scripts, and dreamer agent profiles), with
 compaction-aware scoped mem-core reinjection, opt-in auto-consolidation, and bounded
 MCP/notification timeouts wired. The runtime also now rejects unsafe shell-style
-commands for the turn-guard subprocess path.
+commands for the turn-guard subprocess path. Unified-memory Phase 1-4 capabilities are
+in: an `es-source-type` axis (`transcript|doc|synthesis|skill`) orthogonal to
+`es-status`, intent-aware retrieval (`--intent factual|historical|procedural`),
+`/ingest-docs <path>` for doc ingestion with staleness invalidation, and approval-gated
+`concerns` links from synthesis closets to their authority docs.
 
 ---
 
 ## What it does
 
-Your AI coding sessions produce raw transcripts. MemPalace already mines and stores these
-verbatim (that's its job). Electric Shepherd works *above* that layer:
+Your AI coding sessions produce raw transcripts, and your projects carry reference docs.
+MemPalace already mines and stores these verbatim (that's its job). Electric Shepherd works
+*above* that layer:
 
 - **Consolidates** raw transcripts into derived memory — durable decisions, root causes,
   worked examples — written as **closets** (summaries/arcs) and **KG triples** (durable facts),
   linked back to source drawers with explicit lineage edges.
+- **Ingests docs** as first-class sources: `/ingest-docs <path>` mines a docs directory into
+  the project wing's `reference` room, stamps each drawer `es-source-type: doc`, and invalidates
+  open KG facts on changed files (dry-run-first; re-running converges).
 - **Connects** related memories across sessions that were written separately, building the
   cross-session links no single session could see.
 - **Prunes** what's stale — memories that haven't been retrieved or touched fade as
@@ -55,8 +63,11 @@ own native layers** rather than inventing parallel structures:
   changelog.
 - **Categories** use the native **halls** (`facts` / `events` / `discoveries` /
   `preferences` / `advice`).
-- **Relationships** (`synthesized-from`, `merged-into`) live in MemPalace's existing knowledge
-  graph.
+- **Relationships** (`synthesized-from`, `merged-into`, and cross-type `concerns` links from
+  synthesis closets to their authority docs) live in MemPalace's existing knowledge graph.
+- **Source types** are tracked with an `es-source-type` stamp (`transcript | doc |
+  synthesis | skill`) on drawers — orthogonal to the consolidation-status axis, so a doc's
+  authority is independent of how settled it is.
 
 Electric Shepherd is a client of MemPalace, not a fork of it.
 
@@ -187,6 +198,12 @@ npm run policy:cycle -- \
 This executes probabilistic-entry + deterministic-expansion using MemPalace substrate
 tools through the Electric Shepherd adapter and prints a JSON plan/result payload.
 
+Retrieval is intent-aware: add `--intent factual|historical|procedural` to rank candidates
+by what kind of answer you want (factual favors doc-stamped sources, historical favors
+synthesis/transcripts, procedural favors skills). On a factual intent a provisional synthesis
+can never outrank a doc. Retrieval also admits one-hop `concerns` neighbors — the authority
+docs linked to a hit synthesis — into the ranked pool.
+
 ---
 
 ## Local validation
@@ -307,6 +324,7 @@ Also: a shepherd that doesn't sleep wouldn't be much use.
 ## Status
 
 Core policy runtime in place. The following are committed and usable now:
+- Unified-memory Phase 1-4 capabilities: `es-source-type` axis (`transcript|doc|synthesis|skill`) orthogonal to `es-status`, intent-aware retrieval (`--intent factual|historical|procedural` with a factual hard rule that provisional syntheses never outrank docs), `/ingest-docs <path>` doc ingestion (dry-run-first, staleness invalidation, re-stamping), and approval-gated `concerns` links from synthesis closets to authority docs surfaced as one-hop retrieval neighbors
 - Deterministic policy-cycle runtime in `scripts/run-policy-cycle.ts`
 - Consolidation + validation runtime pipeline in `scripts/run-memory-consolidation-and-validation.ts`
 - Optional live mapper and auditor integration hooks in `scripts/run-memory-consolidation-and-validation.ts` (`--use-live-mapper`, `--use-live-auditor`)

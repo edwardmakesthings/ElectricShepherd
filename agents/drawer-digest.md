@@ -75,6 +75,9 @@ Output sections:
 - OFF_SCOPE_MATERIAL — sustained passages belonging to a different project/subject than the drawer's own scope. One line each:
   `- <topic> | belongs_to: <project/subject> | start: "<exact first line>" | end: "<exact last line>" | ~<n> lines`
   Copy `start` and `end` EXACTLY from the file — they are used to slice the passage verbatim. Write `- (none)` if the content stays on topic.
+- DOC_REFERENCES — library/API/documented concepts this content SUSTAINEDLY discusses that would plausibly exist as ingested docs in the project's reference room. One line each:
+  `- <concept name> | mentioned_as: "<verbatim phrase from the transcript>"`
+  Copy `mentioned_as` EXACTLY — it is the one-line reason the user judges each proposed link by. Passing mentions are not candidates. Write `- (none)` when nothing qualifies.
 - NOISE_ASSESSMENT — one line: how much of this is substantive vs incidental.
 
 Finish with: CONFIDENCE: high|medium|low - one-line reason.

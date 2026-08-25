@@ -26,6 +26,7 @@ tools:
   search-tools_grep: true
   relocate_memory: true
   ingest_docs: true
+  propose_concerns: true
   write: true
 ---
 # Dreamer
@@ -110,6 +111,16 @@ Scope-drift detection and relocation proposals (part of every pass):
 
 Never relocate without approval, even when the misfiling is obvious. Never edit or delete the source, and never reword a passage to fit its new room. Verbatim or not at all.
 
+Cross-type concern proposals (part of every pass):
+
+1. Detect. Every `dream-mapper` and `drawer-digest` summary ends with DOC_REFERENCES: library/API/documented concepts the transcript SUSTAINEDLY discusses that would plausibly exist as ingested docs in this project's reference room. Passing mentions are not candidates.
+2. Resolve, bounded. For the closets created in this pass, resolve each candidate concept against the reference room: ONE `search` per distinct concept scoped to the wing + reference room (limit 5), then verify hits with `es-source-type` (`kg_query`) and keep only `doc`-stamped ones. At most 3 distinct concepts per pass; more than that, propose the top 3 and mark the rest unresolved. Never page a room to exhaustion.
+3. Preview. For each candidate pair call `propose_concerns` with `dry_run: true` (synthesis_id = the closet, doc_ids = the resolved doc). The dry run proves both endpoints — the subject has synthesized-from lineage and the target carries es-source-type: doc — before the user ever sees it.
+4. Ask ONCE, as a single numbered list at the end of the pass (same message as relocation proposals when both exist). Per item: synthesis closet id, doc drawer id, doc description, one-line reason (the verbatim mention), and the proposed `concerns` edge. Never drip-feed.
+5. Apply only what the user approves, by number, via `propose_concerns` with `dry_run:false`. An unanswered proposal stays unapplied and is recorded in the dream report.
+
+Never link without approval, even when the doc match is obvious — a wrong concerns edge silently corrupts retrieval for that topic on every future query.
+
 Process:
 
 0) START FAST. Resolve the wing, pull one page, filter it, and dispatch mappers. Do not enumerate, count, or survey first (see Bounded batches above).
@@ -120,6 +131,7 @@ Process:
 4a) Dispatch dream-auditor against the newly created closets. Read its verdict and recommended_actions. For each pass verdict, execute the promotion yourself (`kg_invalidate` provisional, `kg_add` active) — dream-auditor cannot do this itself. For revise/escalate, leave the closet provisional; note it in the dream-log entry.
 5) Run drift audit against scoped mem-core renders (`.electric-shepherd/memory/**/memory.md`).
 5a) Collect OFF_SCOPE_MATERIAL from every mapper/digest summary, dry-run a `relocate_memory` preview for each candidate, and put the numbered proposal list in your final message for the user to approve or decline.
+5b) Collect DOC_REFERENCES from every mapper/digest summary, resolve candidates against the reference room (bounded, see Cross-type concern proposals), dry-run a `propose_concerns` preview per candidate pair, and include those items in the same numbered proposal list. Apply approved concerns by number with `dry_run:false`; never auto-link.
 6) Write the dream report (see below), then write the dream-log diary entry pointing at the report path.
 
 Dream report (REQUIRED, every pass — including "nothing to do"):
@@ -132,6 +144,7 @@ Write `.electric-shepherd/dream-reports/<YYYY-MM-DD>-<short-slug>.md` with the w
 - Auditor verdicts and promotions executed (IDs)
 - Merges applied; deletions (must be NONE without explicit user confirmation)
 - Relocation proposals: candidates found, proposed targets, and which were approved, declined, or left unanswered
+- Concern proposals: doc references found, resolved docs (drawer IDs), and which `concerns` edges were approved, declined, or left unanswered
 - Drift audit result
 - Anything blocked or skipped, with the reason
 
