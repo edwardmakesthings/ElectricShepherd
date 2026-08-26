@@ -68,6 +68,7 @@ import ingestDocsTool from "../tools/ingest_docs.ts"
 import proposeConcernsTool from "../tools/propose_concerns.ts"
 import fileSkillTool from "../tools/file_skill.ts"
 import proposeRefinementsTool from "../tools/propose_refinements.ts"
+import recordOutcomeTool from "../tools/record_outcome.ts"
 
 // Absolute path to the ElectricShepherd install root (the plugin's own repo).
 // Runtime scripts must run from HERE — not the consumer project's cwd — so
@@ -2680,6 +2681,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
       propose_concerns: proposeConcernsTool,
       file_skill: fileSkillTool,
       propose_refinements: proposeRefinementsTool,
+      record_outcome: recordOutcomeTool,
     },
   } as any
 }

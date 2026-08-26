@@ -21,7 +21,11 @@ in: an `es-source-type` axis (`transcript|doc|synthesis|skill`) orthogonal to
 `/ingest-docs <path>` for doc ingestion with staleness invalidation, approval-gated
 `concerns` links from synthesis closets to their authority docs, and a direct doc-admission
 path in deterministic retrieval (doc-stamped drawers enter the ranked pool on factual intent,
-or for any intent with `--include-docs`).
+or for any intent with `--include-docs`). Unified-memory Phase 7 outcome feedback is in: an
+`es-outcome` axis (`accept | revise | failed | unused`) written only by the human-authoritative
+`record_outcome` tool (dry-run-first, explicit node ids only — test/reviewer/loop signals are
+evidence for the operator's judgment, never writers), read back as a ranking term weighted below
+authority in deterministic retrieval, and surfaced as re-synthesis candidates in `/memory-status`.
 
 ---
 
@@ -65,8 +69,9 @@ own native layers** rather than inventing parallel structures:
   changelog.
 - **Categories** use the native **halls** (`facts` / `events` / `discoveries` /
   `preferences` / `advice`).
-- **Relationships** (`synthesized-from`, `merged-into`, and cross-type `concerns` links from
-  synthesis closets to their authority docs) live in MemPalace's existing knowledge graph.
+- **Relationships** (`synthesized-from`, `merged-into`, cross-type `concerns` links from
+  synthesis closets to their authority docs, and `es-outcome` outcome edges on the closets a
+  unit of work actually consulted) live in MemPalace's existing knowledge graph.
 - **Source types** are tracked with an `es-source-type` stamp (`transcript | doc |
   synthesis | skill`) on drawers — orthogonal to the consolidation-status axis, so a doc's
   authority is independent of how settled it is.
@@ -208,6 +213,18 @@ doc-stamped drawers in scope enter the ranked candidates even without a `concern
 `--include-docs` enables that same scan for non-factual intents. One-hop `concerns` neighbors
 (the authority docs linked to a hit synthesis) remain a grounding/neighbor path into the pool.
 
+Retrieval also reads **`es-outcome` history** as a ranking term: net-positive outcomes
+(more accepts than revises/failures) boost a node, repeated `revise` penalises it, and nodes
+with no outcome history are exactly neutral. The term is weighted strictly below authority —
+a doc with no outcome history still outranks a synthesis that happens to have two accepts on a
+factual query — and the factual floor (provisional syntheses never outrank docs) is applied
+after it, so the Phase 2 invariant is intact. Outcomes are written only by the
+human-authoritative `record_outcome` tool: dry-run-first, explicit node ids only (the
+`selected_nodes` actually consulted for the unit of work — broad/scope-based writes are not
+supported), and no automatic path from test failures, reviewer verdicts, or loop/spiral logs.
+Closets accumulating revise outcomes (`revise >= 2` and `revise > accept` over a recent window)
+surface as re-synthesis candidates in `/memory-status`, the same way provisional backlog is surfaced.
+
 ---
 
 ## Local validation
@@ -329,6 +346,7 @@ Also: a shepherd that doesn't sleep wouldn't be much use.
 
 Core policy runtime in place. The following are committed and usable now:
 - Unified-memory Phase 1-4 capabilities: `es-source-type` axis (`transcript|doc|synthesis|skill`) orthogonal to `es-status`, intent-aware retrieval (`--intent factual|historical|procedural` with a factual hard rule that provisional syntheses never outrank docs), `/ingest-docs <path>` doc ingestion (dry-run-first, staleness invalidation, re-stamping), and approval-gated `concerns` links from synthesis closets to authority docs surfaced as one-hop grounding/neighbor paths, plus direct doc admission (doc-stamped drawers enter the ranked pool on factual intent or with `--include-docs`)
+- Unified-memory Phase 7 outcome feedback: human-authoritative `es-outcome` axis (`accept | revise | failed | unused`) written only by the `record_outcome` tool (dry-run-first, explicit node ids, no automatic writes from test/reviewer/loop signals), consumed as a below-authority ranking term in deterministic retrieval and as re-synthesis candidates (`revise >= 2` and `revise > accept` over a recent window) in `/memory-status`
 - Deterministic policy-cycle runtime in `scripts/run-policy-cycle.ts`
 - Consolidation + validation runtime pipeline in `scripts/run-memory-consolidation-and-validation.ts`
 - Optional live mapper and auditor integration hooks in `scripts/run-memory-consolidation-and-validation.ts` (`--use-live-mapper`, `--use-live-auditor`)

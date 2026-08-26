@@ -10,6 +10,9 @@ export type RetrievalWeights = {
   neighborhoodBoost: number;
   alwaysLabeledBoost: number;
   authority: number;
+  // Phase 7 (unified memory): outcome-feedback term. Weighted BELOW authority by
+  // construction — see the clamp in computeNodeScore and DEFAULT_WEIGHTS below.
+  outcome: number;
 };
 
 // Phase 2 (unified memory): optional retrieval intent. Omitted = no preference.
@@ -101,6 +104,15 @@ export type RetrievalExpansionResult = {
       targets_admitted: number;
       truncated: boolean;
     };
+    // Phase 7 (unified memory): envelope honesty for the outcome-feedback ranking
+    // term. `applied` is true only when at least one ranked node carried es-outcome
+    // history that moved its score; `nodes_with_history` counts how many did.
+    outcome_expansion?: {
+      enabled: boolean;
+      applied: boolean;
+      nodes_with_history: number;
+      weight: number;
+    };
   };
   seeds: {
     query: string;
@@ -133,7 +145,47 @@ const DEFAULT_WEIGHTS: RetrievalWeights = {
   neighborhoodBoost: 1,
   alwaysLabeledBoost: 2,
   authority: 1,
+  // Phase 7: outcome term. The raw net (accepts − revises − failures) is clamped to
+  // ±2 before weighting, so the maximum outcome contribution is 2 * 0.5 = 1 — strictly
+  // below the authority boost range (±2 * 1). A node with zero outcome history gets
+  // exactly 0 from this term (neutral), and a doc with no history still outranks a
+  // synthesis with two accepts on a factual query (the spec's worked example).
+  outcome: 0.5,
 };
+
+// Phase 7 (unified memory): es-outcome axis. Values are written ONLY by the
+// human-authoritative record_outcome path (no automatic failed/accept writes from
+// test or reviewer signals). Ranking semantics: accept is positive; revise and
+// failed are negative (repeated revise penalises); unused is neutral — a loop/spiral
+// intervention alone maps toward "unused" unless a hard failure was human-confirmed.
+export const OUTCOME_VALUES = ["accept", "revise", "failed", "unused"] as const;
+export type OutcomeValue = (typeof OUTCOME_VALUES)[number];
+
+export type OutcomeCounts = {
+  accept: number;
+  revise: number;
+  failed: number;
+  unused: number;
+  total: number;
+};
+
+/** Empty outcome history — the neutral state. */
+export function emptyOutcomeCounts(): OutcomeCounts {
+  return { accept: 0, revise: 0, failed: 0, unused: 0, total: 0 };
+}
+
+/**
+ * Phase 7 ranking term. Net = accepts − (revises + failures); `unused` is neutral by
+ * policy (evidence only, no signal of its own). The net is clamped to ±2 so outcome
+ * ACCUMULATION can never overwhelm authority: max contribution is 2 * weights.outcome
+ * (= 1 at defaults), strictly below the authority boost range (±2 * weights.authority).
+ * Zero history returns exactly 0 — nodes without es-outcome edges are unaffected.
+ */
+export function outcomeScoreTerm(counts: OutcomeCounts, weight: number): number {
+  const net = counts.accept - (counts.revise + counts.failed);
+  const clamped = Math.max(-2, Math.min(2, net));
+  return clamped * weight;
+}
 
 // Phase 2 (unified memory): intent -> per-authority-type boost table.
 // Magnitudes are secondary to the factual floor below; they only shape ordering
@@ -306,6 +358,7 @@ function computeNodeScore(args: {
   neighborhoodIDs: Set<string>;
   alwaysIncludeLabels: Set<string>;
   authorityBoost: number;
+  outcomeCounts?: OutcomeCounts;
 }): number {
   const {
     node,
@@ -315,6 +368,7 @@ function computeNodeScore(args: {
     neighborhoodIDs,
     alwaysIncludeLabels,
     authorityBoost,
+    outcomeCounts,
   } = args;
 
   let score = 0;
@@ -341,6 +395,14 @@ function computeNodeScore(args: {
   // Phase 2: intent-based authority term. Zero when no intent is set, so the
   // default path stays byte-identical to the pre-Phase-2 formula.
   score += authorityBoost * weights.authority;
+
+  // Phase 7: outcome-feedback term. Weighted below authority (clamped net * weight,
+  // max magnitude strictly under one full authority boost) and added BEFORE the
+  // factual floor clamp, so the doc-over-provisional-synthesis invariant is intact.
+  // Zero-history nodes get exactly 0 here — neutral by construction.
+  if (outcomeCounts && outcomeCounts.total > 0) {
+    score += outcomeScoreTerm(outcomeCounts, weights.outcome);
+  }
 
   return score;
 }
@@ -696,6 +758,20 @@ export async function expandScopedRetrieval(
     }
   }
 
+  // Phase 7 (unified memory): outcome-feedback ranking term. Read the accumulated
+  // es-outcome counts for the (already bounded) pool and add a net-positive/negative
+  // term to each node's score. Capability-gated like concerns/refined: clients without
+  // getOutcomeCounts degrade to pre-Phase-7 scoring with zero extra calls. Bounded by
+  // construction — one one-hop kg_query per pool node (≤ limit), same cost profile as
+  // the P2-2 fan-out; read failures degrade to "no history" (neutral), never abort.
+  const outcomeEnabled = typeof client.getOutcomeCounts === "function";
+  let outcomeCountsByNode: Map<string, OutcomeCounts> | undefined;
+  if (outcomeEnabled && scopedNodes.length > 0) {
+    outcomeCountsByNode = await client
+      .getOutcomeCounts(scopedNodes.map((n) => n.node_id))
+      .catch(() => new Map<string, OutcomeCounts>());
+  }
+
   const rankedNodes = scopedNodes.map((node) => {
     node.score = computeNodeScore({
       node,
@@ -705,6 +781,7 @@ export async function expandScopedRetrieval(
       neighborhoodIDs: neighborhoodSet,
       alwaysIncludeLabels: alwaysIncludeLabelSet,
       authorityBoost: intent ? INTENT_AUTHORITY_BOOSTS[intent][node.source_type] : 0,
+      outcomeCounts: outcomeCountsByNode?.get(node.node_id),
     });
     return node;
   });
@@ -787,6 +864,17 @@ export async function expandScopedRetrieval(
             drawers_scanned: docScanReport?.drawers_scanned ?? 0,
             targets_admitted: scopedNodes.filter((n) => n.via === "doc").length,
             truncated: docScanReport?.truncated ?? false,
+          }
+        : undefined,
+      // Phase 7 envelope honesty: state whether the outcome term was applied.
+      // `applied` is true only when some node's score actually moved (non-zero net),
+      // so a pool with history that nets to zero reports applied: false.
+      outcome_expansion: outcomeEnabled && scopedNodes.length > 0
+        ? {
+            enabled: true,
+            applied: [...(outcomeCountsByNode?.values() ?? [])].some((c) => c.total > 0 && c.accept !== c.revise + c.failed),
+            nodes_with_history: [...(outcomeCountsByNode?.values() ?? [])].filter((c) => c.total > 0).length,
+            weight: weights.outcome,
           }
         : undefined,
     },

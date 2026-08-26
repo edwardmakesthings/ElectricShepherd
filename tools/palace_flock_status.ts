@@ -17,6 +17,42 @@ declare const process: {
 
 const DEFAULT_THRESHOLD = 12;
 
+// Phase 7 (unified memory): re-synthesis candidate rule. A closet accumulating
+// `revise` outcomes is a re-synthesis candidate — surfaced here at parent-drawer
+// granularity, the same way provisional backlog is surfaced. Approved threshold:
+// revise_count >= 2 AND revise_count > accept_count over a bounded recent window
+// (outcome edges carry valid_from; facts without a parseable timestamp count as in-
+// window rather than being dropped — conservative toward surfacing). Count-based and
+// capped, never an unbounded closet listing.
+const RE_SYNTHESIS_REVISE_MIN = 2;
+export const RE_OUTCOME_WINDOW_DAYS = 30;
+export const RE_OUTCOME_CANDIDATE_SAMPLE_CAP = 10;
+
+export type OutcomeCounts = { accept: number; revise: number; failed: number; unused: number };
+
+/** Pure re-synthesis candidate predicate (approved Phase 7 rule). */
+export function isReSynthesisCandidate(counts: OutcomeCounts): boolean {
+  return counts.revise >= RE_SYNTHESIS_REVISE_MIN && counts.revise > counts.accept;
+}
+
+/** Parse one node's es-outcome facts into windowed counts. Pure, exported for tests. */
+export function countOutcomesInWindow(
+  factsRaw: unknown,
+  windowStartIso: string,
+): OutcomeCounts {
+  const counts: OutcomeCounts = { accept: 0, revise: 0, failed: 0, unused: 0 };
+  for (const fact of parseFacts(factsRaw)) {
+    if (fact.current === false) continue;
+    const value = asText(fact.object).trim();
+    if (value !== "accept" && value !== "revise" && value !== "failed" && value !== "unused") continue;
+    // Window by the edge's valid_from when present; untimestamped edges count in-window.
+    const stamped = asText(fact.valid_from || fact.created_at).trim();
+    if (stamped && stamped < windowStartIso) continue;
+    counts[value] += 1;
+  }
+  return counts;
+}
+
 export default tool({
   description:
     "Fast flock status counts at parent-drawer granularity (not chunk rows): unconsolidated sources, consolidated summaries, provisional summaries, backlog estimate, and threshold decision.",
@@ -166,6 +202,28 @@ export default tool({
     });
 
     const provisionalCount = targetStatuses.filter(Boolean).length;
+
+    // Phase 7: re-synthesis candidates among the ALREADY-COLLECTED consolidated summary
+    // nodes (parent-drawer granularity, bounded by the existing sampling — no new room
+    // scans). One one-hop es-outcome kg_query per summary node, same concurrency pool.
+    const windowStartIso = new Date(Date.now() - RE_OUTCOME_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    const reSynthesisCandidates: { node_id: string; accept: number; revise: number }[] = [];
+    await mapLimit([...consolidatedTargets], 8, async (drawerId) => {
+      const facts = parseFacts(
+        await call("kg_query", {
+          entity: drawerId,
+          direction: "outgoing",
+          predicate: "es-outcome",
+          recurse: false,
+          max_depth: 1,
+        }).catch(() => ({})),
+      );
+      const counts = countOutcomesInWindow(facts, windowStartIso);
+      if (isReSynthesisCandidate(counts)) {
+        reSynthesisCandidates.push({ node_id: drawerId, accept: counts.accept, revise: counts.revise });
+      }
+    });
+
     const threshold = thresholdReport(unconsolidatedEstimate);
 
     return json({
@@ -185,7 +243,17 @@ export default tool({
         consolidated_summary_nodes_is_partial_sample: !exactMode,
         provisional_summary_nodes: provisionalCount,
         provisional_summary_nodes_is_partial_sample: !exactMode,
+        // Phase 7: closets accumulating revise outcomes — a re-synthesis candidate is
+        // one with >= 2 revise AND more revise than accept over the recent window.
+        re_synthesis_candidates: reSynthesisCandidates.length,
+        re_synthesis_candidates_is_partial_sample: !exactMode,
         backlog_approx: unconsolidatedEstimate,
+      },
+      re_synthesis: {
+        rule: `revise_count >= ${RE_SYNTHESIS_REVISE_MIN} AND revise_count > accept_count over recent window`,
+        window_days: RE_OUTCOME_WINDOW_DAYS,
+        checked_summary_nodes: consolidatedTargets.size,
+        candidates: reSynthesisCandidates.slice(0, RE_OUTCOME_CANDIDATE_SAMPLE_CAP),
       },
       sampling: {
         mode: exactMode ? "exact" : "sampled",

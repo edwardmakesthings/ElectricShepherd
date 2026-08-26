@@ -182,6 +182,12 @@ Retrieval also surfaces **one-hop `concerns` neighbors** as a grounding/neighbor
 on a synthesis admits its linked authority docs into the ranked pool, so a synthesis hit
 carries its grounding docs along (see §4a for how those links are created).
 
+Retrieval also reads **`es-outcome` history** as a ranking term: net-positive outcomes boost a
+node, repeated `revise` penalises it, and nodes with no outcome history score exactly as before.
+The term is weighted strictly below authority (a doc with no history still outranks a synthesis
+with two accepts on a factual query), and the factual floor is applied after it. Outcomes are
+written only by the human-authoritative `record_outcome` tool (§4a).
+
 ## 3b. Run consolidation + validation pipeline
 
 ```bash
@@ -446,6 +452,32 @@ list, and applies only the items you approve. Retrieval then surfaces one-hop `c
 neighbors as a grounding/neighbor path (§3a), so a synthesis hit carries its grounding docs
 into the ranked pool; direct doc admission (§3a) lets doc-stamped drawers enter the ranked
 pool without any `concerns` edge at all.
+
+### 4a-2. The `es-outcome` axis and human-authoritative outcome writing
+
+Every closet a unit of work actually consulted can carry **`es-outcome` edges**
+(`{subject: <node id>, predicate: "es-outcome", object: accept | revise | failed | unused}`).
+They **accumulate** — multiple edges per closet are expected and meaningful (a closet with 6
+accepts + 1 revise is different from one with 1 accept); nothing ever overwrites or collapses them.
+
+Writing is **human-authoritative by design**: the `record_outcome` tool is the only writer, and
+it requires an explicit operator judgment at cycle close (one bounded work unit). Test pass/fail,
+reviewer verdicts, and loop/spiral intervention logs are **evidence only — never writers**; a
+failed test run does not auto-write `failed`. The operator reads the evidence and decides
+(loop/spiral alone maps toward `unused` unless a hard failure was human-confirmed).
+
+Attribution is strict: the tool accepts ONLY an explicit node-id set — the `selected_nodes`
+retrieval returned for that unit of work. There is no wing/room/scope write mode, and an empty
+id list is rejected: when the consulted set cannot be determined, it writes NOTHING rather than
+blame closets that had no part in the outcome.
+
+Dry-run first: the default call makes no `kg_add` and echoes the exact edges; pass
+`dry_run:false` only after explicit operator confirmation. Each edge carries a `valid_from`
+timestamp so consumers can window recent history.
+
+Two things read this axis (§3a): retrieval ranking (below-authority boost/penalty) and
+`/memory-status`, which surfaces **re-synthesis candidates** — closets with `revise >= 2` and
+`revise > accept` over a recent window — the same way provisional backlog is surfaced.
 
 ## 4b. How mem-core scope is chosen
 

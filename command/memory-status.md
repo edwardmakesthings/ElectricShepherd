@@ -14,6 +14,7 @@ Scope: $ARGUMENTS (default: the current project's memory if no scope is given). 
 - Number of those summary nodes still `es-status: provisional` (synthesized but never validated/promoted — hidden from default retrieval until a dream-auditor pass promotes them). This is separate backlog from the two counts above: it needs a validation pass, not a synthesis pass.
 - Approximate backlog (source memories not yet represented in any synthesized-from summary node).
 - Whether that backlog is above the auto-consolidation volume threshold (ESHEPHERD_AUTO_CONSOLIDATION_MESSAGE_THRESHOLD) — i.e. whether a `/consolidate` is due.
+- Number of **re-synthesis candidates**: summary closets accumulating `es-outcome: revise` outcomes (rule: >= 2 revise AND more revise than accept over the recent window). This is a re-synthesis backlog, separate from the counts above — those closets were consulted and revised repeatedly, so their synthesis should be redone, not just validated.
 
 Fast path for quick counts: call `palace_flock_status` first. It counts at parent-drawer granularity (not chunk rows) and returns the exact fields this command needs.
 
@@ -25,7 +26,8 @@ Fallback only if unavailable: use `palace_report` + aggregate graph queries, not
 2. From that sample, describe the derived drawers a consolidation pass would likely create or update.
 3. Flag any low-confidence or single-source items in the sample that would be skipped.
 4. List existing closets with `es-status: provisional` in scope — synthesized but never validated/promoted. This is a different backlog than item 1: nothing new to synthesize, just nothing yet run through dream-auditor.
+5. List the re-synthesis candidates (bounded sample from the tool's `re_synthesis.candidates`) — closets with repeated `es-outcome: revise` history that should be re-synthesized. Note their accept/revise counts so the operator can weigh them.
 
 Read-only: do not call `add_drawer`, `kg_add`, `apply_merge`, or otherwise write/modify any memory.
 
-End with the next action, named: `/consolidate` if there's a normal backlog to clear, `/consolidate-deep` if it's been a while (validation/merge/relocation are also due), or nothing further if counts are all at zero.
+End with the next action, named: `/consolidate` if there's a normal backlog to clear, `/consolidate-deep` if it's been a while (validation/merge/relocation are also due), name the re-synthesis candidates when they exist (a targeted re-synthesis of those closets is the follow-up), or nothing further if counts are all at zero.
