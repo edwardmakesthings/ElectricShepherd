@@ -431,5 +431,226 @@ test("default path with no concerns configured is byte-identical in ordering to 
   assert.equal(result.filters.concerns_expansion.enabled, false);
   assert.equal(result.filters.concerns_expansion.targets_admitted, 0);
   assert.deepEqual(result.seeds.concern_neighbor_ids, []);
+  // Phase 3 close-out envelope honesty: default intent + no include_docs -> the doc
+  // scan must not even be reported (no room paging happened).
+  assert.equal(result.filters.doc_scan, undefined, "no doc_scan entry on the default path");
+});
+
+/**
+ * Phase 3 close-out (unified memory): direct doc admission. Standalone docs have no
+ * lineage edge, so listScopedDerivedDrawers never admits them; before a concerns edge
+ * exists they are invisible to scoped retrieval. On factual intent (or explicit
+ * include_docs) the adapter scans the scope room (bounded paging) and admits
+ * doc-stamped drawers directly (via: "doc"). Proves:
+ *   1. factual intent admits a standalone doc with via: "doc" and the floor engages;
+ *   2. non-factual + no flag -> zero extra calls, byte-identical ordering;
+ *   3. include_docs opt-in works without an intent;
+ *   4. hard filter: unstamped/transcript rows are NOT admitted;
+ *   5. scope guard: out-of-wing/room docs are NOT admitted;
+ *   6. dedupe: a doc already in the pool via concerns keeps via: "concern";
+ *   7. page cap respected (truncated reported).
+ */
+
+function makeDocScanClient({ rows = [], sourceTypes = {}, statuses = {} } = {}) {
+  const base = makeClient({ statuses, sourceTypes });
+  // Bounded room listing: the probe (limit 1) reports the total; pages slice rows.
+  base.listDrawers = async ({ limit, offset }) => ({ drawers: rows.slice(offset, offset + limit), total: rows.length });
+  return base;
+}
+
+const DOC_ROW = { drawer_id: "standalone-doc", wing: "w", room: "unit-room", desc: "Gateway API reference" };
+
+test("factual intent admits a standalone doc without a concerns edge (via: 'doc', floor engages)", async () => {
+  const nodes = [
+    // High-height provisional synth that would otherwise dominate on raw score.
+    { node_id: "prov-synth", labels: ["pinned"], wing: "w", room: "unit-room", desc: "d", height: 5, retrieval_count: 6, connection_degree: 4, lineage_match_count: 4 },
+  ];
+  const client = makeDocScanClient({
+    statuses: { "prov-synth": "provisional" },
+    sourceTypes: { "prov-synth": "synthesis", "standalone-doc": "doc" },
+    rows: [DOC_ROW],
+  });
+  client.listScopedDerivedDrawers = async () => ({ nodes });
+
+  const result = await expandScopedRetrieval(client, { ...BASE_OPTIONS, intent: "factual", include_provisional: true });
+  const byId = Object.fromEntries(result.ranked_nodes.map((n) => [n.node_id, n]));
+
+  assert.ok(byId["standalone-doc"], `doc should be admitted directly: ${JSON.stringify(ids(result))}`);
+  assert.equal(byId["standalone-doc"].via, "doc");
+  assert.equal(byId["standalone-doc"].source_type, "doc");
+  assert.equal(byId["prov-synth"].via, undefined); // scoped nodes keep no via marker
+
+  // Computed scores (factual intent):
+  //   standalone-doc: base 0 + doc boost 2 = 2 (no neighborhood boost — deliberately
+  //     NOT in the neighborhood set; doc authority comes from the boost table).
+  //   prov-synth: raw 30.945910 + synthesis boost 1 = 31.945910 -> clamped to floorMin = 2.
+  assert.ok(Math.abs(byId["standalone-doc"].score - 2) < 1e-9, `doc score off: ${byId["standalone-doc"].score}`);
+  assert.ok(Math.abs(byId["prov-synth"].score - 2) < 1e-9, `clamped synth score off: ${byId["prov-synth"].score}`);
+
+  // The hard rule with a REAL doc in the pool BEFORE any concerns edge exists — the
+  // exact failure mode the Phase 6 audit flagged: even a pinned provisional synthesis
+  // must not present above a standalone doc on a factual query.
+  assert.deepEqual(
+    ids(result),
+    ["standalone-doc", "prov-synth"],
+    `factual direct-doc ordering violated: ${JSON.stringify(ids(result))}`
+  );
+
+  console.log(
+    `[worked-example] factual + direct doc: standalone-doc=${byId["standalone-doc"].score.toFixed(6)}, ` +
+      `prov-synth=${byId["prov-synth"].score.toFixed(6)} (raw 31.945910, clamped to floor ${byId["standalone-doc"].score.toFixed(6)})`
+  );
+
+  // Envelope honesty: the scan happened, scanned 1 drawer, admitted 1, not truncated.
+  assert.equal(result.filters.doc_scan.enabled, true);
+  assert.deepEqual(result.filters.doc_scan.rooms_scanned, ["unit-room"]);
+  assert.equal(result.filters.doc_scan.drawers_scanned, 1);
+  assert.equal(result.filters.doc_scan.targets_admitted, 1);
+  assert.equal(result.filters.doc_scan.truncated, false);
+});
+
+test("non-factual intent without include_docs: zero doc-scan calls and byte-identical ordering", async () => {
+  const nodes = [
+    { node_id: "prov-synth", labels: ["pinned"], wing: "w", room: "unit-room", desc: "d", height: 5, retrieval_count: 6, connection_degree: 4, lineage_match_count: 4 },
+  ];
+  const client = makeDocScanClient({
+    statuses: { "prov-synth": "provisional" },
+    sourceTypes: { "prov-synth": "synthesis", "standalone-doc": "doc" },
+    rows: [DOC_ROW],
+  });
+  client.listScopedDerivedDrawers = async () => ({ nodes });
+
+  // The gate is factual-or-explicit: default intent must not silently enable the scan.
+  const result = await expandScopedRetrieval(client, { ...BASE_OPTIONS, include_provisional: true });
+
+  assert.deepEqual(
+    ids(result),
+    ["prov-synth"],
+    `default path must be unchanged (no doc admission): ${JSON.stringify(ids(result))}`
+  );
+  const byId = Object.fromEntries(result.ranked_nodes.map((n) => [n.node_id, n]));
+  assert.ok(Math.abs(byId["prov-synth"].score - 30.94591014905531) < 1e-9, `default score changed: ${byId["prov-synth"].score}`);
+  // No room paging happened at all — the stub listDrawers was never called.
+  assert.equal(result.filters.doc_scan, undefined, "no doc_scan entry when docs not requested");
+
+  // historical intent (non-factual) without the flag: same story.
+  const hist = await expandScopedRetrieval(client, { ...BASE_OPTIONS, intent: "historical", include_provisional: true });
+  assert.deepEqual(ids(hist), ["prov-synth"], `historical path must be unchanged: ${JSON.stringify(ids(hist))}`);
+  assert.equal(hist.filters.doc_scan, undefined);
+});
+
+test("include_docs: true on default intent admits docs (explicit opt-in)", async () => {
+  const nodes = [
+    { node_id: "active-synth", labels: [], wing: "w", room: "unit-room", desc: "d", height: 2, retrieval_count: 1, connection_degree: 1, lineage_match_count: 1 },
+  ];
+  const client = makeDocScanClient({
+    statuses: { "active-synth": "active" },
+    sourceTypes: { "active-synth": "synthesis", "standalone-doc": "doc" },
+    rows: [DOC_ROW],
+  });
+  client.listScopedDerivedDrawers = async () => ({ nodes });
+
+  const result = await expandScopedRetrieval(client, { ...BASE_OPTIONS, include_docs: true });
+  const byId = Object.fromEntries(result.ranked_nodes.map((n) => [n.node_id, n]));
+
+  assert.ok(byId["standalone-doc"], `doc should be admitted via explicit opt-in: ${JSON.stringify(ids(result))}`);
+  assert.equal(byId["standalone-doc"].via, "doc");
+  // No intent -> no authority boost: doc base score is exactly 0.
+  assert.ok(Math.abs(byId["standalone-doc"].score - 0) < 1e-9, `opt-in doc score off: ${byId["standalone-doc"].score}`);
+  assert.equal(result.filters.doc_scan.enabled, true);
+  assert.equal(result.filters.doc_scan.targets_admitted, 1);
+});
+
+test("direct doc scan hard-filters unstamped and non-doc rows (scanned but not admitted)", async () => {
+  const nodes = [
+    { node_id: "active-synth", labels: [], wing: "w", room: "unit-room", desc: "d", height: 2, retrieval_count: 1, connection_degree: 1, lineage_match_count: 1 },
+  ];
+  const client = makeDocScanClient({
+    statuses: { "active-synth": "active" },
+    sourceTypes: { "active-synth": "synthesis", "transcript-row": "transcript" }, // unstamped-doc left unstamped (null)
+    rows: [
+      { drawer_id: "unstamped-doc", wing: "w", room: "unit-room", desc: "no stamp" },
+      { drawer_id: "transcript-row", wing: "w", room: "unit-room", desc: "a transcript" },
+    ],
+  });
+  client.listScopedDerivedDrawers = async () => ({ nodes });
+
+  const result = await expandScopedRetrieval(client, { ...BASE_OPTIONS, intent: "factual" });
+  assert.deepEqual(
+    ids(result),
+    ["active-synth"],
+    `no non-doc row may be admitted: ${JSON.stringify(ids(result))}`
+  );
+  // The scan DID happen (envelope honesty): it saw both rows, admitted neither.
+  assert.equal(result.filters.doc_scan.enabled, true);
+  assert.equal(result.filters.doc_scan.drawers_scanned, 2);
+  assert.equal(result.filters.doc_scan.targets_admitted, 0);
+});
+
+test("direct doc scan scope guard: docs in another wing/room are NOT admitted", async () => {
+  const nodes = [
+    { node_id: "active-synth", labels: [], wing: "w", room: "unit-room", desc: "d", height: 2, retrieval_count: 1, connection_degree: 1, lineage_match_count: 1 },
+  ];
+  const client = makeDocScanClient({
+    statuses: { "active-synth": "active" },
+    sourceTypes: { "active-synth": "synthesis", "other-wing-doc": "doc", "other-room-doc": "doc" },
+    rows: [
+      { drawer_id: "other-wing-doc", wing: "other-w", room: "unit-room", desc: "cross-project doc" },
+      { drawer_id: "other-room-doc", wing: "w", room: "elsewhere", desc: "cross-room doc" },
+    ],
+  });
+  client.listScopedDerivedDrawers = async () => ({ nodes });
+
+  // scope_wing engages the cross-wing guard; scope_room is unit-room.
+  const result = await expandScopedRetrieval(client, { ...BASE_OPTIONS, intent: "factual", scope_wing: "w" });
+  assert.deepEqual(
+    ids(result),
+    ["active-synth"],
+    `out-of-scope docs must not be admitted: ${JSON.stringify(ids(result))}`
+  );
+  assert.equal(result.filters.doc_scan.drawers_scanned, 2);
+  assert.equal(result.filters.doc_scan.targets_admitted, 0);
+});
+
+test("dedupe: a doc already in the pool via concerns keeps via: 'concern' (no duplicate admission)", async () => {
+  const nodes = [
+    { node_id: "prov-synth", labels: [], wing: "w", room: "unit-room", desc: "d", height: 5, retrieval_count: 6, connection_degree: 4, lineage_match_count: 4 },
+  ];
+  const client = makeDocScanClient({
+    statuses: { "prov-synth": "provisional" },
+    sourceTypes: { "prov-synth": "synthesis", "authority-doc": "doc" },
+    rows: [{ drawer_id: "authority-doc", wing: "w", room: "unit-room", desc: "Gateway API reference" }],
+  });
+  client.listScopedDerivedDrawers = async () => ({ nodes });
+  client.getConcerns = async (id) => ({ node_ids: id === "prov-synth" ? ["authority-doc"] : [], count: 1 });
+  client.getDrawer = async ({ drawer_id }) => ({ drawer_id, wing: "w", room: "unit-room", desc: "Gateway API reference" });
+
+  const result = await expandScopedRetrieval(client, { ...BASE_OPTIONS, intent: "factual", include_provisional: true });
+  const byId = Object.fromEntries(result.ranked_nodes.map((n) => [n.node_id, n]));
+
+  // Exactly one entry for the doc; the edge path won the via precedence.
+  assert.equal(result.ranked_nodes.filter((n) => n.node_id === "authority-doc").length, 1, "no duplicate admission");
+  assert.equal(byId["authority-doc"].via, "concern", `via must stay 'concern', got: ${byId["authority-doc"].via}`);
+
+  // The doc scan still reports honestly: it scanned the row but admitted 0 (deduped).
+  assert.equal(result.filters.doc_scan.enabled, true);
+  assert.equal(result.filters.doc_scan.drawers_scanned, 1);
+  assert.equal(result.filters.doc_scan.targets_admitted, 0);
+});
+
+test("direct doc scan respects the page cap and reports truncation", async () => {
+  // 300 rows in the room; the bounded scan covers at most 4 pages x 50 = 200.
+  const rows = Array.from({ length: 300 }, (_, i) => ({ drawer_id: `row-${i}`, wing: "w", room: "unit-room", desc: "d" }));
+  const client = makeDocScanClient({ rows });
+
+  const result = await expandScopedRetrieval(client, { ...BASE_OPTIONS, include_docs: true });
+
+  assert.equal(result.filters.doc_scan.enabled, true);
+  // Every listed row is a candidate (deduped by id) — the scan saw all 300 listed
+  // rows across the capped pages... but only 200 rows were actually fetched.
+  assert.equal(result.filters.doc_scan.drawers_scanned, 200, `only capped rows may be scanned: ${result.filters.doc_scan.drawers_scanned}`);
+  assert.equal(result.filters.doc_scan.truncated, true, "truncation must be reported");
+  // None of the rows are doc-stamped (null) -> nothing admitted.
+  assert.equal(result.filters.doc_scan.targets_admitted, 0);
 });
 

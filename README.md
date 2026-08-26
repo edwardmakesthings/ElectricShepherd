@@ -18,8 +18,10 @@ MCP/notification timeouts wired. The runtime also now rejects unsafe shell-style
 commands for the turn-guard subprocess path. Unified-memory Phase 1-4 capabilities are
 in: an `es-source-type` axis (`transcript|doc|synthesis|skill`) orthogonal to
 `es-status`, intent-aware retrieval (`--intent factual|historical|procedural`),
-`/ingest-docs <path>` for doc ingestion with staleness invalidation, and approval-gated
-`concerns` links from synthesis closets to their authority docs.
+`/ingest-docs <path>` for doc ingestion with staleness invalidation, approval-gated
+`concerns` links from synthesis closets to their authority docs, and a direct doc-admission
+path in deterministic retrieval (doc-stamped drawers enter the ranked pool on factual intent,
+or for any intent with `--include-docs`).
 
 ---
 
@@ -201,8 +203,10 @@ tools through the Electric Shepherd adapter and prints a JSON plan/result payloa
 Retrieval is intent-aware: add `--intent factual|historical|procedural` to rank candidates
 by what kind of answer you want (factual favors doc-stamped sources, historical favors
 synthesis/transcripts, procedural favors skills). On a factual intent a provisional synthesis
-can never outrank a doc. Retrieval also admits one-hop `concerns` neighbors — the authority
-docs linked to a hit synthesis — into the ranked pool.
+can never outrank a doc. On a factual intent, retrieval has a direct doc-admission path:
+doc-stamped drawers in scope enter the ranked candidates even without a `concerns` edge;
+`--include-docs` enables that same scan for non-factual intents. One-hop `concerns` neighbors
+(the authority docs linked to a hit synthesis) remain a grounding/neighbor path into the pool.
 
 ---
 
@@ -324,7 +328,7 @@ Also: a shepherd that doesn't sleep wouldn't be much use.
 ## Status
 
 Core policy runtime in place. The following are committed and usable now:
-- Unified-memory Phase 1-4 capabilities: `es-source-type` axis (`transcript|doc|synthesis|skill`) orthogonal to `es-status`, intent-aware retrieval (`--intent factual|historical|procedural` with a factual hard rule that provisional syntheses never outrank docs), `/ingest-docs <path>` doc ingestion (dry-run-first, staleness invalidation, re-stamping), and approval-gated `concerns` links from synthesis closets to authority docs surfaced as one-hop retrieval neighbors
+- Unified-memory Phase 1-4 capabilities: `es-source-type` axis (`transcript|doc|synthesis|skill`) orthogonal to `es-status`, intent-aware retrieval (`--intent factual|historical|procedural` with a factual hard rule that provisional syntheses never outrank docs), `/ingest-docs <path>` doc ingestion (dry-run-first, staleness invalidation, re-stamping), and approval-gated `concerns` links from synthesis closets to authority docs surfaced as one-hop grounding/neighbor paths, plus direct doc admission (doc-stamped drawers enter the ranked pool on factual intent or with `--include-docs`)
 - Deterministic policy-cycle runtime in `scripts/run-policy-cycle.ts`
 - Consolidation + validation runtime pipeline in `scripts/run-memory-consolidation-and-validation.ts`
 - Optional live mapper and auditor integration hooks in `scripts/run-memory-consolidation-and-validation.ts` (`--use-live-mapper`, `--use-live-auditor`)

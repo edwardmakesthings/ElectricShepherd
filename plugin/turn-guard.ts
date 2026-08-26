@@ -66,6 +66,8 @@ import relocateMemoryTool from "../tools/relocate_memory.ts"
 import palaceStampSourceTypeTool from "../tools/palace_stamp_source_type.ts"
 import ingestDocsTool from "../tools/ingest_docs.ts"
 import proposeConcernsTool from "../tools/propose_concerns.ts"
+import fileSkillTool from "../tools/file_skill.ts"
+import proposeRefinementsTool from "../tools/propose_refinements.ts"
 
 // Absolute path to the ElectricShepherd install root (the plugin's own repo).
 // Runtime scripts must run from HERE — not the consumer project's cwd — so
@@ -2063,7 +2065,9 @@ export const TurnGuard = async ({ client, directory }: any) => {
               `- a bug's root cause was found (the cause, not just the fix),\n` +
               `- a non-obvious "how/why this works" was discovered,\n` +
               `- a problem was solved in a reusable way (file as a worked example in the ` +
-              `apprenticeship room),\n` +
+              `apprenticeship room; if the reusable solution maps to a RECURRING TASK, also add one line ` +
+              `\`SKILL_EXERCISED: <concept name>\` so a later consolidation pass can link the worked ` +
+              `example to the skill it exercised — this is only a signal for the dreamer, never a write),\n` +
               `- a dead end worth not repeating was hit.\n` +
               `Use diary_write (the apprenticeship room included) for all of this. Synthesize — ` +
               `don't dump a transcript; write what a future session would want to retrieve. ` +
@@ -2674,6 +2678,8 @@ export const TurnGuard = async ({ client, directory }: any) => {
       palace_stamp_source_type: palaceStampSourceTypeTool,
       ingest_docs: ingestDocsTool,
       propose_concerns: proposeConcernsTool,
+      file_skill: fileSkillTool,
+      propose_refinements: proposeRefinementsTool,
     },
   } as any
 }

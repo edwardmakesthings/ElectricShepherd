@@ -526,6 +526,49 @@ export class MemgraphClient {
     return { node_ids: nodeIds, count: nodeIds.length };
   }
 
+  // ── Phase 5: refined-by (skill -> evidence pointer) ───────────────────────
+  // `refined-by` is a cross-type KG edge, NOT lineage: it must never count toward
+  // height or feed getLineageSources/getLineageDerivatives. One-hop by design —
+  // recursive refined-by would create cycles through unrelated sessions/syntheses.
+
+  /**
+   * One-hop incoming `refined-by` subjects for a session/synthesis/apprenticeship
+   * node (the skills that point at it as evidence). Degrades to "no refined-by"
+   * on read failure, matching getConcerns.
+   */
+  async getRefinedBy(nodeId: string): Promise<{ node_ids: string[]; count: number }> {
+    const result = await this.kgQuery({
+      entity: nodeId,
+      direction: "incoming",
+      predicate: "refined-by",
+      recurse: false,
+      max_depth: 1,
+    }).catch(() => ({}));
+    const nodeIds = this.uniqueFromFactsByDirection(this.parseKgFacts(result), "incoming").filter(
+      (id) => id !== nodeId,
+    );
+    return { node_ids: nodeIds, count: nodeIds.length };
+  }
+
+  /**
+   * One-hop outgoing `refined-by` targets for a skill node (the sessions/syntheses/
+   * apprenticeship worked examples that changed how it should work). Degrades to
+   * "no refined-by" on read failure, matching getConcerns.
+   */
+  async getRefines(nodeId: string): Promise<{ node_ids: string[]; count: number }> {
+    const result = await this.kgQuery({
+      entity: nodeId,
+      direction: "outgoing",
+      predicate: "refined-by",
+      recurse: false,
+      max_depth: 1,
+    }).catch(() => ({}));
+    const nodeIds = this.uniqueFromFactsByDirection(this.parseKgFacts(result), "outgoing").filter(
+      (id) => id !== nodeId,
+    );
+    return { node_ids: nodeIds, count: nodeIds.length };
+  }
+
 
   getHeight(nodeId: string) {
     return this.call("getHeight", { node_id: nodeId });

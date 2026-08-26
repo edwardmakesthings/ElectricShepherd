@@ -131,6 +131,8 @@ them over hand-rolled `list_drawers` loops, which burn context and time out on b
 | Backfill the `es-source-type` axis on existing drawers (bounded, dry-run first) | `palace_stamp_source_type` |
 | Ingest a docs dir into the reference room + stamp es-source-type: doc (mine + staleness invalidation, dry-run first) | `ingest_docs` |
 | Propose/apply `concerns` edges between a synthesis and its authority docs (validates endpoints; dry-run first; apply only approved) | `propose_concerns` |
+| File a skill procedure into the skills room + stamp es-source-type: skill (exact-duplicate guard, dry-run first) | `file_skill` |
+| Propose/apply `refined-by` edges from a skill to the session/synthesis/apprenticeship drawers that changed how it works (validates endpoints; NOT lineage; dry-run first; apply only approved) | `propose_refinements` |
 | Move drawers in bulk between scopes | `move_drawers` |
 | Delete drawers by ID or scope | `delete_drawers` |
 | Force-capture THIS session's transcript now | `capture_transcript` |
@@ -257,10 +259,11 @@ Do not use these predicates for unrelated facts — they are consumed by travers
 | `synthesized-from` | B synthesized from A (B → A, upward toward sources) |
 | `merged-into` | B was merged away; A is canonical |
 | `concerns` | Synthesis → doc: cross-type authority pointer. ONE-HOP ONLY and NOT lineage — it does not affect height or feed lineage traversal. Written via `propose_concerns` (approval-gated, dry-run first); retrieval expansion pulls one-hop concerns targets into the ranked pool so a synthesis hit surfaces its authority doc. |
+| `refined-by` | Skill → evidence (session/synthesis/apprenticeship drawer): "this session changed how the skill should work". ONE-HOP ONLY and NOT lineage — it does not affect height or feed lineage traversal. Written via `propose_refinements` (approval-gated, dry-run first); retrieval expansion pulls one-hop refined-by neighbors into the ranked pool on procedural intent. An apprenticeship worked example filed by `solve-deep-cloud` is a valid evidence object — link it to the skill it exercised when one exists. |
 
 Use `mempalace_kg_add` to add these edges. Use `mempalace_kg_invalidate` to retire stale
-ones (e.g. when a source is superseded). Retiring a wrong `concerns` edge is one
-`kg_invalidate {subject, predicate: "concerns", object}` — no drawer content is ever touched.
+ones (e.g. when a source is superseded). Retiring a wrong `concerns` or `refined-by` edge
+is one `kg_invalidate {subject, predicate, object}` — no drawer content is ever touched.
 
 ---
 
@@ -269,6 +272,7 @@ ones (e.g. when a source is superseded). Retiring a wrong `concerns` edge is one
 | Tier | Room convention | Tool |
 |---|---|---|
 | raw transcripts | default `source-transcripts` room in the project wing (configurable via source-capture room / consolidation `--room`; legacy setups may use `transcripts`) | `add_drawer` by the capture pipeline only — never hand-write, never edit; append-only source |
+| skill procedures | `skills` room in the project wing | `file_skill` (dreamer-only write; stamped `es-source-type: skill` on filing; verbatim thereafter — refinement via `refined-by` edges or new drawer + `merged-into`) |
 | summaries + facts | any wing, any room except context-blocks | `add_drawer`, `diary_write`, `kg_add`, `kg_invalidate` |
 | mem-core | directory-scoped runtime-rendered files (`.electric-shepherd/memory`) | none directly. Rendered as part of consolidation pipeline runs (`--include-base-pipeline`); `run-mem-core-loader.ts` READS rendered files, it does not produce them. |
 

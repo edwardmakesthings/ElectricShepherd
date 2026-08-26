@@ -39,6 +39,11 @@ export type RetrievalExpansionOptions = {
   always_include_labels?: string[];
   weights?: Partial<RetrievalWeights>;
   intent?: RetrievalIntent;
+  // Phase 3 close-out: admit standalone doc-stamped drawers directly into the pool
+  // (bounded room scan) when no concerns edge links them yet. On factual intent this
+  // is implied — the flag only matters for non-factual intents that want docs in the
+  // ranked pool explicitly.
+  include_docs?: boolean;
 };
 
 export type RankedScopedNode = {
@@ -56,8 +61,12 @@ export type RankedScopedNode = {
   selected: boolean;
   // Phase 4: how this node entered the ranked pool. "scoped" = admitted by the
   // derived-drawer scope query; "concern" = admitted as a one-hop `concerns`
-  // target of a synthesis already in the pool (its authority doc).
-  via?: "scoped" | "concern";
+  // target of a synthesis already in the pool (its authority doc); "refined" =
+  // admitted as a one-hop `refined-by` neighbor of a pool node on procedural
+  // intent (the skill that points at it, or its evidence); "doc" = admitted directly
+  // by the Phase 3 close-out bounded room scan (standalone doc-stamped drawer with no
+  // lineage edge yet).
+  via?: "scoped" | "concern" | "refined" | "doc";
 };
 
 
@@ -82,6 +91,16 @@ export type RetrievalExpansionResult = {
     offset: number;
     // Phase 4: envelope honesty for concerns-neighbor expansion.
     concerns_expansion?: { enabled: boolean; targets_admitted: number };
+    // Phase 5: envelope honesty for refined-by neighbor expansion (procedural intent).
+    refined_expansion?: { enabled: boolean; targets_admitted: number };
+    // Phase 3 close-out: envelope honesty for the direct doc room scan.
+    doc_scan?: {
+      enabled: boolean;
+      rooms_scanned: string[];
+      drawers_scanned: number;
+      targets_admitted: number;
+      truncated: boolean;
+    };
   };
   seeds: {
     query: string;
@@ -90,6 +109,8 @@ export type RetrievalExpansionResult = {
     neighborhood_node_ids: string[];
     // Phase 4: one-hop `concerns` targets admitted into the pool this run.
     concern_neighbor_ids: string[];
+    // Phase 5: one-hop `refined-by` neighbors seen on procedural intent (admitted or not).
+    refined_neighbor_ids?: string[];
   };
 
   ranking: {
@@ -260,6 +281,21 @@ function extractScopedNodes(result: unknown): RankedScopedNode[] {
 
 function mergeWeights(overrides: Partial<RetrievalWeights> | undefined): RetrievalWeights {
   return { ...DEFAULT_WEIGHTS, ...(overrides || {}) };
+}
+
+// Tolerant list_drawers wrapper for the Phase 3 doc scan: a failed page probe or
+// fetch degrades to an empty result instead of aborting retrieval. (The `as` cast
+// cannot sit inside a .catch() arrow — Node's type-stripping rejects it — so the
+// fallback is shaped here.)
+async function safeListDrawers(
+  client: MemgraphClient,
+  args: { wing?: string; room?: string; limit: number; offset: number },
+): Promise<Record<string, unknown>> {
+  try {
+    return (await client.listDrawers(args)) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
 }
 
 function computeNodeScore(args: {
@@ -497,6 +533,169 @@ export async function expandScopedRetrieval(
     }
   }
 
+  // Phase 3 close-out: direct doc admission. Standalone docs have no lineage edge, so
+  // listScopedDerivedDrawers never admits them; before a concerns edge exists they are
+  // invisible to scoped retrieval. On factual intent (or explicit include_docs), scan
+  // the scope room(s) for doc-stamped drawers and admit those not already in the pool
+  // (via: "doc"). Bounded by construction: at most max_pages pages of page_size per
+  // scanned room — same shape as ingest_docs' boundedIdSnapshot; never pages to
+  // exhaustion. Scope guard mirrors listScopedDerivedDrawers: wing/room must match.
+  const includeDocs = Boolean(options.include_docs) || intent === "factual";
+  let docScanReport: { rooms_scanned: string[]; drawers_scanned: number; truncated: boolean } | undefined;
+  if (includeDocs && typeof client.listDrawers === "function") {
+    // Same room resolution as listScopedDerivedDrawers (memgraph.ts): options.room wins,
+    // else scope_room. Wing filter mirrors it too: options.wing wins, else scope_wing.
+    const roomsToScan = [options.room?.trim() || scope_room];
+    const wingFilter = options.wing?.trim() || options.scope_wing?.trim();
+
+    const docPageSize = 50; // same defaults as ingest_docs' boundedIdSnapshot
+    const docMaxPages = 4;
+    const allRows: unknown[] = [];
+    let truncated = false;
+    for (const room of roomsToScan) {
+      const probe = asObject(await safeListDrawers(client, { wing: wingFilter, room, limit: 1, offset: 0 }));
+      const total = Math.max(0, Number(probe.total) || 0);
+      for (let page = 0; page < docMaxPages && allRows.length < total; page += 1) {
+        const res = await safeListDrawers(client, { wing: wingFilter, room, limit: docPageSize, offset: page * docPageSize });
+        const pool = [
+          ...asArray(res.drawers),
+          ...asArray(res.results),
+          ...asArray(res.items),
+          ...asArray(res.nodes),
+          ...asArray(res.data),
+        ];
+        allRows.push(...pool);
+        if (pool.length < docPageSize) break;
+      }
+      if (total > allRows.length) truncated = true;
+    }
+
+    // Dedupe by id, then hard-filter to doc-stamped drawers in scope. One
+    // getClosetSourceType per candidate (one-hop kg_query each) — proportional to the
+    // bounded page count, never to palace size.
+    const seenRows = new Set<string>();
+    const candidates: { id: string; row: Record<string, unknown> }[] = [];
+    for (const raw of allRows) {
+      const row = asObject(raw);
+      const id = asString(row.drawer_id || row.node_id || row.id).trim();
+      if (!id || seenRows.has(id)) continue;
+      seenRows.add(id);
+      candidates.push({ id, row });
+    }
+    docScanReport = { rooms_scanned: roomsToScan, drawers_scanned: candidates.length, truncated };
+
+    const fresh = candidates.filter((c) => !scopedNodes.some((n) => n.node_id === c.id));
+    if (fresh.length > 0) {
+      // Retrieve-then-filter: fetch each candidate once (wing/room/desc), keep only
+      // doc-stamped rows that pass the scope guard. Unstamped/"unknown" is never a
+      // default type — hard filter, same discipline as the concerns block.
+      const results = await Promise.all(
+        fresh.map((c) => {
+          const drawerP = typeof client.getDrawer === "function" ? client.getDrawer({ drawer_id: c.id }).catch(() => ({})) : Promise.resolve({});
+          const typeP = client.getClosetSourceType(c.id).then((t) => t ?? "unknown");
+          return Promise.all([drawerP, typeP]);
+        }),
+      );
+      results.forEach(([drawerRaw, sourceType], i) => {
+        const c = fresh[i];
+        if (sourceType !== "doc") return; // hard check: only doc-stamped drawers qualify
+        const drawer = asObject(drawerRaw);
+        const row = c.row;
+        const wing = asString(drawer.wing || asObject(drawer.metadata).wing || row.wing || row.closet || row.namespace);
+        const room = asString(drawer.room || asObject(drawer.metadata).room || row.room);
+        if (options.scope_wing && wing && wing !== options.scope_wing) return;
+        if (scope_room && room && room !== scope_room) return;
+        scopedNodes.push({
+          node_id: c.id,
+          labels: [],
+          wing,
+          room,
+          desc: asString(drawer.desc || drawer.title || drawer.summary || row.desc || row.title || row.summary),
+          height: 0, // doc is not lineage — height stays pure synthesized-from
+          retrieval_count: asNumber(drawer.retrieval_count || asObject(drawer.metadata).retrieval_count || row.retrieval_count),
+          connection_degree: 0,
+          lineage_match_count: 0,
+          source_type: "doc",
+          score: 0,
+          selected: false,
+          via: "doc",
+        });
+        // Deliberately NOT added to neighborhoodSet: no seed/lineage relationship
+        // exists. Doc authority comes from the Phase 2 boost table + factual floor,
+        // not a free neighborhoodBoost that edge-based paths earn.
+      });
+    }
+  }
+
+  // Phase 5: refined-by-neighbor expansion (procedural intent only). Skills are
+  // leaves with no synthesized-from lineage, so they never enter the scoped pool;
+  // the one-hop `refined-by` edge is the bridge. Two directions, both bounded by
+  // construction (one one-hop kg_query per pool node, ≤ limit):
+  //   - incoming refined-by on every pool node: skills that point at this
+  //     session/synthesis/apprenticeship drawer as evidence;
+  //   - outgoing refined-by on skill-typed pool nodes: the sessions/syntheses it
+  //     was refined by (admitted only when they pass the scope guard below).
+  // Candidates are hard-filtered to es-source-type: skill (one get_drawer +
+  // getClosetSourceType each — retrieve-then-filter, never a room scan), and
+  // scope-guarded exactly like the concerns block. The synthesized-from gate in
+  // listScopedDerivedDrawers is untouched — skills enter by expansion, not by
+  // loosening it. Gated on intent + client capability so non-procedural paths
+  // and older clients degrade to pre-Phase-5 behavior with zero extra calls.
+  const refinedEnabled = typeof client.getRefinedBy === "function";
+  let refinedNeighborIds: string[] = [];
+  if (intent === "procedural" && refinedEnabled && scopedNodes.length > 0) {
+    const candidates = new Set<string>();
+    for (const node of scopedNodes) {
+      if (node.source_type === "skill" && typeof client.getRefines === "function") {
+        const res = await client.getRefines(node.node_id).catch(() => ({ node_ids: [] as string[] }));
+        for (const id of res.node_ids ?? []) candidates.add(id);
+      }
+      const res = await client.getRefinedBy(node.node_id).catch(() => ({ node_ids: [] as string[] }));
+      for (const id of res.node_ids ?? []) candidates.add(id);
+    }
+    const fresh = [...candidates].filter((id) => !scopedNodes.some((n) => n.node_id === id));
+    if (fresh.length > 0) {
+      refinedNeighborIds = fresh;
+      // Retrieve-then-filter: fetch each candidate once (wing/room/desc), keep only
+      // skill-stamped candidates that pass the scope filter. Proportional to edge
+      // count, never to room size.
+      const drawerResults = await Promise.all(
+        fresh.map((id) => {
+          const drawerP = client.getDrawer({ drawer_id: id }).catch(() => ({}));
+          const typeP = client.getClosetSourceType(id).then((t) => t ?? "unknown");
+          return Promise.all([drawerP, typeP]);
+        }),
+      );
+      drawerResults.forEach(([drawerRaw, sourceType], i) => {
+        const id = fresh[i];
+        if (sourceType !== "skill") return; // hard check: only skill-stamped targets qualify
+        const drawer = asObject(drawerRaw);
+        const wing = asString(drawer.wing || asObject(drawer.metadata).wing);
+        const room = asString(drawer.room || asObject(drawer.metadata).room);
+        if (options.scope_wing && wing && wing !== options.scope_wing) return;
+        // Skills are filed in the canonical `skills` room and should still be
+        // admitted for procedural intent even when scope_room is task-specific.
+        // Keep the wing guard, but do not room-gate refined skill neighbors.
+        scopedNodes.push({
+          node_id: id,
+          labels: [],
+          wing,
+          room,
+          desc: asString(drawer.desc || drawer.title || drawer.summary),
+          height: 0, // refined-by is not lineage — height stays pure synthesized-from
+          retrieval_count: asNumber(drawer.retrieval_count || asObject(drawer.metadata).retrieval_count),
+          connection_degree: 0,
+          lineage_match_count: 0,
+          source_type: "skill",
+          score: 0,
+          selected: false,
+          via: "refined",
+        });
+        neighborhoodSet.add(id); // +neighborhoodBoost, same as concerns neighbors
+      });
+    }
+  }
+
   const rankedNodes = scopedNodes.map((node) => {
     node.score = computeNodeScore({
       node,
@@ -575,6 +774,21 @@ export async function expandScopedRetrieval(
         enabled: concernsEnabled,
         targets_admitted: scopedNodes.filter((n) => n.via === "concern").length,
       },
+      refined_expansion: intent === "procedural"
+        ? {
+            enabled: refinedEnabled,
+            targets_admitted: scopedNodes.filter((n) => n.via === "refined").length,
+          }
+        : undefined,
+      doc_scan: includeDocs && typeof client.listDrawers === "function"
+        ? {
+            enabled: true,
+            rooms_scanned: docScanReport?.rooms_scanned ?? [],
+            drawers_scanned: docScanReport?.drawers_scanned ?? 0,
+            targets_admitted: scopedNodes.filter((n) => n.via === "doc").length,
+            truncated: docScanReport?.truncated ?? false,
+          }
+        : undefined,
     },
     policy: {
       enforced,
@@ -586,6 +800,7 @@ export async function expandScopedRetrieval(
       canonical_seed_ids: [...canonicalSeedSet].sort(),
       neighborhood_node_ids: [...neighborhoodSet].sort(),
       concern_neighbor_ids: [...new Set(concernNeighborIds)].sort(),
+      ...(refinedNeighborIds.length > 0 ? { refined_neighbor_ids: [...new Set(refinedNeighborIds)].sort() } : {}),
     },
 
     ranking: {

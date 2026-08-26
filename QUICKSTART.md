@@ -174,9 +174,13 @@ doc — if any doc-stamped node is in the candidate set, provisional syntheses a
 down to the lowest doc score (a weight-based floor, applied after all scoring). A
 provisional synthesis still ranks first when no doc is in the candidate set.
 
-Retrieval also surfaces **one-hop `concerns` neighbors**: a hit on a synthesis admits its
-linked authority docs into the ranked pool, so a synthesis hit carries its grounding docs
-along (see §4 for how those links are created).
+On a factual intent, retrieval has a **direct doc-admission path**: doc-stamped drawers in
+scope enter the ranked candidates even without a `concerns` edge. Pass `--include-docs` to
+enable that same scan for non-factual/default intents.
+
+Retrieval also surfaces **one-hop `concerns` neighbors** as a grounding/neighbor path: a hit
+on a synthesis admits its linked authority docs into the ranked pool, so a synthesis hit
+carries its grounding docs along (see §4a for how those links are created).
 
 ## 3b. Run consolidation + validation pipeline
 
@@ -439,7 +443,9 @@ created by the `propose_concerns` tool as **approval-gated proposals**: it valid
 endpoints (the synthesis must have `synthesized-from` lineage; each target must carry
 `es-source-type: doc`; self-links and duplicates are rejected), prints a numbered proposal
 list, and applies only the items you approve. Retrieval then surfaces one-hop `concerns`
-neighbors (§3a), so a synthesis hit carries its grounding docs into the ranked pool.
+neighbors as a grounding/neighbor path (§3a), so a synthesis hit carries its grounding docs
+into the ranked pool; direct doc admission (§3a) lets doc-stamped drawers enter the ranked
+pool without any `concerns` edge at all.
 
 ## 4b. How mem-core scope is chosen
 

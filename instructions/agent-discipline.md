@@ -307,8 +307,11 @@ state changes:
    class. Even when no block changes, save a synthesized record when you: implemented a
    feature/fix (what was built, where, key choices), found a bug's root cause (the cause,
    not just the fix), discovered a non-obvious "how/why this works," solved something in a
-   reusable way (→ worked example in the apprenticeship room), or hit a dead end worth not
-   repeating. Use `diary_write` for session work records, `kg_add` for discrete facts,
+   reusable way (→ worked example in the `apprenticeship` room; if the solution maps to a
+   recurring task, add one line `SKILL_EXERCISED: <concept name>` so a later consolidation
+   pass can link the worked example — via a `refined-by` edge — to the skill it exercised,
+   e.g. `solve-deep-cloud`; that link is proposed by the dreamer, never written mid-session),
+   or hit a dead end worth not repeating. Use `diary_write` for session work records, `kg_add` for discrete facts,
    `add_drawer` for findings. Synthesize what a future session would want to retrieve —
    don't dump a transcript.
 

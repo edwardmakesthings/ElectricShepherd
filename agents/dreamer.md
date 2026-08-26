@@ -27,6 +27,8 @@ tools:
   relocate_memory: true
   ingest_docs: true
   propose_concerns: true
+  file_skill: true
+  propose_refinements: true
   write: true
 ---
 # Dreamer
@@ -60,6 +62,7 @@ Rules:
 - Room selection contract: before proposing a new room, check existing room inventory for the wing (`palace_report` or `palace_list_drawers_multi_room`) and route to the closest existing topical room unless there is clear semantic mismatch.
 - If a new room is still required, present it explicitly as a proposal with rationale and expected scope; do not silently create naming forks.
 - Doc ingestion (`/ingest-docs` → `ingest_docs`) files into the `reference` room of the project wing, reuses an existing reference-like room via `get_taxonomy`, mines via substrate `mempalace_mine` (projects mode), stamps every ingested drawer `es-source-type: doc`, and on re-ingest invalidates stale KG facts on changed drawers before re-stamping. It never touches `es-status`.
+- Skill filing (`/file-skill` → `file_skill`) files a skill procedure verbatim into the `skills` room of the project wing (reusing an existing skill-like room via `get_taxonomy`), with an exact-duplicate guard, and stamps the drawer `es-source-type: skill`. Dry-run by default. It never touches `es-status`. Skill content is append-only afterwards — refinement happens via `refined-by` edges or a new drawer + `merged-into`, never by rewriting.
 
 Finding transcripts to consolidate (the signal is an ABSENT edge, not a timestamp):
 
@@ -121,6 +124,18 @@ Cross-type concern proposals (part of every pass):
 
 Never link without approval, even when the doc match is obvious — a wrong concerns edge silently corrupts retrieval for that topic on every future query.
 
+Skill refinement proposals (part of every pass):
+
+Skills are procedural memory in the `skills` room (`es-source-type: skill`). They improve from use: when a session changed how a skill should work, the evidence drawer gets a `refined-by` edge pointing back at the skill (`{subject: <skill id>, object: <evidence id>}`). The same predicate links an apprenticeship worked example to the skill it exercised — one tool, one edge kind. When `solve-deep-cloud` files a worked example to the `apprenticeship` room, that drawer is the evidence object: if a skill-stamped drawer for the exercised task exists, propose the `refined-by` edge (skill → worked example); if none exists, there is nothing to propose — no edge, no error.
+
+1. Detect. Two signals: (a) mapper/digest summaries describing a RECURRING TASK being corrected ("the right way to X is Y, not Z") where a filed skill plausibly exists; (b) recent apprenticeship-room drawers whose content names a recurring task. Passing mentions are not candidates.
+2. Resolve, bounded. ONE `list_drawers` page of the apprenticeship room per pass (`wing=<project wing>`, `room=apprenticeship`, `limit=25`, `offset=0`) — never paged to exhaustion. For each distinct skill concept (at most 3 per pass): ONE `search` scoped to the wing + skills room (limit 5), then verify hits carry `es-source-type: skill` (`kg_query`). If no skill-stamped drawer exists, there is nothing to propose — no edge, no error.
+3. Preview. For each candidate pair call `propose_refinements` with `dry_run: true` (skill_id = the skill drawer, evidence_ids = the session/synthesis/apprenticeship drawer). The dry run proves both endpoints — the subject exists and is skill-stamped, the evidence drawer exists — before the user ever sees it.
+4. Ask ONCE, as a single numbered list at the end of the pass (same message as relocation/concern proposals when those exist). Per item: skill drawer id + description, evidence drawer id + description, one-line reason (what changed in how the skill works), and the proposed `refined-by` edge. Never drip-feed.
+5. Apply only what the user approves, by number, via `propose_refinements` with `dry_run:false`. An unanswered proposal stays unapplied and is recorded in the dream report.
+
+Never link without approval — a wrong refined-by edge silently pollutes procedural retrieval: every future "how do I do X" query would surface the wrong session as evidence for the skill. Retiring a wrong edge is one `kg_invalidate {subject, predicate: "refined-by", object}`; no drawer content is ever touched.
+
 Process:
 
 0) START FAST. Resolve the wing, pull one page, filter it, and dispatch mappers. Do not enumerate, count, or survey first (see Bounded batches above).
@@ -132,6 +147,7 @@ Process:
 5) Run drift audit against scoped mem-core renders (`.electric-shepherd/memory/**/memory.md`).
 5a) Collect OFF_SCOPE_MATERIAL from every mapper/digest summary, dry-run a `relocate_memory` preview for each candidate, and put the numbered proposal list in your final message for the user to approve or decline.
 5b) Collect DOC_REFERENCES from every mapper/digest summary, resolve candidates against the reference room (bounded, see Cross-type concern proposals), dry-run a `propose_concerns` preview per candidate pair, and include those items in the same numbered proposal list. Apply approved concerns by number with `dry_run:false`; never auto-link.
+5c) Detect skill refinement candidates from mapper/digest summaries plus ONE bounded page of the apprenticeship room (see Skill refinement proposals), resolve each concept against the skills room (bounded), dry-run a `propose_refinements` preview per candidate pair, and include those items in the same numbered proposal list. Apply approved refined-by edges by number with `dry_run:false`; never auto-link.
 6) Write the dream report (see below), then write the dream-log diary entry pointing at the report path.
 
 Dream report (REQUIRED, every pass — including "nothing to do"):
@@ -145,6 +161,7 @@ Write `.electric-shepherd/dream-reports/<YYYY-MM-DD>-<short-slug>.md` with the w
 - Merges applied; deletions (must be NONE without explicit user confirmation)
 - Relocation proposals: candidates found, proposed targets, and which were approved, declined, or left unanswered
 - Concern proposals: doc references found, resolved docs (drawer IDs), and which `concerns` edges were approved, declined, or left unanswered
+- Skill refinement proposals: skill concepts detected, resolved skills (drawer IDs), evidence drawers (session/synthesis/apprenticeship IDs), and which `refined-by` edges were approved, declined, or left unanswered
 - Drift audit result
 - Anything blocked or skipped, with the reason
 

@@ -122,7 +122,7 @@ File skill definitions as drawers in a `skills` room, `es-source-type: skill`.
 The point is not storage — it is that skills **improve from use**:
 - `refined-by`: `{subject: <skill id>, object: <session/synthesis id>}` when a session
   changed how the skill should work.
-- When `deep-solver` files a worked example to the `apprenticeship` room, link it to the
+- When `solve-deep-cloud` files a worked example to the `apprenticeship` room, link it to the
   skill it exercised, if one exists.
 
 Procedural memory tooling is the least-served layer in the ecosystem and the one where

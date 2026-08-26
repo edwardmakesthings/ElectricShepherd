@@ -56,6 +56,10 @@ function parseArgs(argv: string[]): RetrievalExpansionOptions {
     }
   }
 
+  // Phase 3 close-out: explicit opt-in for direct doc admission into the ranked pool.
+  // Factual intent already implies it; this flag matters for non-factual intents.
+  const includeDocs = argv.includes("--include-docs");
+
   return {
     query: requiredQuery,
     scope_room: requiredScopeRoom,
@@ -74,6 +78,7 @@ function parseArgs(argv: string[]): RetrievalExpansionOptions {
     top_n: topN,
     always_include_labels: ["pinned"],
     intent,
+    include_docs: includeDocs || undefined,
   };
 }
 

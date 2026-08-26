@@ -93,16 +93,28 @@ export type IngestReport = {
   next_step?: string;
 };
 
+/**
+ * Room selection under the naming contract: reuse an existing purpose-named room
+ * whose name matches one of `likeStems` (checked via roomNameIssue first), else
+ * mint `canonicalName`. Taxonomy rooms arrive sorted by drawer count desc — the
+ * first match wins. Shared by `pickReferenceRoom` (Phase 3) and `file_skill.ts`
+ * (Phase 5, the `skills` room) so there is exactly one picker in the codebase.
+ */
+export function pickPurposeRoom(
+  rooms: { room: string; drawers: number }[],
+  canonicalName: string,
+  likeStems: string[],
+): { room: string; reused: boolean } {
+  const candidates = rooms.filter(
+    (entry) => !roomNameIssue(entry.room) && likeStems.some((stem) => entry.room === stem || entry.room.endsWith(`-${stem}`)),
+  );
+  if (candidates.length > 0) return { room: candidates[0].room, reused: true };
+  return { room: canonicalName, reused: false };
+}
+
 /** Room selection: reuse an existing reference-like room, else mint `reference`. */
 export function pickReferenceRoom(rooms: { room: string; drawers: number }[]): { room: string; reused: boolean } {
-  const candidates = rooms.filter(
-    (entry) =>
-      !roomNameIssue(entry.room) &&
-      REFERENCE_LIKE_STEMS.some((stem) => entry.room === stem || entry.room.endsWith(`-${stem}`)),
-  );
-  // Taxonomy rooms are already sorted by drawer count desc — first match wins.
-  if (candidates.length > 0) return { room: candidates[0].room, reused: true };
-  return { room: REFERENCE_ROOM, reused: false };
+  return pickPurposeRoom(rooms, REFERENCE_ROOM, REFERENCE_LIKE_STEMS);
 }
 
 /** Bounded ID snapshot of one room: probe total, then walk at most maxPages pages. */
