@@ -1080,7 +1080,13 @@ async function fetchHighHeightFacts(
   }
 }
 
-function buildMemcoreMarkdown(args: {
+/**
+ * Exported (not just module-local) so the [pending] block's cap/disable behavior
+ * is unit-testable without running the whole pipeline — the render is on the hot
+ * path of every prompt, and "every new mem-core render addition must be capped"
+ * (spec L232-233) needs a test that pins the bound.
+ */
+export function buildMemcoreMarkdown(args: {
   query: string;
   consolidation: SynthesisConsolidationResult;
   validation: ValidationMergeReviewResult;
@@ -1090,6 +1096,9 @@ function buildMemcoreMarkdown(args: {
   includePointers?: boolean;
   maxFactsPerSection?: number;
   highHeightFacts?: string[];
+  /** Phase 8: pre-matched pending-reminder bullets (see adapter/prospective.ts). */
+  pendingReminderLines?: string[];
+  includePending?: boolean;
 }): string {
   const includeFacts = args.includeFacts !== false;
   const includePointers = args.includePointers !== false;
@@ -1128,6 +1137,15 @@ function buildMemcoreMarkdown(args: {
       ...factBullets(args.consolidation.consolidationDraft.openItems || [], maxFacts),
       "",
     );
+
+    // Phase 8 (prospective memory): the [pending] block. Reminders that fire in
+    // this scope are pushed here by circumstance, not pulled by query — this
+    // render is their only consumer. The lines arrive pre-matched and hard-capped
+    // (adapter/prospective.ts renderPendingLines); an empty list omits the whole
+    // section so there is no per-prompt tax when nothing is pending.
+    if (args.includePending !== false && Array.isArray(args.pendingReminderLines) && args.pendingReminderLines.length > 0) {
+      lines.push(...args.pendingReminderLines, "");
+    }
   }
 
   if (includePointers) {
@@ -1727,6 +1745,51 @@ async function main(): Promise<void> {
       limit: Number(process.env.ESHEPHERD_MEMCORE_RENDER_MAX_FACTS) || 8,
     });
 
+    // Phase 8 (prospective memory): fetch live reminders for this wing, match
+    // them against the scope being rendered, and pass capped [pending] lines to
+    // the render. Bounded fetch (<= max), degrades to "no pending section" on any
+    // read failure — the render must never throw or stall on the KG.
+    let pendingReminderLines: string[] = [];
+    if (!isFalsyFlag(process.env.ESHEPHERD_MEMCORE_RENDER_INCLUDE_PENDING)) {
+      try {
+        const maxPending = Math.max(0, Number(process.env.ESHEPHERD_MEMCORE_RENDER_MAX_PENDING) || 3);
+        if (maxPending > 0 && typeof client.listReminders === "function") {
+          const scopeDir = resolve(memcoreApply.scopeDir || process.cwd());
+          const workspaceRoot = findWorkspaceRoot(scopeDir);
+          const relScope = relative(workspaceRoot, scopeDir);
+          // Broad-to-narrow ancestor chain of the rendered scope ("" = root),
+          // mirroring the loader's buildScopeDirectories so a trigger on an
+          // ancestor path fires for every directory beneath it.
+          const relScopes: string[] = [];
+          let current = relScope;
+          while (true) {
+            relScopes.push(current === "." ? "" : current);
+            if (!current || current === ".") break;
+            const parent = dirname(current);
+            if (parent === current || parent === ".") break;
+            current = parent;
+          }
+          const reminders = await client.listReminders({
+            wing: consolidationOptions.targetWing,
+            limit: Math.min(50, Math.max(maxPending * 3, 12)),
+          });
+          const { matchRemindersForScope, renderPendingLines } = await import("../adapter/prospective.ts");
+          const matches = matchRemindersForScope(reminders, {
+            relScopes,
+            wing: consolidationOptions.targetWing,
+            room: consolidationOptions.targetRoom,
+            query: consolidation.query,
+          });
+          pendingReminderLines = renderPendingLines(matches, maxPending);
+        }
+      } catch (err) {
+        // Degrade gracefully: a reminder read failure costs the pending section,
+        // never the whole render.
+        process.stderr.write(`[memory-consolidation-validation] pending-reminder fetch failed: ${String(err)}\n`);
+        pendingReminderLines = [];
+      }
+    }
+
     const markdown = buildMemcoreMarkdown({
       query: consolidation.query,
       consolidation,
@@ -1737,6 +1800,8 @@ async function main(): Promise<void> {
       includePointers: !isFalsyFlag(process.env.ESHEPHERD_MEMCORE_RENDER_INCLUDE_POINTERS),
       maxFactsPerSection: Number(process.env.ESHEPHERD_MEMCORE_RENDER_MAX_FACTS) || 8,
       highHeightFacts,
+      pendingReminderLines,
+      includePending: !isFalsyFlag(process.env.ESHEPHERD_MEMCORE_RENDER_INCLUDE_PENDING),
     });
 
     const targetFilePath = resolveMemcoreFilePath({

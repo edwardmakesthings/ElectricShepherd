@@ -1034,6 +1034,105 @@ export class MemgraphClient {
     });
   }
 
+  /**
+   * Phase 8 (unified memory): prospective-memory read side. One bounded page of
+   * the reminders room + per-drawer one-hop kg_query for the reminder axes
+   * (triggers-on / es-reminder-status / es-reminder-expires-at /
+   * es-reminder-satisfied-at). Concurrency 8 — the only validated level in this
+   * repo. Read failures degrade to empty facts per drawer (the render drops the
+   * pending section rather than throwing); a failed room page degrades to [].
+   */
+  async listReminders(
+    args: { wing: string; room?: string; limit?: number },
+  ): Promise<
+    Array<{
+      drawer_id: string;
+      what: string;
+      status: string;
+      conditions: string[];
+      expires_at?: string;
+      satisfied_at?: string;
+    }>
+  > {
+    const wing = this.asString(args.wing).trim();
+    if (!wing) return [];
+    const room = this.asString(args.room).trim() || "reminders";
+    const limit = Math.max(1, Math.min(50, Number(args.limit) || 20));
+
+    let rows: JsonMap[];
+    try {
+      const payload = await this.listDrawers({ wing, room, limit, offset: 0 });
+      const root = this.asObject(payload);
+      const pool = Array.isArray(root.drawers)
+        ? (root.drawers as unknown[])
+        : Array.isArray(root.results)
+          ? (root.results as unknown[])
+          : [];
+      rows = pool.slice(0, limit).map((row) => this.asObject(row));
+    } catch {
+      return []; // non-fatal: the render degrades to "no pending section"
+    }
+
+    const ids = rows
+      .map((row) => this.asString(row.drawer_id || row.node_id || row.id).trim())
+      .filter(Boolean);
+    const byId = new Map<string, JsonMap>();
+    for (const row of rows) {
+      const id = this.asString(row.drawer_id || row.node_id || row.id).trim();
+      if (id) byId.set(id, row);
+    }
+
+    const out: Array<{
+      drawer_id: string;
+      what: string;
+      status: string;
+      conditions: string[];
+      expires_at?: string;
+      satisfied_at?: string;
+    }> = [];
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < ids.length) {
+        const index = cursor;
+        cursor += 1;
+        const id = ids[index];
+        const row = byId.get(id) || {};
+        const item: {
+          drawer_id: string;
+          what: string;
+          status: string;
+          conditions: string[];
+          expires_at?: string;
+          satisfied_at?: string;
+        } = {
+          drawer_id: id,
+          what: this.asString(row.content || row.text).trim(),
+          status: "unknown",
+          conditions: [],
+        };
+        try {
+          const result = await this.kgQuery({ entity: id, direction: "outgoing" });
+          for (const fact of this.parseKgFacts(result)) {
+            if (!this.asBoolean(fact.current, true)) continue;
+            const predicate = this.asString(fact.predicate).trim();
+            const object = this.asString(fact.object).trim();
+            if (!object) continue;
+            if (predicate === "triggers-on") item.conditions.push(object);
+            else if (predicate === "es-reminder-status") item.status = object.toLowerCase();
+            else if (predicate === "es-reminder-expires-at") item.expires_at = object;
+            else if (predicate === "es-reminder-satisfied-at") item.satisfied_at = object;
+          }
+        } catch {
+          // non-fatal: a failed edge read reads as "no facts" for this drawer
+        }
+        out.push(item);
+      }
+    };
+    const slots = Math.max(1, Math.min(8, ids.length));
+    if (ids.length > 0) await Promise.all(Array.from({ length: slots }, () => worker()));
+    return out;
+  }
+
   search(query: string, limit = 5, wing?: string, room?: string) {
     return this.call("search", { query, limit, wing, room });
   }

@@ -26,6 +26,10 @@ or for any intent with `--include-docs`). Unified-memory Phase 7 outcome feedbac
 `record_outcome` tool (dry-run-first, explicit node ids only — test/reviewer/loop signals are
 evidence for the operator's judgment, never writers), read back as a ranking term weighted below
 authority in deterministic retrieval, and surfaced as re-synthesis candidates in `/memory-status`.
+Unified-memory Phase 8 prospective memory is in: `/remind` (create/update/close reminders —
+dry-run-first, expiry required for create) and `/reminders` (read-only listing with filters),
+with matching active reminders rendered into mem-core under a bounded `[pending]` block
+(default enabled; disable via `ESHEPHERD_MEMCORE_RENDER_INCLUDE_PENDING=false`).
 
 ---
 
@@ -114,7 +118,7 @@ Add to your `opencode.json`:
 OpenCode resolves this package on startup. This repo currently provides:
 - The `turn-guard` plugin (checkpoint + stop-quality retry + compaction-aware mem-core reinjection + scope-aware loader wiring + write-authority/capture guards)
 - Dreamer agent profiles (`dreamer`, `dream-mapper`, `dream-auditor`)
-- Slash commands in `command/` (`/consolidate`, `/memory-status`, `/consolidate-deep`, `/memory-refresh`) for consolidation workflows
+- Slash commands in `command/` (`/consolidate`, `/memory-status`, `/consolidate-deep`, `/memory-refresh`, `/remind`, `/reminders`) for consolidation and reminder workflows
 - The `memsave` / `memload` OpenChamber snippets
 - The memory discipline instruction plus runtime-derived mem-core renders under `.electric-shepherd/memory/`
 
@@ -275,7 +279,9 @@ electric-shepherd/
 │   ├── herd.md                # read-only consolidation preview slash command
 │   ├── consolidate-deep.md         # deep consolidation+merge slash command
 │   ├── memory-refresh.md             # in-session scoped mem-core refresh slash command
-│   └── memory-status.md           # pending source-vs-derived counts slash command
+│   ├── memory-status.md           # pending source-vs-derived counts slash command
+│   ├── remind.md                  # create/update/close prospective reminders (dry-run-first, expiry required)
+│   └── reminders.md               # read-only reminder listing with filters
 ├── instructions/
 │   ├── agent-discipline.md    # agent behavior rules and guardrails
 ├── eshepherd/
@@ -316,6 +322,7 @@ Secret env vars:
 | Env var | Default | Description |
 |---|---|---|
 | `ESHEPHERD_ENV_FILE` | unset | Optional explicit env file path override for runtime scripts |
+| `ESHEPHERD_MEMCORE_RENDER_INCLUDE_PENDING` | `true` | Toggle the `[pending]` reminders block in mem-core renders (set to a falsy value to disable) |
 | `MEMPALACE_MCP_API_KEY` | unset | Optional API key header value for MCP gateway auth |
 | `MEMPALACE_MCP_BEARER_TOKEN` | unset | Optional bearer token (alternate to API-key header style) |
 | `MEMPALACE_MCP_HEADERS_JSON` | unset | Optional JSON map of additional MCP HTTP headers |
@@ -364,6 +371,7 @@ Also: a shepherd that doesn't sleep wouldn't be much use.
 Core policy runtime in place. The following are committed and usable now:
 - Unified-memory Phase 1-4 capabilities: `es-source-type` axis (`transcript|doc|synthesis|skill`) orthogonal to `es-status`, intent-aware retrieval (`--intent factual|historical|procedural` with a factual hard rule that provisional syntheses never outrank docs), `/ingest-docs <path>` doc ingestion (dry-run-first, staleness invalidation, re-stamping), and approval-gated `concerns` links from synthesis closets to authority docs surfaced as one-hop grounding/neighbor paths, plus direct doc admission (doc-stamped drawers enter the ranked pool on factual intent or with `--include-docs`)
 - Unified-memory Phase 7 outcome feedback: human-authoritative `es-outcome` axis (`accept | revise | failed | unused`) written only by the `record_outcome` tool (dry-run-first, explicit node ids, no automatic writes from test/reviewer/loop signals), consumed as a below-authority ranking term in deterministic retrieval and as re-synthesis candidates (`revise >= 2` and `revise > accept` over a recent window) in `/memory-status`
+- Unified-memory Phase 8 prospective memory: `/remind` (create/update/close reminders, dry-run-first, expiry required for create) and `/reminders` (read-only listing with status/condition filters), with matching active reminders rendered into mem-core under a bounded `[pending]` block (default enabled; disable via `ESHEPHERD_MEMCORE_RENDER_INCLUDE_PENDING=false`)
 - Deterministic policy-cycle runtime in `scripts/run-policy-cycle.ts`
 - Consolidation + validation runtime pipeline in `scripts/run-memory-consolidation-and-validation.ts`
 - Optional live mapper and auditor integration hooks in `scripts/run-memory-consolidation-and-validation.ts` (`--use-live-mapper`, `--use-live-auditor`)

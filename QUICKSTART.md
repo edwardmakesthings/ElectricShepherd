@@ -377,6 +377,8 @@ returns to your session (expand the subtask in the TUI to watch/debug it). Comma
 | `/memory-refresh` | Refresh and re-inject mem-core for the current scope. | in-session | `npm run sheep:memory-refresh` |
 | `/memory-status` | Quick counts of pending source vs existing derived memories. | isolated subagent | — |
 | `/ingest-docs <path>` | Mine a docs directory into the project wing's `reference` room and stamp `es-source-type: doc`. Dry-run-first (see §3c2). | in-session | — |
+| `/remind <action> ...` | Create/update/close prospective reminders ("remember to do X when Y"). Dry-run-first; expiry required for create. Actions: `create`, `update`, `close`, `list` (see §3g2). | in-session | — |
+| `/reminders [filters]` | Read-only listing of the project's reminders with optional `status`/`condition` filters; flags stale active reminders past their expiry. | isolated subagent | — |
 
 Each command takes an optional scope argument, e.g. `/consolidate context-blocks`.
 
@@ -385,6 +387,27 @@ Each command takes an optional scope argument, e.g. `/consolidate context-blocks
 > their own, spin up a brand-new *top-level* session and switch the TUI to it —
 > that is a manual action. For unattended consolidation in a truly separate
 > process, use the `npm run sheep:*` CLI entrypoints (or auto-consolidation) instead.
+
+## 3g2. Prospective reminders (`/remind`, `/reminders`)
+
+Reminders are "remember to do X when Y" items: they fire into the session's mem-core
+under a `[pending]` block when their trigger matches the current scope (a path/glob,
+a topic keyword, or a wing/room). They are pushed by circumstance, not pulled by query.
+
+- `/remind create <condition> <what> --expires <ISO date>` — file a new reminder.
+  **Expiry is required**: if `--expires` is missing or invalid, the tool rejects the
+  capture. Dry-run-first: the first call previews the exact drawer + KG edges that
+  would be written; apply only after explicit confirmation.
+- `/remind update <drawer_id> <new what and/or --expires ISO>` — change the text or expiry of one existing reminder.
+- `/remind close <drawer_id> [satisfied|expired]` — retire a reminder (default `satisfied`).
+- `/reminders [filters]` — read-only listing with optional `status`/`condition` filters
+  (bounded, default 20). Active reminders are grouped first; reminders whose expiry has
+  passed but that are still `active` are flagged for closing.
+
+Reminders live in the project wing's `reminders` room and never touch `es-status`,
+source drawers, or synthesis lineage. They render into mem-core under a bounded
+`[pending]` block (default enabled; disable via
+`ESHEPHERD_MEMCORE_RENDER_INCLUDE_PENDING=false`).
 
 ## 3e. Running tests
 

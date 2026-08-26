@@ -98,6 +98,11 @@ export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
   { envKey: "ESHEPHERD_MEMCORE_RENDER_INCLUDE_FACTS", path: "memcore.render.includeFacts", kind: "boolean", defaultValue: true },
   { envKey: "ESHEPHERD_MEMCORE_RENDER_INCLUDE_POINTERS", path: "memcore.render.includePointers", kind: "boolean", defaultValue: true },
   { envKey: "ESHEPHERD_MEMCORE_RENDER_MAX_FACTS", path: "memcore.render.maxFactsPerSection", kind: "number", defaultValue: 8, min: 1 },
+  // Phase 8 (prospective memory): the [pending] reminders block in the mem-core
+  // render. Enabled by default but hard-capped — a handful of reminders, not a
+  // task list; set includePending false to disable the section entirely.
+  { envKey: "ESHEPHERD_MEMCORE_RENDER_INCLUDE_PENDING", path: "memcore.render.includePending", kind: "boolean", defaultValue: true },
+  { envKey: "ESHEPHERD_MEMCORE_RENDER_MAX_PENDING", path: "memcore.render.maxPendingReminders", kind: "number", defaultValue: 3, min: 0 },
   { envKey: "ESHEPHERD_MEMCORE_INJECTION_COOLDOWN_MS", path: "memcore.injectionCooldownMs", kind: "number", defaultValue: 15000, min: 1 },
   { envKey: "ESHEPHERD_SCOPE_DIR", path: "memcore.scopeDir", kind: "string", defaultValue: "" },
 
