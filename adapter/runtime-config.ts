@@ -103,6 +103,11 @@ export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
   // task list; set includePending false to disable the section entirely.
   { envKey: "ESHEPHERD_MEMCORE_RENDER_INCLUDE_PENDING", path: "memcore.render.includePending", kind: "boolean", defaultValue: true },
   { envKey: "ESHEPHERD_MEMCORE_RENDER_MAX_PENDING", path: "memcore.render.maxPendingReminders", kind: "number", defaultValue: 3, min: 0 },
+  // Phase 9 (negative knowledge): the [dead-ends] block in the mem-core render.
+  // Enabled by default but hard-capped — a handful of ruled-out approaches, not a
+  // full history; set includeDeadEnds false to disable the section entirely.
+  { envKey: "ESHEPHERD_MEMCORE_RENDER_INCLUDE_DEAD_ENDS", path: "memcore.render.includeDeadEnds", kind: "boolean", defaultValue: true },
+  { envKey: "ESHEPHERD_MEMCORE_RENDER_MAX_DEAD_ENDS", path: "memcore.render.maxDeadEnds", kind: "number", defaultValue: 3, min: 0 },
   { envKey: "ESHEPHERD_MEMCORE_INJECTION_COOLDOWN_MS", path: "memcore.injectionCooldownMs", kind: "number", defaultValue: 15000, min: 1 },
   { envKey: "ESHEPHERD_SCOPE_DIR", path: "memcore.scopeDir", kind: "string", defaultValue: "" },
 

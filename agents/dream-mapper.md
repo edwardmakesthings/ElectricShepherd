@@ -31,10 +31,22 @@ Output sections:
 - ROOT_CAUSES_AND_WORKED_EXAMPLES
 - SUBSYSTEMS_AND_FILES
 - OPEN_ITEMS
+- DEAD_ENDS
 - OFF_SCOPE_MATERIAL
 - DOC_REFERENCES
 
 Finish with: CONFIDENCE: high|medium|low - one-line reason.
+
+DEAD_ENDS (negative knowledge — what was ruled out):
+
+Report each approach that was TRIED AND FAILED or CONSIDERED AND REJECTED in this transcript, one line each:
+
+`- <what was tried> | outcome: <what happened> | because: "<why it was abandoned>" | polarity: tried-failed|considered-rejected`
+
+- `polarity` is two-valued and ordered: `tried-failed` (actually attempted and failed — strong evidence) vs `considered-rejected` (evaluated and dropped without a full attempt — cheaper, weaker evidence).
+- The `outcome` clause is REQUIRED — a line without it is incomplete and must not be reported. "We tried cache_control injection on the openai/ prefix" reads as advice unless it carries "— this does not work, LiteLLM strips the marker." Keep the outcome attached to the tried text.
+- Only report dead ends that are explicit in the transcript (a failed attempt with its outcome, or a considered-and-dropped approach). A mere mention of a bug or failure is not a dead end.
+- Write an empty list when nothing qualifies. Do NOT manufacture candidates — a false "ruled out" label permanently misleads future retrieval on that topic, which is worse than silence.
 
 OFF_SCOPE_MATERIAL (how the user's misfiled asides get found):
 

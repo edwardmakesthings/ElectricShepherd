@@ -1,4 +1,5 @@
 import type { MemgraphClient } from "./memgraph.ts";
+import { parseDeadEndLine } from "./dead-ends.ts";
 
 /**
  * Confidence level for one map-stage transcript summary.
@@ -16,6 +17,10 @@ export type TranscriptInsightSummary = {
   rootCausesAndWorkedExamples: string[];
   subsystemsAndFiles: string[];
   openItems: string[];
+  // Phase 9 (negative knowledge): approaches tried-and-failed or considered-and-rejected,
+  // one line each with the outcome clause attached. Empty when nothing qualifies —
+  // mappers must not manufacture dead ends.
+  deadEnds?: string[];
   rawExcerpt?: string;
 };
 
@@ -66,6 +71,9 @@ export type SynthesisConsolidationResult = {
     durableFacts: string[];
     decisions: string[];
     openItems: string[];
+    // Phase 9 (negative knowledge): dead-end lines from the included summaries, verbatim.
+    // Empty when nothing was ruled out — the render drops the section in that case.
+    deadEnds?: string[];
     contentCharacters: number;
     populatedSectionCount: number;
     labels: string[];
@@ -82,6 +90,20 @@ export type SynthesisConsolidationResult = {
   createResult?: Record<string, unknown>;
   // P2-3: provenance — the run_id propagated from the calling script
   runId?: string;
+  // Phase 9 (negative knowledge): dead-end filing outcomes. Present only when
+  // applyWrites ran and dead ends were attempted. Filing is best-effort and
+  // fault-tolerant — failures here never abort the core consolidation.
+  deadEndFiling?: {
+    /** Dead-end lines that passed validation and were filed as syntheses. */
+    filed: number;
+    /** Lines that failed to file (drawer or edge errors). */
+    failed: number;
+    /** Lines rejected at write-time because they lack the outcome clause. */
+    skippedIncomplete: number;
+    /** Total rules-out edges added across all filed dead ends. */
+    rulesOutEdgesAdded: number;
+    errors: string[];
+  };
 };
 type DurableFactTriple = {
   subject: string;
@@ -209,6 +231,15 @@ function mapEntryToSummary(entry: { id: string; text: string }): TranscriptInsig
   const durableFacts = keywordMatch(lines, /\b(is|are|was|were|has|have|always|never|uses|supports|requires)\b/i).slice(0, 8);
   const decisions = keywordMatch(lines, /\b(decid|choose|chose|prefer|plan|policy|will|should|must)\b/i).slice(0, 8);
   const rootCauses = keywordMatch(lines, /\b(root cause|because|due to|caused by|failed|failure|bug|regression|fixed by)\b/i).slice(0, 8);
+  // Phase 9: the keyword fallback is deliberately conservative about negative knowledge —
+  // a line that merely mentions "failed" is not a ruled-out approach. Only lines that
+  // explicitly record an abandoned attempt qualify, and only when they carry an outcome
+  // clause (an em-dash or "does not work"/"did not work" phrasing). A false negative label
+  // permanently misleads retrieval, so silence is the safe default here.
+  const deadEnds = keywordMatch(
+    lines,
+    /\b(tried|attempted)\b[^\n]*\b(did not work|does not work|failed|ruled out|abandoned|rejected)\b/i,
+  ).slice(0, 4);
   const subsystems = keywordMatch(lines, /\b(adapter|plugin|script|mcp|memgraph|dreamer|validator|queue|cadence|merge)\b/i).slice(0, 8);
   const openItems = keywordMatch(lines, /\b(todo|next|pending|open|follow-up|needs|remaining|blocked)\b/i).slice(0, 8);
 
@@ -224,6 +255,7 @@ function mapEntryToSummary(entry: { id: string; text: string }): TranscriptInsig
     transcriptId: entry.id,
     confidence: inferConfidence(entry.text, sections),
     ...sections,
+    deadEnds,
     rawExcerpt: entry.text.slice(0, 600),
   };
 }
@@ -249,6 +281,9 @@ function parseProvidedMapperSummaries(value: unknown): TranscriptInsightSummary[
       rootCausesAndWorkedExamples: pickStringList("rootCausesAndWorkedExamples", "root_causes_and_worked_examples"),
       subsystemsAndFiles: pickStringList("subsystemsAndFiles", "subsystems_and_files"),
       openItems: pickStringList("openItems", "open_items"),
+      // Phase 9: dead-end lines pass through as-is (order preserved, no re-sort — the
+      // mapper's line order is meaningful and uniqSorted would scramble it).
+      deadEnds: asArray(obj.deadEnds ?? obj.dead_ends).map((v) => asString(v).trim()).filter(Boolean),
       rawExcerpt: asString(obj.rawExcerpt || obj.raw_excerpt).trim() || undefined,
     });
   }
@@ -367,6 +402,7 @@ function buildConsolidationDraft(args: {
   durableFacts: string[];
   decisions: string[];
   openItems: string[];
+  deadEnds: string[];
   contentCharacters: number;
   populatedSectionCount: number;
 } {
@@ -375,11 +411,14 @@ function buildConsolidationDraft(args: {
   const rootCauses = uniqSorted(args.summaries.flatMap((s) => s.rootCausesAndWorkedExamples));
   const subsystems = uniqSorted(args.summaries.flatMap((s) => s.subsystemsAndFiles));
   const openItems = uniqSorted(args.summaries.flatMap((s) => s.openItems));
+  // Phase 9: dead ends are deduped by exact line (no re-sort — the mapper's order is
+  // meaningful and the lines already carry their outcome clauses).
+  const deadEnds = [...new Set(args.summaries.flatMap((s) => (s.deadEnds || []).map((line) => line.trim()).filter(Boolean)))];
 
   const populatedSectionCount = [durableFacts, decisions, rootCauses, subsystems, openItems].filter((s) => s.length > 0).length;
   const title = chooseTitle(decisions, durableFacts, args.query);
 
-  const content = [
+  const contentParts: string[] = [
     `# Consolidation: ${title}`,
     "",
     `Query focus: ${args.query}`,
@@ -398,15 +437,22 @@ function buildConsolidationDraft(args: {
     "",
     "## Open Items",
     toBullets(openItems),
-  ].join("\n");
+  ];
+  // Phase 9: the negative-knowledge section is appended only when non-empty — a dead end
+  // stored without its outcome clause would read as advice, and an empty section is pure
+  // per-closet tax. The lines arrive verbatim from the mapper (outcome clause included).
+  if (deadEnds.length > 0) {
+    contentParts.push("", "## Dead Ends (ruled out — do not re-propose)", ...deadEnds.map((line) => `- ${line}`));
+  }
 
   return {
     title,
-    content,
+    content: contentParts.join("\n"),
     durableFacts,
     decisions,
     openItems,
-    contentCharacters: content.length,
+    deadEnds,
+    contentCharacters: contentParts.join("\n").length,
     populatedSectionCount,
   };
 }
@@ -495,6 +541,7 @@ export async function runSynthesisConsolidation(
   let createResult: Record<string, unknown> | undefined;
   let selectedHall: string | undefined;
   let kgWrites: SynthesisConsolidationResult["kgWrites"];
+  let deadEndFiling: SynthesisConsolidationResult["deadEndFiling"];
 
   if (applyWrites && inflationGuard.passed) {
     const create = await client.createDerivedDrawer({
@@ -578,6 +625,69 @@ export async function runSynthesisConsolidation(
     }
   }
 
+  // Phase 9 (negative knowledge): file each dead-end line as a real negative-polarity
+  // synthesis with its rules-out edges. This runs after the main drawer is created and
+  // only when writes are applied — dead ends ride the same applyWrites gate so a dry run
+  // never persists them. Filing is fault-tolerant: a failed line is recorded in
+  // deadEndFiling but never aborts the core consolidation (the main drawer already exists).
+  if (applyWrites && inflationGuard.passed) {
+    const deadEndLines = consolidationDraft.deadEnds;
+    if (deadEndLines.length > 0) {
+      let filed = 0;
+      let failed = 0;
+      let skippedIncomplete = 0;
+      let rulesOutEdgesAdded = 0;
+      const errors: string[] = [];
+
+      for (const line of deadEndLines) {
+        // Write-time validation: a line without its outcome clause is incomplete and must
+        // not be filed (the spec's main risk — an unlabelled dead end reads as advice).
+        const parsed = parseDeadEndLine(line);
+        if (!parsed.parsed) {
+          skippedIncomplete += 1;
+          errors.push(`dead-end line skipped (incomplete): ${parsed.error ?? "unparseable"}`);
+          continue;
+        }
+        const deadEnd = parsed.parsed;
+        try {
+          // Store the FULL verbatim line (tried + outcome clause + reason) as the drawer
+          // content so the read path (parseDeadEndDrawerContent -> renderDeadEndsBlock)
+          // can re-derive the label. The rules-out edge object is the tried statement —
+          // that is what retrieval matches on and renders.
+          const result = await client.fileDeadEnd({
+            wing: targetWing,
+            room: targetRoom,
+            content: line,
+            statements: [deadEnd.tried],
+            polarity: deadEnd.polarity,
+            source_drawer_ids: sourceDrawerIds,
+            desc: deadEnd.tried,
+            added_by: "electric-shepherd-consolidation",
+            source_run_id: options.runId,
+          });
+          if (result.success) {
+            filed += 1;
+            rulesOutEdgesAdded += result.rules_out_edges_added;
+          } else {
+            failed += 1;
+            errors.push(...(result.errors.length > 0 ? result.errors : ["fileDeadEnd failed"]));
+          }
+        } catch (err) {
+          failed += 1;
+          errors.push(String(err));
+        }
+      }
+
+      deadEndFiling = {
+        filed,
+        failed,
+        skippedIncomplete,
+        rulesOutEdgesAdded,
+        errors,
+      };
+    }
+  }
+
   return {
     phase: "source-derived-consolidation",
     query,
@@ -592,6 +702,7 @@ export async function runSynthesisConsolidation(
       durableFacts: consolidationDraft.durableFacts,
       decisions: consolidationDraft.decisions,
       openItems: consolidationDraft.openItems,
+      deadEnds: consolidationDraft.deadEnds.length > 0 ? consolidationDraft.deadEnds : undefined,
       contentCharacters: consolidationDraft.contentCharacters,
       populatedSectionCount: consolidationDraft.populatedSectionCount,
       labels: options.labels || [],
@@ -599,6 +710,7 @@ export async function runSynthesisConsolidation(
     inflationGuard,
     selectedHall,
     kgWrites,
+    deadEndFiling,
     createdNodeId,
     createResult,
     runId: options.runId,

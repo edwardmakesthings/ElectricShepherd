@@ -171,3 +171,163 @@ test("applyWrites does NOT persist when the inflation guard fails", async () => 
   assert.equal(called, false, "createDerivedDrawer must not run when the guard fails");
   assert.equal(result.createdNodeId, undefined);
 });
+
+/**
+ * Phase 9 wiring: dead-end lines from the included summaries must be filed as real
+ * negative-polarity syntheses via client.fileDeadEnd — NOT just rendered as plain-text
+ * bullets in the main drawer. These tests drive runSynthesisConsolidation with a stub
+ * client that records fileDeadEnd calls and assert the wiring path end-to-end:
+ *   - one fileDeadEnd call per VALID dead-end line,
+ *   - correct source_drawer_ids lineage (the same ids used for synthesis lineage),
+ *   - correct wing/room/polarity/statements,
+ *   - incomplete lines (no outcome clause) are skipped, never filed,
+ *   - a filing failure is fault-tolerant (never throws, recorded in metadata), and
+ *   - the result carries deadEndFiling counts.
+ */
+
+function summariesWithDeadEnds() {
+  return [
+    {
+      transcriptId: "raw-001",
+      confidence: "high",
+      durableFacts: ["ElectricShepherd is the policy layer"],
+      decisions: ["Use append-only source drawers"],
+      rootCausesAndWorkedExamples: [],
+      subsystemsAndFiles: ["adapter/synthesis-consolidation.ts"],
+      openItems: [],
+      deadEnds: [
+        "cache_control injection on the openai/ prefix | outcome: this does not work, LiteLLM strips the marker | because: \"marker removed\" | polarity: tried-failed",
+        "retrying with a longer backoff window | outcome: still failed under load | because: upstream rate limit is hard | polarity: tried-failed",
+      ],
+    },
+    {
+      transcriptId: "raw-002",
+      confidence: "medium",
+      durableFacts: ["The inflation guard blocks weak syntheses"],
+      decisions: [],
+      rootCausesAndWorkedExamples: [],
+      subsystemsAndFiles: [],
+      openItems: [],
+      deadEnds: [
+        // Duplicate of raw-001's first line — must be deduped, filed once.
+        "cache_control injection on the openai/ prefix | outcome: this does not work, LiteLLM strips the marker | because: \"marker removed\" | polarity: tried-failed",
+        // Incomplete (no outcome clause) — must be SKIPPED, never filed.
+        "a bare mention with no outcome clause",
+      ],
+    },
+  ];
+}
+
+test("applyWrites files each valid dead-end line via client.fileDeadEnd with correct lineage", async () => {
+  const fileDeadEndCalls = [];
+  const client = stubClient({
+    createDerivedDrawer: async () => ({ node_id: "synth-dead" }),
+    kgAdd: async () => ({ success: true }),
+    fileDeadEnd: async (args) => {
+      fileDeadEndCalls.push(args);
+      return { success: true, node_id: `dead-${fileDeadEndCalls.length}`, rules_out_edges_added: 2, errors: [] };
+    },
+  });
+
+  const result = await runSynthesisConsolidation(client, {
+    ...baseOptions,
+    applyWrites: true,
+    runId: "run-9",
+    mapperSummaries: summariesWithDeadEnds(),
+  });
+
+  // Two distinct valid lines (the duplicate is deduped; the incomplete one is skipped).
+  assert.equal(result.inflationGuard.passed, true);
+  assert.equal(fileDeadEndCalls.length, 2, `expected 2 fileDeadEnd calls, got ${fileDeadEndCalls.length}`);
+
+  // Each call carries the same source_drawer_ids lineage as the main synthesis drawer.
+  const expectedSources = ["raw-001", "raw-002"];
+  for (const call of fileDeadEndCalls) {
+    assert.equal(call.wing, baseOptions.targetWing);
+    assert.equal(call.room, baseOptions.targetRoom);
+    assert.deepEqual(call.source_drawer_ids.sort(), expectedSources);
+    assert.equal(call.source_run_id, "run-9");
+    // The edge object is the tried statement (what retrieval matches on), NOT the full line.
+    assert.ok(Array.isArray(call.statements) && call.statements.length === 1);
+    assert.ok(!call.statements[0].includes("outcome:"), "statement must be the tried text, not the full line");
+    // The drawer content is the FULL verbatim line so the read path can re-derive the label.
+    assert.ok(call.content.includes("outcome:"), "drawer content must carry the outcome clause");
+  }
+
+  // Polarity is propagated per line.
+  assert.ok(fileDeadEndCalls.every((c) => c.polarity === "tried-failed"));
+
+  // Metadata reflects what happened.
+  assert.ok(result.deadEndFiling, "deadEndFiling metadata must be present");
+  assert.equal(result.deadEndFiling.filed, 2);
+  assert.equal(result.deadEndFiling.failed, 0);
+  assert.equal(result.deadEndFiling.skippedIncomplete, 1);
+  assert.equal(result.deadEndFiling.rulesOutEdgesAdded, 4);
+});
+
+test("applyWrites does NOT file dead ends when the inflation guard fails", async () => {
+  let fileDeadEndCalled = false;
+  const client = stubClient({
+    createDerivedDrawer: async () => ({ node_id: "should-not-happen" }),
+    fileDeadEnd: async () => {
+      fileDeadEndCalled = true;
+      return { success: true, rules_out_edges_added: 1, errors: [] };
+    },
+  });
+
+  const result = await runSynthesisConsolidation(client, {
+    ...baseOptions,
+    applyWrites: true,
+    mapperSummaries: [summariesWithDeadEnds()[0]], // single source -> guard fails
+  });
+
+  assert.equal(result.inflationGuard.passed, false);
+  assert.equal(fileDeadEndCalled, false, "fileDeadEnd must not run when the guard fails");
+  assert.equal(result.deadEndFiling, undefined);
+});
+
+test("applyWrites is fault-tolerant: a fileDeadEnd failure is recorded, never thrown", async () => {
+  const client = stubClient({
+    createDerivedDrawer: async () => ({ node_id: "synth-dead" }),
+    kgAdd: async () => ({ success: true }),
+    fileDeadEnd: async (args) => {
+      if (args.statements[0].includes("backoff")) {
+        throw new Error("boom: rules-out edge write failed");
+      }
+      return { success: true, node_id: "dead-ok", rules_out_edges_added: 2, errors: [] };
+    },
+  });
+
+  // Must not throw.
+  const result = await runSynthesisConsolidation(client, {
+    ...baseOptions,
+    applyWrites: true,
+    mapperSummaries: summariesWithDeadEnds(),
+  });
+
+  assert.equal(result.deadEndFiling.filed, 1);
+  assert.equal(result.deadEndFiling.failed, 1);
+  assert.ok(
+    result.deadEndFiling.errors.some((e) => /boom/.test(e)),
+    `expected the failure to be recorded in errors, got: ${JSON.stringify(result.deadEndFiling.errors)}`
+  );
+});
+
+test("applyWrites=false does NOT file dead ends (dry run)", async () => {
+  let fileDeadEndCalled = false;
+  const client = stubClient({
+    fileDeadEnd: async () => {
+      fileDeadEndCalled = true;
+      return { success: true, rules_out_edges_added: 1, errors: [] };
+    },
+  });
+
+  const result = await runSynthesisConsolidation(client, {
+    ...baseOptions,
+    // applyWrites defaults off.
+    mapperSummaries: summariesWithDeadEnds(),
+  });
+
+  assert.equal(fileDeadEndCalled, false, "fileDeadEnd must not run on a dry run");
+  assert.equal(result.deadEndFiling, undefined);
+});

@@ -26,6 +26,7 @@ import {
   type CadenceOrchestratorResult,
 } from "../adapter/cadence-orchestrator.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
+import { parseDeadEndDrawerContent, renderDeadEndsBlock } from "../adapter/dead-ends.ts";
 import { loadRuntimeEnv } from "./runtime-env.ts";
 import { acquireConsolidationLock, releaseConsolidationLock } from "./consolidation-lock.ts";
 
@@ -290,6 +291,11 @@ function toSummaryFromRaw(raw: unknown): TranscriptInsightSummary[] {
       rootCausesAndWorkedExamples: pickList("rootcausesandworkedexamples"),
       subsystemsAndFiles: pickList("subsystemsandfiles"),
       openItems: pickList("openitems"),
+      // Phase 9 (negative knowledge): DEAD_ENDS lines flow through the same
+      // normalization as every other section, so deadEnds / dead_ends / DEAD_ENDS
+      // all collapse to `deadends`. Lines are kept verbatim — outcome-clause
+      // validation happens at file/render time, not here.
+      deadEnds: pickList("deadends"),
       rawExcerpt: asString(field("rawexcerpt")) || undefined,
     });
   }
@@ -575,7 +581,8 @@ async function callSubagentMapper(args: {
     `Use tool: ${getDrawerTool} for EACH drawer id in this exact order: ${serializedIds}.`,
     "Do not use search or any broad query tools. Process only the provided IDs.",
     "Return ONLY valid JSON array with items shaped as:",
-    "{ transcriptId, confidence, durableFacts[], decisions[], rootCausesAndWorkedExamples[], subsystemsAndFiles[], openItems[], rawExcerpt? }",
+    "{ transcriptId, confidence, durableFacts[], decisions[], rootCausesAndWorkedExamples[], subsystemsAndFiles[], openItems[], deadEnds[], rawExcerpt? }",
+    "deadEnds[]: one line each for approaches TRIED AND FAILED or CONSIDERED AND REJECTED in this transcript, shaped `- <what was tried> | outcome: <what happened> | because: \"<why abandoned>\" | polarity: tried-failed|considered-rejected`. Each line MUST carry its outcome clause. Write an empty array when nothing qualifies — do not manufacture dead ends.",
   ].join("\n");
 
   try {
@@ -1099,6 +1106,12 @@ export function buildMemcoreMarkdown(args: {
   /** Phase 8: pre-matched pending-reminder bullets (see adapter/prospective.ts). */
   pendingReminderLines?: string[];
   includePending?: boolean;
+  /** Phase 9: dead-end lines (tried-and-failed / considered-and-rejected approaches),
+   * verbatim with outcome clauses. Rendered as a bounded [dead-ends] block via
+   * renderDeadEndsBlock; an empty list omits the whole section. */
+  deadEndLines?: string[];
+  includeDeadEnds?: boolean;
+  maxDeadEnds?: number;
 }): string {
   const includeFacts = args.includeFacts !== false;
   const includePointers = args.includePointers !== false;
@@ -1145,6 +1158,18 @@ export function buildMemcoreMarkdown(args: {
     // section so there is no per-prompt tax when nothing is pending.
     if (args.includePending !== false && Array.isArray(args.pendingReminderLines) && args.pendingReminderLines.length > 0) {
       lines.push(...args.pendingReminderLines, "");
+    }
+
+    // Phase 9 (negative knowledge): the [dead-ends] block. Approaches that were tried
+    // and failed or considered and rejected for this scope — every bullet carries the
+    // hard "[RULED OUT ...]" marker via renderDeadEndsBlock (an unlabelled dead end
+    // reads as a suggestion; the label is enforced at render, not left to inference).
+    // Bounded like [pending]: capped at maxDeadEnds (default 3), and an empty list
+    // omits the whole section so there is no per-prompt tax when nothing was ruled out.
+    if (args.includeDeadEnds !== false && Array.isArray(args.deadEndLines) && args.deadEndLines.length > 0) {
+      const maxDeadEnds = Math.max(0, Number(args.maxDeadEnds) || 3);
+      const block = renderDeadEndsBlock(args.deadEndLines, maxDeadEnds);
+      if (block.length > 0) lines.push(...block, "");
     }
   }
 
@@ -1790,6 +1815,47 @@ async function main(): Promise<void> {
       }
     }
 
+    // Phase 9 (negative knowledge): dead-end lines for the [dead-ends] block. Primary
+    // source is THIS run's consolidation draft (the mapper just extracted them, outcome
+    // clauses included) — cheap and already in hand. When the draft has none, fall back
+    // to a bounded read of recently-filed dead-end drawers (synthesis-stamped nodes with
+    // an outgoing rules-out edge) so a run with no fresh dead ends still surfaces the
+    // ones on file for this scope. Bounded by construction (one page, ≤ maxDeadEnds*3),
+    // degrades to "no dead-ends section" on any read failure — the render must never
+    // throw or stall on the KG.
+    let deadEndLines: string[] = [...(consolidation.consolidationDraft.deadEnds || [])];
+    if (deadEndLines.length === 0 && !isFalsyFlag(process.env.ESHEPHERD_MEMCORE_RENDER_INCLUDE_DEAD_ENDS)) {
+      try {
+        const maxDeadEnds = Math.max(0, Number(process.env.ESHEPHERD_MEMCORE_RENDER_MAX_DEAD_ENDS) || 3);
+        if (maxDeadEnds > 0 && typeof client.listScopedDerivedDrawers === "function" && typeof client.getRulesOut === "function") {
+          const scopeResult = await client.listScopedDerivedDrawers({
+            scope_wing: consolidationOptions.targetWing,
+            scope_room: consolidationOptions.targetRoom,
+            limit: Math.min(50, maxDeadEnds * 3),
+          });
+          const nodes = asArray((scopeResult as Record<string, unknown>).nodes) as Array<Record<string, unknown>>;
+          for (const node of nodes) {
+            if (deadEndLines.length >= maxDeadEnds) break;
+            const nodeId = asString(node.node_id || node.drawer_id || node.id).trim();
+            if (!nodeId) continue;
+            const rulesOut = await client.getRulesOut(nodeId).catch(() => ({ statements: [] as string[], polarities: [] as string[] }));
+            if (rulesOut.statements.length === 0) continue; // not a dead end
+            const drawer = await client.getDrawer({ drawer_id: nodeId }).catch(() => ({}));
+            const content = asString((drawer as Record<string, unknown>).content || (drawer as Record<string, unknown>).text).trim();
+            const lines = parseDeadEndDrawerContent(content);
+            for (const line of lines) {
+              if (deadEndLines.length >= maxDeadEnds * 3) break;
+              deadEndLines.push(line);
+            }
+          }
+        }
+      } catch (err) {
+        // Degrade gracefully: a dead-end read failure costs the section, never the render.
+        process.stderr.write(`[memory-consolidation-validation] dead-end fetch failed: ${String(err)}\n`);
+        deadEndLines = [];
+      }
+    }
+
     const markdown = buildMemcoreMarkdown({
       query: consolidation.query,
       consolidation,
@@ -1802,6 +1868,9 @@ async function main(): Promise<void> {
       highHeightFacts,
       pendingReminderLines,
       includePending: !isFalsyFlag(process.env.ESHEPHERD_MEMCORE_RENDER_INCLUDE_PENDING),
+      deadEndLines,
+      includeDeadEnds: !isFalsyFlag(process.env.ESHEPHERD_MEMCORE_RENDER_INCLUDE_DEAD_ENDS),
+      maxDeadEnds: Number(process.env.ESHEPHERD_MEMCORE_RENDER_MAX_DEAD_ENDS) || 3,
     });
 
     const targetFilePath = resolveMemcoreFilePath({

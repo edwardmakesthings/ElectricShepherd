@@ -72,6 +72,9 @@ Output sections:
 - ROOT_CAUSES_AND_WORKED_EXAMPLES — diagnosed causes and concrete fixes.
 - SUBSYSTEMS_AND_FILES — components, file paths, commands touched.
 - OPEN_ITEMS — unresolved questions and pending work.
+- DEAD_ENDS — negative knowledge: approaches TRIED AND FAILED or CONSIDERED AND REJECTED in this content, one line each:
+  `- <what was tried> | outcome: <what happened> | because: "<why it was abandoned>" | polarity: tried-failed|considered-rejected`
+  The `outcome` clause is REQUIRED — a line without it reads as advice and must not be reported. `polarity` distinguishes `tried-failed` (strong evidence) from `considered-rejected` (weaker). Report only dead ends explicit in the content; write an empty list when nothing qualifies. Do NOT manufacture candidates — a false "ruled out" label permanently misleads future retrieval.
 - OFF_SCOPE_MATERIAL — sustained passages belonging to a different project/subject than the drawer's own scope. One line each:
   `- <topic> | belongs_to: <project/subject> | start: "<exact first line>" | end: "<exact last line>" | ~<n> lines`
   Copy `start` and `end` EXACTLY from the file — they are used to slice the passage verbatim. Write `- (none)` if the content stays on topic.

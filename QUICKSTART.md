@@ -409,6 +409,24 @@ source drawers, or synthesis lineage. They render into mem-core under a bounded
 `[pending]` block (default enabled; disable via
 `ESHEPHERD_MEMCORE_RENDER_INCLUDE_PENDING=false`).
 
+### 3d-2. Phase 9 — negative knowledge (what was ruled out)
+
+The mapper extracts `DEAD_ENDS` from each transcript: approaches that were **tried and
+failed** or **considered and rejected**, one line each with its outcome clause attached.
+A line without an outcome is incomplete and must not be filed — "we tried X" reads as
+advice unless it carries "— this does not work, here's why."
+
+Dead ends are stored as negative-polarity **syntheses** (never a fourth source type) and
+carry a `rules-out` KG edge (one-hop, not lineage — it never counts toward height or feeds
+lineage traversal). In scoped retrieval they are surfaced with an explicit `[RULED OUT …]`
+label. This phase labels but does **not** re-rank: the dead-end node's score is unchanged,
+so a ruled-out approach can't accidentally sink below the noise floor or float to the top.
+
+They render into mem-core under a bounded `[dead-ends]` block (default enabled; cap 3;
+disable via `ESHEPHERD_MEMCORE_RENDER_INCLUDE_DEAD_ENDS=false`, tune the cap via
+`ESHEPHERD_MEMCORE_RENDER_MAX_DEAD_ENDS=<n>`). An empty list omits the whole section — no
+per-prompt tax when nothing was ruled out.
+
 ## 3e. Running tests
 
 Unit tests run fully offline:

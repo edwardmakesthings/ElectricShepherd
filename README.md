@@ -30,6 +30,14 @@ Unified-memory Phase 8 prospective memory is in: `/remind` (create/update/close 
 dry-run-first, expiry required for create) and `/reminders` (read-only listing with filters),
 with matching active reminders rendered into mem-core under a bounded `[pending]` block
 (default enabled; disable via `ESHEPHERD_MEMCORE_RENDER_INCLUDE_PENDING=false`).
+Unified-memory Phase 9 negative knowledge is in: the mapper extracts `DEAD_ENDS`
+(tried-and-failed or considered-and-rejected approaches, each with its outcome clause),
+they are filed as negative-polarity syntheses carrying a `rules-out` KG edge (one-hop, not
+lineage — never counts toward height), surfaced in scoped retrieval with an explicit
+`[RULED OUT …]` label (labelled, not re-ranked — no weight change this phase), and rendered
+into mem-core under a bounded `[dead-ends]` block (default enabled; disable via
+`ESHEPHERD_MEMCORE_RENDER_INCLUDE_DEAD_ENDS=false`). An unlabelled dead end reads as a
+suggestion — the label is enforced at render, not left to inference.
 
 ---
 
@@ -323,6 +331,8 @@ Secret env vars:
 |---|---|---|
 | `ESHEPHERD_ENV_FILE` | unset | Optional explicit env file path override for runtime scripts |
 | `ESHEPHERD_MEMCORE_RENDER_INCLUDE_PENDING` | `true` | Toggle the `[pending]` reminders block in mem-core renders (set to a falsy value to disable) |
+| `ESHEPHERD_MEMCORE_RENDER_INCLUDE_DEAD_ENDS` | `true` | Toggle the `[dead-ends]` negative-knowledge block in mem-core renders (set to a falsy value to disable) |
+| `ESHEPHERD_MEMCORE_RENDER_MAX_DEAD_ENDS` | `3` | Hard cap on dead-end bullets rendered per scope (0 disables the section) |
 | `MEMPALACE_MCP_API_KEY` | unset | Optional API key header value for MCP gateway auth |
 | `MEMPALACE_MCP_BEARER_TOKEN` | unset | Optional bearer token (alternate to API-key header style) |
 | `MEMPALACE_MCP_HEADERS_JSON` | unset | Optional JSON map of additional MCP HTTP headers |

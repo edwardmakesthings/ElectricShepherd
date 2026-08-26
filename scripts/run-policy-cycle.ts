@@ -34,6 +34,30 @@ function makeCycleRef(query: string, now: Date): string {
   return `policy-${ts}-${shortHash(query)}`;
 }
 
+/**
+ * Phase 9 usability bridge: surface the explicit ruled-out marker on dead-end nodes in
+ * the operator-facing output. A node with a `ruled_out` field is a negative-knowledge
+ * synthesis (an approach that was tried and failed or considered and rejected); this
+ * renders it with the hard "[RULED OUT ...]" label so it can never read as a suggestion.
+ * STRICTLY INFORMATIONAL — no writes, no ranking change; the node's score is untouched.
+ */
+export function buildRuledOutNotes(
+  selectedNodes: Array<{ node_id: string; desc?: string; ruled_out?: { polarity: string; statements: string[] } }>,
+): Array<{ node_id: string; label: string; note: string }> {
+  const out: Array<{ node_id: string; label: string; note: string }> = [];
+  for (const node of selectedNodes || []) {
+    if (!node.ruled_out || !Array.isArray(node.ruled_out.statements) || node.ruled_out.statements.length === 0) continue;
+    const polarityLabel = node.ruled_out.polarity === "considered-rejected" ? "considered and rejected" : "tried and failed";
+    const statements = node.ruled_out.statements.join("; ");
+    out.push({
+      node_id: node.node_id,
+      label: `[RULED OUT — ${polarityLabel}]`,
+      note: `${statements}${node.desc ? ` — ${node.desc}` : ""}. Do NOT re-propose this approach.`,
+    });
+  }
+  return out;
+}
+
 export function buildOutcomeProposal(
   selectedNodes: Array<{ node_id: string }>,
   query: string,
@@ -162,6 +186,9 @@ async function main(): Promise<void> {
   const output = {
     ...result,
     outcome_proposal: buildOutcomeProposal(result.selected_nodes ?? [], args.query),
+    // Phase 9 usability bridge: surface explicit ruled-out labels on dead-end nodes so
+    // an unlabelled dead end can never read as a suggestion in the operator-facing output.
+    ruled_out_notes: buildRuledOutNotes(result.selected_nodes ?? []),
   };
 
   runtimeProcess.stdout.write(`${JSON.stringify(output, null, 2)}\n`);

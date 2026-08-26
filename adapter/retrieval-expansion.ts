@@ -13,6 +13,11 @@ export type RetrievalWeights = {
   // Phase 7 (unified memory): outcome-feedback term. Weighted BELOW authority by
   // construction — see the clamp in computeNodeScore and DEFAULT_WEIGHTS below.
   outcome: number;
+  // Phase 9 (unified memory): negative-knowledge presentation term. ZERO by default
+  // and NOT a ranking weight in this phase — dead ends are surfaced alongside positive
+  // knowledge with an explicit label, not re-ranked. The field exists so the envelope
+  // can report the (zero) contribution honestly; a future phase may give it magnitude.
+  ruledOut: number;
 };
 
 // Phase 2 (unified memory): optional retrieval intent. Omitted = no preference.
@@ -70,6 +75,17 @@ export type RankedScopedNode = {
   // by the Phase 3 close-out bounded room scan (standalone doc-stamped drawer with no
   // lineage edge yet).
   via?: "scoped" | "concern" | "refined" | "doc";
+  // Phase 9 (unified memory): negative-knowledge marker. Present ONLY when this node
+  // carries an outgoing `rules-out` edge — a dead end, i.e. an approach that was tried
+  // and failed or considered and rejected. Downstream renderers MUST attach the hard
+  // "[RULED OUT ...]" label to any node with this field; an unlabelled dead end reads
+  // as a suggestion (the spec's main risk). `polarity` preserves the two-valued
+  // distinction: tried-failed is stronger evidence than considered-rejected.
+  ruled_out?: {
+    polarity: "tried-failed" | "considered-rejected";
+    /** The ruled-out statement(s) this node points at (its topic/approach). */
+    statements: string[];
+  };
 };
 
 
@@ -113,6 +129,15 @@ export type RetrievalExpansionResult = {
       nodes_with_history: number;
       weight: number;
     };
+    // Phase 9 (unified memory): envelope honesty for negative-knowledge labelling.
+    // `nodes_labeled` counts ranked nodes that carry a `rules-out` edge and were
+    // therefore returned with the explicit ruled_out marker. `weight` is ZERO in this
+    // phase — dead ends are labelled, not re-ranked (the spec does not ask for a weight).
+    ruled_out_expansion?: {
+      enabled: boolean;
+      nodes_labeled: number;
+      weight: number;
+    };
   };
   seeds: {
     query: string;
@@ -151,6 +176,10 @@ const DEFAULT_WEIGHTS: RetrievalWeights = {
   // exactly 0 from this term (neutral), and a doc with no history still outranks a
   // synthesis with two accepts on a factual query (the spec's worked example).
   outcome: 0.5,
+  // Phase 9: negative-knowledge presentation. ZERO by construction — dead ends are
+  // surfaced with an explicit label, not re-ranked. A future phase may change this;
+  // until then the score formula is byte-identical to pre-Phase-9 for every node.
+  ruledOut: 0,
 };
 
 // Phase 7 (unified memory): es-outcome axis. Values are written ONLY by the
@@ -772,6 +801,34 @@ export async function expandScopedRetrieval(
       .catch(() => new Map<string, OutcomeCounts>());
   }
 
+  // Phase 9 (unified memory): negative-knowledge labelling. A dead end is a synthesis
+  // with an outgoing `rules-out` edge; when such a node is in the ranked pool it must be
+  // returned EXPLICITLY LABELLED as ruled out — "an unlabelled dead end reads as a
+  // suggestion" (spec's main risk). Capability-gated like concerns/refined/outcome:
+  // clients without getRulesOut degrade to pre-Phase-9 output with zero extra calls.
+  // Bounded by construction — one one-hop kg_query per pool node (≤ limit), same cost
+  // profile as the P2-2 fan-out; read failures degrade to "no rules-out" (unlabelled),
+  // never abort. This phase does NOT alter ranking: weights.ruledOut is 0 and the score
+  // formula below is untouched — labelling only, presentation not re-ranking.
+  const ruledOutEnabled = typeof client.getRulesOut === "function";
+  let ruledOutNodesLabeled = 0;
+  if (ruledOutEnabled && scopedNodes.length > 0) {
+    const results = await Promise.all(
+      scopedNodes.map((node) =>
+        node.source_type === "synthesis"
+          ? client.getRulesOut(node.node_id).catch(() => ({ statements: [] as string[], polarities: [] as string[] }))
+          : Promise.resolve({ statements: [] as string[], polarities: [] as string[] }),
+      ),
+    );
+    results.forEach((res, i) => {
+      const node = scopedNodes[i];
+      if (!res || res.statements.length === 0) return; // no rules-out edge -> not a dead end
+      const polarity = res.polarities.includes("considered-rejected") ? "considered-rejected" : "tried-failed";
+      node.ruled_out = { polarity, statements: res.statements };
+      ruledOutNodesLabeled += 1;
+    });
+  }
+
   const rankedNodes = scopedNodes.map((node) => {
     node.score = computeNodeScore({
       node,
@@ -875,6 +932,16 @@ export async function expandScopedRetrieval(
             applied: [...(outcomeCountsByNode?.values() ?? [])].some((c) => c.total > 0 && c.accept !== c.revise + c.failed),
             nodes_with_history: [...(outcomeCountsByNode?.values() ?? [])].filter((c) => c.total > 0).length,
             weight: weights.outcome,
+          }
+        : undefined,
+      // Phase 9 envelope honesty: state how many ranked nodes carried a rules-out edge
+      // and were therefore returned with the explicit ruled_out marker. `weight` is 0 —
+      // this phase labels, it does not re-rank.
+      ruled_out_expansion: ruledOutEnabled && scopedNodes.length > 0
+        ? {
+            enabled: true,
+            nodes_labeled: ruledOutNodesLabeled,
+            weight: weights.ruledOut,
           }
         : undefined,
     },

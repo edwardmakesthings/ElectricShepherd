@@ -570,6 +570,116 @@ export class MemgraphClient {
   }
 
 
+  // ── Phase 9: rules-out (dead-end / negative-knowledge pointer) ─────────────
+  // `rules-out` is a cross-type KG edge, NOT lineage: it must never count toward
+  // height or feed getLineageSources/getLineageDerivatives. One-hop by design —
+  // recursive rules-out would create cycles through unrelated syntheses. The
+  // subject is the dead-end drawer (a synthesis with negative polarity); the object
+  // is the ruled-out statement text (free-text by approved Phase 9 design).
+
+  /**
+   * One-hop outgoing `rules-out` facts for a dead-end node: the ruled-out statement
+   * texts plus any polarity tokens ("tried-failed" | "considered-rejected"). Degrades
+   * to "no rules-out" on read failure, matching getConcerns.
+   */
+  async getRulesOut(nodeId: string): Promise<{ statements: string[]; polarities: string[]; count: number }> {
+    const result = await this.kgQuery({
+      entity: nodeId,
+      direction: "outgoing",
+      predicate: "rules-out",
+      recurse: false,
+      max_depth: 1,
+    }).catch(() => ({}));
+    const statements: string[] = [];
+    const polarities: string[] = [];
+    for (const fact of this.parseKgFacts(result)) {
+      if (!this.asBoolean(fact.current, true)) continue;
+      const object = this.asString(fact.object).trim();
+      if (!object) continue;
+      if (object === "tried-failed" || object === "considered-rejected") polarities.push(object);
+      else statements.push(object);
+    }
+    return { statements: this.uniq(statements), polarities: this.uniq(polarities), count: this.uniq([...statements, ...polarities]).length };
+  }
+
+  /**
+   * File ONE dead end as a negative-polarity synthesis drawer with its `rules-out`
+   * edge(s). The drawer is created via createDerivedDrawer (which stamps
+   * es-source-type: synthesis and es-status: provisional — dead ends are syntheses,
+   * NOT a fourth source type) then gets one outgoing rules-out edge per ruled-out
+   * statement plus an optional polarity token. `source_drawer_ids` carry the
+   * synthesized-from lineage so the merge/height machinery can reason about it.
+   * Best-effort per edge: a failed edge is reported, never aborts the filing.
+   */
+  async fileDeadEnd(args: {
+    wing: string;
+    room: string;
+    /** The dead-end line(s), verbatim (tried + outcome clause + reason). One drawer per call. */
+    content: string;
+    /** Ruled-out statement text(s) — the topic/approach the edge points at. */
+    statements: string[];
+    /** "tried-failed" | "considered-rejected" (default tried-failed when omitted). */
+    polarity?: string;
+    source_drawer_ids?: string[];
+    desc?: string;
+    added_by?: string;
+    source_run_id?: string;
+  }): Promise<{ success: boolean; node_id?: string; rules_out_edges_added: number; errors: string[] }> {
+    const statements = this.uniq(args.statements);
+    if (statements.length === 0) {
+      return { success: false, rules_out_edges_added: 0, errors: ["fileDeadEnd: at least one ruled-out statement is required"] };
+    }
+
+    const created = await this.createDerivedDrawer({
+      wing: args.wing,
+      room: args.room,
+      content: args.content,
+      source_drawer_ids: args.source_drawer_ids || [],
+      desc: args.desc || statements[0],
+      added_by: args.added_by || "electric-shepherd-dead-ends",
+      source_run_id: args.source_run_id,
+    });
+
+    const nodeId = this.asString(created.node_id || created.drawer_id).trim();
+    if (!created.success && !nodeId) {
+      return { success: false, rules_out_edges_added: 0, errors: [...(created.lineage_errors || []), "fileDeadEnd: drawer creation failed"] };
+    }
+
+    const errors: string[] = [];
+    let added = 0;
+    for (const statement of statements) {
+      try {
+        await this.kgAdd({
+          subject: nodeId,
+          predicate: "rules-out",
+          object: statement,
+          source_closet: nodeId,
+          source_run_id: args.source_run_id,
+        });
+        added += 1;
+      } catch (err) {
+        errors.push(String(err));
+      }
+    }
+    const polarity = this.asString(args.polarity).trim();
+    if (polarity === "tried-failed" || polarity === "considered-rejected") {
+      try {
+        await this.kgAdd({
+          subject: nodeId,
+          predicate: "rules-out",
+          object: polarity,
+          source_closet: nodeId,
+          source_run_id: args.source_run_id,
+        });
+        added += 1;
+      } catch (err) {
+        errors.push(String(err));
+      }
+    }
+
+    return { success: errors.length === 0 && created.success, node_id: nodeId, rules_out_edges_added: added, errors };
+  }
+
   getHeight(nodeId: string) {
     return this.call("getHeight", { node_id: nodeId });
   }
