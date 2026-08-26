@@ -52,6 +52,13 @@ export type RetrievalExpansionOptions = {
   // is implied — the flag only matters for non-factual intents that want docs in the
   // ranked pool explicitly.
   include_docs?: boolean;
+  // Phase 10 (unified memory): procedural scope — skills that cross projects live in a
+  // shared skills wing, and a "how do I do X" query from ANY project wing must reach
+  // them. On `intent === "procedural"` ONLY, the bounded scan of this wing's `skills`
+  // room admits skill-stamped drawers into the pool (via: "shared"). Every other intent
+  // is byte-identical to pre-Phase-10 behavior: no shared-wing calls, no cross-wing nodes.
+  // Omitted = off (default path stays single-wing).
+  shared_wing?: string;
 };
 
 export type RankedScopedNode = {
@@ -73,8 +80,9 @@ export type RankedScopedNode = {
   // admitted as a one-hop `refined-by` neighbor of a pool node on procedural
   // intent (the skill that points at it, or its evidence); "doc" = admitted directly
   // by the Phase 3 close-out bounded room scan (standalone doc-stamped drawer with no
-  // lineage edge yet).
-  via?: "scoped" | "concern" | "refined" | "doc";
+  // lineage edge yet); "shared" = admitted by the Phase 10 bounded scan of the shared
+  // skills wing (promoted skill, procedural intent only).
+  via?: "scoped" | "concern" | "refined" | "doc" | "shared";
   // Phase 9 (unified memory): negative-knowledge marker. Present ONLY when this node
   // carries an outgoing `rules-out` edge — a dead end, i.e. an approach that was tried
   // and failed or considered and rejected. Downstream renderers MUST attach the hard
@@ -138,6 +146,18 @@ export type RetrievalExpansionResult = {
       nodes_labeled: number;
       weight: number;
     };
+    // Phase 10 (unified memory): envelope honesty for the shared-skills-wing scan.
+    // Present ONLY on procedural intent with `shared_wing` configured — non-procedural
+    // intents never run the scan and report nothing, keeping their envelopes
+    // byte-identical to pre-Phase-10 output.
+    shared_skills_expansion?: {
+      enabled: boolean;
+      wing: string;
+      room: string;
+      drawers_scanned: number;
+      targets_admitted: number;
+      truncated: boolean;
+    };
   };
   seeds: {
     query: string;
@@ -148,6 +168,8 @@ export type RetrievalExpansionResult = {
     concern_neighbor_ids: string[];
     // Phase 5: one-hop `refined-by` neighbors seen on procedural intent (admitted or not).
     refined_neighbor_ids?: string[];
+    // Phase 10: shared-skills-wing drawers admitted into the pool this run.
+    shared_skill_ids?: string[];
   };
 
   ranking: {
@@ -787,6 +809,91 @@ export async function expandScopedRetrieval(
     }
   }
 
+  // Phase 10 (unified memory): shared-skills-wing admission (procedural intent ONLY).
+  // Skills that cross projects are promoted into a shared skills wing; a "how do I do
+  // X" query from ANY project wing must reach them. A freshly promoted skill has no
+  // edges into the querying project, so edge-based expansion (refined-by) cannot see it
+  // — this bounded room scan is the primary admission path: one page of the shared
+  // wing's `skills` room, retrieve-then-filter to es-source-type: skill.
+  //
+  // The gate is structural and sits at the TOP of the block: non-procedural intents
+  // (factual/historical/default) never pay a single shared-wing call and can admit no
+  // cross-wing node — a cross-wing search for episodic memory would surface another
+  // project's transcripts, the exact failure mode wing-scoping exists to prevent. The
+  // hard es-source-type: skill check is the safety net even on procedural intent: an
+  // unstamped or transcript-stamped drawer in the shared room is never admitted.
+  // Capability-gated like every expansion (listDrawers/getDrawer/getClosetSourceType);
+  // read failures degrade to pre-Phase-10 behavior with zero extra calls. Never pages
+  // past one bounded page (spec guardrail: no room exhaustion).
+  const sharedWing = intent === "procedural" ? String(options.shared_wing || "").trim() : "";
+  let sharedSkillIds: string[] = [];
+  let sharedScanReport: { wing: string; room: string; drawers_scanned: number; truncated: boolean } | undefined;
+  if (sharedWing && typeof client.listDrawers === "function" && typeof client.getClosetSourceType === "function") {
+    const sharedRoom = "skills"; // canonical skills room in the shared wing (Phase 5 convention)
+    const pageSize = 50; // same bounded-page shape as the Phase 3 doc scan
+    const probe = asObject(await safeListDrawers(client, { wing: sharedWing, room: sharedRoom, limit: 1, offset: 0 }));
+    const total = Math.max(0, Number(probe.total) || 0);
+    const pageRows = await safeListDrawers(client, { wing: sharedWing, room: sharedRoom, limit: pageSize, offset: 0 });
+    const pool = [
+      ...asArray(pageRows.drawers),
+      ...asArray(pageRows.results),
+      ...asArray(pageRows.items),
+      ...asArray(pageRows.nodes),
+      ...asArray(pageRows.data),
+    ];
+
+    // Dedupe by id, drop anything already in the pool.
+    const seenRows = new Set<string>(scopedNodes.map((n) => n.node_id));
+    const candidates: { id: string; row: Record<string, unknown> }[] = [];
+    for (const raw of pool) {
+      const row = asObject(raw);
+      const id = asString(row.drawer_id || row.node_id || row.id).trim();
+      if (!id || seenRows.has(id)) continue;
+      seenRows.add(id);
+      candidates.push({ id, row });
+    }
+    sharedScanReport = { wing: sharedWing, room: sharedRoom, drawers_scanned: candidates.length, truncated: total > pool.length };
+
+    const fresh = candidates.filter((c) => !scopedNodes.some((n) => n.node_id === c.id));
+    if (fresh.length > 0) {
+      // Retrieve-then-filter: fetch each candidate once (wing/room/desc), keep only
+      // skill-stamped rows. The wing must be the shared wing — a row claiming any
+      // other wing is dropped (no accidental cross-wing leakage from the seed path).
+      const results = await Promise.all(
+        fresh.map((c) => {
+          const drawerP = typeof client.getDrawer === "function" ? client.getDrawer({ drawer_id: c.id }).catch(() => ({})) : Promise.resolve({});
+          const typeP = client.getClosetSourceType(c.id).then((t) => t ?? "unknown");
+          return Promise.all([drawerP, typeP]);
+        }),
+      );
+      results.forEach(([drawerRaw, sourceType], i) => {
+        const c = fresh[i];
+        if (sourceType !== "skill") return; // hard check: only skill-stamped drawers qualify
+        const drawer = asObject(drawerRaw);
+        const row = c.row;
+        const wing = asString(drawer.wing || asObject(drawer.metadata).wing || row.wing || row.closet || row.namespace);
+        if (wing && wing !== sharedWing) return; // must be the shared wing — never another project
+        const room = asString(drawer.room || asObject(drawer.metadata).room || row.room);
+        scopedNodes.push({
+          node_id: c.id,
+          labels: [], // foreign hall labels are deliberately ignored (no cross-wing label leakage)
+          wing,
+          room,
+          desc: asString(drawer.desc || drawer.title || drawer.summary || row.desc || row.title || row.summary),
+          height: 0, // shared admission is not lineage — height stays pure synthesized-from
+          retrieval_count: asNumber(drawer.retrieval_count || asObject(drawer.metadata).retrieval_count || row.retrieval_count),
+          connection_degree: 0,
+          lineage_match_count: 0,
+          source_type: "skill",
+          score: 0,
+          selected: false,
+          via: "shared",
+        });
+        sharedSkillIds.push(c.id);
+      });
+    }
+  }
+
   // Phase 7 (unified memory): outcome-feedback ranking term. Read the accumulated
   // es-outcome counts for the (already bounded) pool and add a net-positive/negative
   // term to each node's score. Capability-gated like concerns/refined: clients without
@@ -944,6 +1051,19 @@ export async function expandScopedRetrieval(
             weight: weights.ruledOut,
           }
         : undefined,
+      // Phase 10 envelope honesty: state what the shared-skills scan did. Present only
+      // when the scan actually ran (procedural intent + shared_wing configured), so
+      // non-procedural envelopes stay byte-identical to pre-Phase-10 output.
+      shared_skills_expansion: sharedWing && sharedScanReport
+        ? {
+            enabled: true,
+            wing: sharedScanReport.wing,
+            room: sharedScanReport.room,
+            drawers_scanned: sharedScanReport.drawers_scanned,
+            targets_admitted: scopedNodes.filter((n) => n.via === "shared").length,
+            truncated: sharedScanReport.truncated,
+          }
+        : undefined,
     },
     policy: {
       enforced,
@@ -956,6 +1076,7 @@ export async function expandScopedRetrieval(
       neighborhood_node_ids: [...neighborhoodSet].sort(),
       concern_neighbor_ids: [...new Set(concernNeighborIds)].sort(),
       ...(refinedNeighborIds.length > 0 ? { refined_neighbor_ids: [...new Set(refinedNeighborIds)].sort() } : {}),
+      ...(sharedSkillIds.length > 0 ? { shared_skill_ids: [...new Set(sharedSkillIds)].sort() } : {}),
     },
 
     ranking: {

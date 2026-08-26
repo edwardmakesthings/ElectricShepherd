@@ -188,6 +188,15 @@ The term is weighted strictly below authority (a doc with no history still outra
 with two accepts on a factual query), and the factual floor is applied after it. Outcomes are
 written only by the human-authoritative `record_outcome` tool (§4a).
 
+**Procedural scope (Phase 10):** on a `procedural` intent, retrieval also reaches skills that
+were promoted into the shared skills wing (`shared-skills`, override via
+`ESHEPHERD_SHARED_SKILLS_WING`). A freshly promoted skill has no edges into the querying
+project, so this is a bounded one-page scan of the shared wing's `skills` room with a hard
+`es-source-type: skill` check — only skill-stamped drawers in that exact wing are admitted.
+Every other intent (factual/historical/default) stays single-wing and byte-identical to
+pre-Phase-10 output: no shared-wing calls, no cross-wing nodes. Promote a skill with
+`/promote-skill <drawer_id>` (§3h).
+
 ## 3b. Run consolidation + validation pipeline
 
 ```bash
@@ -379,6 +388,7 @@ returns to your session (expand the subtask in the TUI to watch/debug it). Comma
 | `/ingest-docs <path>` | Mine a docs directory into the project wing's `reference` room and stamp `es-source-type: doc`. Dry-run-first (see §3c2). | in-session | — |
 | `/remind <action> ...` | Create/update/close prospective reminders ("remember to do X when Y"). Dry-run-first; expiry required for create. Actions: `create`, `update`, `close`, `list` (see §3g2). | in-session | — |
 | `/reminders [filters]` | Read-only listing of the project's reminders with optional `status`/`condition` filters; flags stale active reminders past their expiry. | isolated subagent | — |
+| `/promote-skill <drawer_id>` | Promote a project skill into the shared skills wing so any project's procedural retrieval can reach it. Copy (source untouched), approval-gated, idempotent (see §3h). | in-session | — |
 
 Each command takes an optional scope argument, e.g. `/consolidate context-blocks`.
 
@@ -408,6 +418,38 @@ Reminders live in the project wing's `reminders` room and never touch `es-status
 source drawers, or synthesis lineage. They render into mem-core under a bounded
 `[pending]` block (default enabled; disable via
 `ESHEPHERD_MEMCORE_RENDER_INCLUDE_PENDING=false`).
+
+## 3h. Promote a skill to the shared wing (`/promote-skill`)
+
+Skills default to the project wing (§4). But "how I diagnose a caching regression"
+transfers everywhere; only project-specific procedure should stay wing-locked.
+Promotion is that transfer — and it is a **distinct operation from relocation**:
+relocation fixes misfiling (the drawer was in the wrong place); promotion generalises
+something correctly filed (the drawer now belongs in two places).
+
+- `/promote-skill <drawer_id>` — promote one skill into the shared skills wing
+  (`shared-skills`, override via `ESHEPHERD_SHARED_SKILLS_WING`). The source must already
+  carry `es-source-type: skill` (file it with `/file-skill` first if not). Dry-run-first:
+  the first call previews the destination room + idempotency-guard result; apply only after
+  explicit confirmation.
+
+What apply does:
+
+- **Idempotency guard first**: an existing `promoted-from` edge (either direction) or an
+  exact-duplicate content match in the shared wing makes the re-run a no-op — no second
+  copy, no second edge.
+- **Files verbatim** into `<shared-wing>/skills`. The source drawer is left untouched —
+  COPY semantics, never a move (retiring the local copy later via `merged-into` is the
+  operator's call).
+- **Stamps** the shared copy `es-source-type: skill` and writes one `promoted-from` edge
+  `{subject: <shared>, predicate: "promoted-from", object: <origin>}`. This edge is **not
+  lineage**: it never counts toward height and never feeds recursive lineage traversal. It
+  exists so the origin stays traceable after promotion.
+
+Promotion is **proposed, never automatic**. A skill present in >= 2 project wings surfaces
+as a candidate via the memory-status scan (`findPromotionCandidates` — read-only); no
+threshold crossing silently moves a drawer. Once promoted, a `procedural`-intent retrieval
+from ANY project wing reaches it (§3a).
 
 ### 3d-2. Phase 9 — negative knowledge (what was ruled out)
 

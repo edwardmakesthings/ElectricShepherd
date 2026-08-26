@@ -150,6 +150,10 @@ function parseArgs(argv: string[]): RetrievalExpansionOptions {
     always_include_labels: ["pinned"],
     intent,
     include_docs: includeDocs || undefined,
+    // Phase 10 (unified memory): shared skills wing for procedural-intent retrieval.
+    // Resolved from config/env after applyRuntimeConfigToEnv runs in main(); the
+    // expansion itself only acts on it when intent === "procedural".
+    shared_wing: runtimeProcess.env.ESHEPHERD_SHARED_SKILLS_WING || undefined,
   };
 }
 

@@ -38,6 +38,16 @@ lineage — never counts toward height), surfaced in scoped retrieval with an ex
 into mem-core under a bounded `[dead-ends]` block (default enabled; disable via
 `ESHEPHERD_MEMCORE_RENDER_INCLUDE_DEAD_ENDS=false`). An unlabelled dead end reads as a
 suggestion — the label is enforced at render, not left to inference.
+Unified-memory Phase 10 procedural scope is in: skills that cross projects are promoted
+into a shared skills wing (`shared-skills`, override via `ESHEPHERD_SHARED_SKILLS_WING`)
+via `/promote-skill <drawer_id>` (copy, not move — the source stays; approval-gated,
+idempotent). A promoted skill is stamped `es-source-type: skill` and linked back to its
+origin with a `promoted-from` edge (not lineage — never counts toward height). On a
+`procedural` intent, deterministic retrieval reaches the shared wing's `skills` room from
+ANY project wing (bounded one-page scan, hard skill-stamp check); every other intent stays
+single-wing and byte-identical to pre-Phase-10 output. Promotion is proposed, never
+automatic — a skill present in >= 2 project wings is surfaced as a candidate by the
+memory-status scan, then promoted only on explicit approval.
 
 ---
 
@@ -382,6 +392,7 @@ Core policy runtime in place. The following are committed and usable now:
 - Unified-memory Phase 1-4 capabilities: `es-source-type` axis (`transcript|doc|synthesis|skill`) orthogonal to `es-status`, intent-aware retrieval (`--intent factual|historical|procedural` with a factual hard rule that provisional syntheses never outrank docs), `/ingest-docs <path>` doc ingestion (dry-run-first, staleness invalidation, re-stamping), and approval-gated `concerns` links from synthesis closets to authority docs surfaced as one-hop grounding/neighbor paths, plus direct doc admission (doc-stamped drawers enter the ranked pool on factual intent or with `--include-docs`)
 - Unified-memory Phase 7 outcome feedback: human-authoritative `es-outcome` axis (`accept | revise | failed | unused`) written only by the `record_outcome` tool (dry-run-first, explicit node ids, no automatic writes from test/reviewer/loop signals), consumed as a below-authority ranking term in deterministic retrieval and as re-synthesis candidates (`revise >= 2` and `revise > accept` over a recent window) in `/memory-status`
 - Unified-memory Phase 8 prospective memory: `/remind` (create/update/close reminders, dry-run-first, expiry required for create) and `/reminders` (read-only listing with status/condition filters), with matching active reminders rendered into mem-core under a bounded `[pending]` block (default enabled; disable via `ESHEPHERD_MEMCORE_RENDER_INCLUDE_PENDING=false`)
+- Unified-memory Phase 10 procedural scope: `/promote-skill <drawer_id>` promotes a project skill into the shared skills wing (`shared-skills`, override via `ESHEPHERD_SHARED_SKILLS_WING`) as a copy (source untouched), stamped `es-source-type: skill` with a `promoted-from` edge back to the origin (not lineage). Approval-gated and idempotent (existing-edge + exact-duplicate guards make re-runs no-ops). On a `procedural` intent, deterministic retrieval reaches the shared wing's `skills` room from any project wing (bounded one-page scan, hard skill-stamp check); all other intents stay single-wing. Promotion is proposed, never automatic — skills in >= 2 project wings surface as candidates via the memory-status scan
 - Deterministic policy-cycle runtime in `scripts/run-policy-cycle.ts`
 - Consolidation + validation runtime pipeline in `scripts/run-memory-consolidation-and-validation.ts`
 - Optional live mapper and auditor integration hooks in `scripts/run-memory-consolidation-and-validation.ts` (`--use-live-mapper`, `--use-live-auditor`)

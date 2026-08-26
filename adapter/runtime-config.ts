@@ -71,6 +71,10 @@ export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
   { envKey: "NTFY_URL", path: "notifications.ntfyUrl", kind: "string", defaultValue: "" },
 
   { envKey: "ESHEPHERD_PROJECT_WING", path: "memory.projectWing", kind: "string", defaultValue: "opencode" },
+  // Phase 10 (unified memory): the shared skills wing — where promoted skills
+  // live so procedural-intent retrieval from ANY project wing can reach them.
+  // A location, not a kind: promoted drawers keep es-source-type: skill.
+  { envKey: "ESHEPHERD_SHARED_SKILLS_WING", path: "memory.sharedSkillsWing", kind: "string", defaultValue: "shared-skills" },
   { envKey: "ESHEPHERD_SOURCE_CAPTURE_WING", path: "sourceCapture.wing", kind: "string", defaultValue: "opencode" },
   { envKey: "ESHEPHERD_SOURCE_CAPTURE_ROOM", path: "sourceCapture.room", kind: "string", defaultValue: "source-transcripts" },
   { envKey: "ESHEPHERD_SOURCE_CAPTURE_ADDED_BY", path: "sourceCapture.addedBy", kind: "string", defaultValue: "electric-shepherd-capture" },
@@ -409,6 +413,16 @@ export function loadRuntimeConfig(args: {
     if (sourceByEnvKey[wingKey] === "default" || valuesByEnvKey[wingKey] === "") {
       valuesByEnvKey[wingKey] = computeDefaultProjectWing(args.cwd, "opencode")
     }
+  }
+
+  // Phase 10: the shared skills wing is a FIXED name (not directory-derived), so an
+  // explicit "" in config means "unset" -> fall back to the spec default, not "route
+  // promotions to a blank wing". Distinct from project/source wings above, which are
+  // computed from the project directory.
+  if (sourceByEnvKey["ESHEPHERD_SHARED_SKILLS_WING"] === "default" || valuesByEnvKey["ESHEPHERD_SHARED_SKILLS_WING"] === "") {
+    valuesByEnvKey["ESHEPHERD_SHARED_SKILLS_WING"] = defaultStringForSpec(
+      SPEC_BY_ENV_KEY.get("ESHEPHERD_SHARED_SKILLS_WING")!,
+    )
   }
 
   return {

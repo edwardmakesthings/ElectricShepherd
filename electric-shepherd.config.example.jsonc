@@ -22,7 +22,12 @@
     // Left unset by default: the wing is computed from this project's directory
     // name (matching mempalace's own wing-naming convention). Set explicitly
     // only to route this project's captures into a different wing.
-    "projectWing": ""
+    "projectWing": "",
+    // Phase 10 (unified memory): the shared skills wing — where promoted skills live
+    // so procedural-intent retrieval from ANY project wing can reach them. Left unset
+    // by default (resolves to `shared-skills`). Set explicitly only to relocate the
+    // shared skills across all of your projects at once.
+    "sharedSkillsWing": ""
   },
 
   "commands": {
