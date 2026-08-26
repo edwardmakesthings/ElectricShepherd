@@ -475,6 +475,13 @@ Dry-run first: the default call makes no `kg_add` and echoes the exact edges; pa
 `dry_run:false` only after explicit operator confirmation. Each edge carries a `valid_from`
 timestamp so consumers can window recent history.
 
+**Operator flow — recording an outcome after a policy cycle.** The `policy:cycle` output
+includes an `outcome_proposal` section: a prefilled dry-run `record_outcome` payload with the
+run's `selected_nodes` mirrored into `node_ids` and a generated `cycle_ref`. It is informational
+only — the script never writes. Copy the payload, set `outcome` to your judgment
+(`accept | revise | failed | unused`), call `record_outcome` with `dry_run: true`, then re-run
+with `dry_run: false` only after your explicit confirmation.
+
 Two things read this axis (§3a): retrieval ranking (below-authority boost/penalty) and
 `/memory-status`, which surfaces **re-synthesis candidates** — closets with `revise >= 2` and
 `revise > accept` over a recent window — the same way provisional backlog is surfaced.

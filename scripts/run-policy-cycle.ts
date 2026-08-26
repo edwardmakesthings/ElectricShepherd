@@ -8,6 +8,53 @@ import {
 } from "../adapter/retrieval-expansion.ts";
 import { loadRuntimeEnv } from "./runtime-env.ts";
 
+/**
+ * Phase 7 usability bridge: build an operator-ready `record_outcome` proposal
+ * payload from a policy-cycle result. STRICTLY INFORMATIONAL — this function and
+ * the script that calls it perform NO writes (no record_outcome, no kg_add). The
+ * operator copies the payload, sets `outcome` to their judgment, and invokes the
+ * human-authoritative `record_outcome` tool themselves (dry-run first, then apply).
+ */
+
+const OUTCOME_VALUES = ["accept", "revise", "failed", "unused"] as const;
+
+/** Short deterministic hash of a string (FNV-1a, 32-bit) — stable across runs. */
+function shortHash(input: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, "0");
+}
+
+/** Deterministic-ish cycle id: timestamp + short query hash. */
+function makeCycleRef(query: string, now: Date): string {
+  const ts = now.toISOString().replace(/[:.]/g, "-");
+  return `policy-${ts}-${shortHash(query)}`;
+}
+
+export function buildOutcomeProposal(
+  selectedNodes: Array<{ node_id: string }>,
+  query: string,
+  now: Date = new Date(),
+): Record<string, unknown> {
+  const nodeIds = [...new Set(selectedNodes.map((n) => n.node_id).filter(Boolean))];
+  return {
+    tool: "record_outcome",
+    payload: {
+      node_ids: nodeIds,
+      outcome: null, // operator must set one of the allowed values below before calling
+      cycle_ref: makeCycleRef(query, now),
+      dry_run: true,
+    },
+    instructions: {
+      allowed_outcomes: [...OUTCOME_VALUES],
+      note: "Set `outcome` to your judgment (accept | revise | failed | unused). Call record_outcome with dry_run:true first; re-run with dry_run:false only after your explicit confirmation. This proposal is informational — the policy cycle itself never writes outcome edges.",
+    },
+  };
+}
+
 const runtimeProcess = (globalThis as unknown as {
   process: {
     argv: string[];
@@ -109,10 +156,33 @@ async function main(): Promise<void> {
   });
 
   const result = await expandScopedRetrieval(client, args);
-  runtimeProcess.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+
+  // Phase 7 usability bridge: emit an operator-ready record_outcome proposal.
+  // Informational only — no write path here; the script never calls record_outcome/kg_add.
+  const output = {
+    ...result,
+    outcome_proposal: buildOutcomeProposal(result.selected_nodes ?? [], args.query),
+  };
+
+  runtimeProcess.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
 }
 
-main().catch((err) => {
-  runtimeProcess.stderr.write(`[policy-cycle] ${String(err)}\n`);
-  runtimeProcess.exit(1);
-});
+// Only run when executed directly (not imported by tests).
+import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
+
+const isDirectRun = (() => {
+  try {
+    const entry = runtimeProcess.argv[1] ? resolve(runtimeProcess.argv[1]) : "";
+    return entry === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+})();
+
+if (isDirectRun) {
+  main().catch((err) => {
+    runtimeProcess.stderr.write(`[policy-cycle] ${String(err)}\n`);
+    runtimeProcess.exit(1);
+  });
+}

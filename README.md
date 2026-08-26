@@ -225,6 +225,23 @@ supported), and no automatic path from test failures, reviewer verdicts, or loop
 Closets accumulating revise outcomes (`revise >= 2` and `revise > accept` over a recent window)
 surface as re-synthesis candidates in `/memory-status`, the same way provisional backlog is surfaced.
 
+### 3a. Recording an outcome after a policy cycle (operator flow)
+
+The policy-cycle output includes an `outcome_proposal` section — a prefilled, dry-run
+`record_outcome` payload with the run's `selected_nodes` mirrored into `node_ids` and a
+generated `cycle_ref`. It is **informational only**: the script never writes outcome edges.
+
+```bash
+# 1. Run the cycle; note the outcome_proposal block in the JSON output
+npm run policy:cycle -- --query "recent architecture decisions" --scope-room context-blocks
+
+# 2. Copy the payload, set `outcome` to your judgment (accept | revise | failed | unused),
+#    and call record_outcome dry-run first
+record_outcome { node_ids: [...], outcome: "accept", cycle_ref: "policy-...", dry_run: true }
+
+# 3. After your explicit confirmation, re-run with dry_run: false to apply
+```
+
 ---
 
 ## Local validation
