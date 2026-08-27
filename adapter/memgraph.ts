@@ -1087,6 +1087,102 @@ export class MemgraphClient {
     }
   }
 
+
+  // ── Phase 11: es-staleness axis (temporal validity flag) ───────────────────
+  // `es-staleness` is a cross-type KG edge, NOT lineage: it must never count toward
+  // height or feed getLineageSources/getLineageDerivatives. One-hop by design — a
+  // staleness flag is a single marker on the node whose basis moved. The subject is
+  // the flagged node (typically a synthesis whose `concerns` target changed); the
+  // object is the flag value (`source-changed`). Flagging is soft: this axis NEVER
+  // invalidates or mutates `es-status`, `es-source-type`, `es-outcome`, `rules-out`,
+  // or any lineage predicate — its setter scopes kg_invalidate to `es-staleness`
+  // only, same discipline as es-status / es-source-type.
+
+  /** Read a node's es-staleness flag. Returns the current value (e.g. "source-changed") or null when unflagged or on read failure. */
+  async getStaleness(nodeId: string): Promise<string | null> {
+    try {
+      const result = await this.kgQuery({
+        entity: nodeId,
+        direction: "outgoing",
+        predicate: "es-staleness",
+        recurse: false,
+        max_depth: 1,
+      });
+      const values = this.uniqueFromFactsByDirection(this.parseKgFacts(result), "outgoing");
+      return values.length > 0 ? values[0] : null;
+    } catch {
+      // non-fatal: a failed read reads as "unflagged", not an error
+      return null;
+    }
+  }
+
+  /**
+   * Aggregate es-staleness flags for a bounded set of node ids. One one-hop outgoing
+   * kg_query per id, run with bounded concurrency (8 — the only validated level in
+   * this repo), never more than `maxNodes` ids. Read failures degrade to null
+   * (unflagged) per node, matching getClosetSourceType's discipline.
+   */
+  async getStalenessFlags(
+    nodeIds: string[],
+    options?: { maxNodes?: number; concurrency?: number },
+  ): Promise<Map<string, string | null>> {
+    const ids = this.uniq(nodeIds).slice(0, Math.max(1, Number(options?.maxNodes ?? 50)));
+    const concurrency = Math.max(1, Math.min(8, Number(options?.concurrency ?? 8)));
+
+    const out = new Map<string, string | null>();
+    let cursor = 0;
+    const run = async () => {
+      while (cursor < ids.length) {
+        const index = cursor;
+        cursor += 1;
+        const id = ids[index];
+        try {
+          out.set(id, await this.getStaleness(id));
+        } catch {
+          out.set(id, null); // non-fatal: a failed read reads as "unflagged" (neutral)
+        }
+      }
+    };
+    const slots = Math.max(1, Math.min(concurrency, ids.length));
+    if (ids.length > 0) await Promise.all(Array.from({ length: slots }, () => run()));
+    return out;
+  }
+
+  /**
+   * Set a node's es-staleness flag. If a previous `es-staleness` value exists and
+   * differs, invalidate ONLY the prior `es-staleness` fact(s) for that node — never
+   * `es-status`, `es-source-type`, `es-outcome`, `rules-out`, or lineage predicates.
+   * Idempotent: when the current value already matches, no invalidation and no
+   * duplicate kg_add are issued. Returns true on success, false on failure — never
+   * throws in the normal flow.
+   */
+  async setStalenessFlag(nodeId: string, value: string, sourceRunId?: string): Promise<boolean> {
+    const id = this.asString(nodeId).trim();
+    if (!id) return false;
+    try {
+      const previous = await this.getStaleness(id);
+      if (previous === value) {
+        // Already current — no invalidation, no duplicate write.
+        return true;
+      }
+      if (previous && previous !== value) {
+        await this.kgInvalidate({ subject: id, predicate: "es-staleness", object: previous }).catch(() => ({}));
+      }
+      await this.kgAdd({
+        subject: id,
+        predicate: "es-staleness",
+        object: value,
+        source_closet: id,
+        source_run_id: sourceRunId,
+      });
+      return true;
+    } catch {
+      // non-fatal: leave the node unflagged rather than fail the caller
+      return false;
+    }
+  }
+
+
   // ── Phase 7: es-outcome axis (human-authoritative outcome feedback) ───────────
   // `es-outcome` edges record whether a closet actually helped a unit of work that
   // consulted it. Values: accept | revise | failed | unused. They ACCUMULATE —

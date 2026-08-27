@@ -18,6 +18,12 @@ export type RetrievalWeights = {
   // knowledge with an explicit label, not re-ranked. The field exists so the envelope
   // can report the (zero) contribution honestly; a future phase may give it magnitude.
   ruledOut: number;
+  // Phase 11 (unified memory): temporal-validity deprioritisation term. Weighted
+  // BELOW authority by construction — the flag is binary, so its maximum magnitude
+  // is exactly weights.staleness (0.5 at defaults), strictly under one full authority
+  // boost (±2 * weights.authority). A stale doc therefore still outranks an unflagged
+  // provisional synthesis on a factual query (the floor invariant stays intact).
+  staleness: number;
 };
 
 // Phase 2 (unified memory): optional retrieval intent. Omitted = no preference.
@@ -94,6 +100,13 @@ export type RankedScopedNode = {
     /** The ruled-out statement(s) this node points at (its topic/approach). */
     statements: string[];
   };
+  // Phase 11 (unified memory): temporal-validity marker. Present ONLY when this node
+  // carries an open es-staleness fact — its basis moved (the doc it was synthesised
+  // from changed since). Downstream renderers MUST surface the value so the reader
+  // knows the basis moved; unlike ruled_out this field ALSO affects score (the
+  // deprioritisation term in computeNodeScore), so a flagged node is both labelled
+  // and lowered — penalised, never filtered out.
+  stale?: { value: string };
 };
 
 
@@ -144,6 +157,18 @@ export type RetrievalExpansionResult = {
     ruled_out_expansion?: {
       enabled: boolean;
       nodes_labeled: number;
+      weight: number;
+    };
+    // Phase 11 (unified memory): envelope honesty for the staleness deprioritisation
+    // term. `nodes_flagged` counts ranked nodes carrying an open es-staleness fact
+    // (their basis moved); `applied` is true only when at least one of them had its
+    // score lowered. Present ONLY when some node was flagged — unflagged pools keep
+    // their envelopes byte-identical to pre-Phase-11 output (same empty-envelope rule
+    // as shared_skills_expansion / outcome_expansion).
+    stale_expansion?: {
+      enabled: boolean;
+      applied: boolean;
+      nodes_flagged: number;
       weight: number;
     };
     // Phase 10 (unified memory): envelope honesty for the shared-skills-wing scan.
@@ -202,6 +227,12 @@ const DEFAULT_WEIGHTS: RetrievalWeights = {
   // surfaced with an explicit label, not re-ranked. A future phase may change this;
   // until then the score formula is byte-identical to pre-Phase-9 for every node.
   ruledOut: 0,
+  // Phase 11: temporal-validity deprioritisation. The flag is binary (no accumulation),
+  // so the maximum contribution is exactly this weight — strictly below one full
+  // authority boost (±2 * weights.authority). A stale doc therefore still outranks an
+  // unflagged provisional synthesis on a factual query; unflagged nodes get exactly 0
+  // from this term (neutral by construction, like the outcome term).
+  staleness: 0.5,
 };
 
 // Phase 7 (unified memory): es-outcome axis. Values are written ONLY by the
@@ -236,6 +267,20 @@ export function outcomeScoreTerm(counts: OutcomeCounts, weight: number): number 
   const net = counts.accept - (counts.revise + counts.failed);
   const clamped = Math.max(-2, Math.min(2, net));
   return clamped * weight;
+}
+
+/**
+ * Phase 11 ranking term. The es-staleness flag is BINARY — a node either carries an
+ * open `es-staleness` fact (its basis moved) or not — so there is no accumulation and
+ * no clamp: flagged returns exactly −weight, unflagged returns exactly 0 (neutral by
+ * construction). Weighted below authority by DEFAULT_WEIGHTS (max magnitude 0.5 < one
+ * full authority boost of ±2), so a stale doc still outranks an unflagged provisional
+ * synthesis on a factual query (the floor invariant stays intact). The value itself is
+ * not part of the score — any open flag deprioritises equally; it is surfaced verbatim
+ * in the result for the reader to interpret.
+ */
+export function staleScoreTerm(flagged: boolean, weight: number): number {
+  return flagged ? -weight : 0;
 }
 
 // Phase 2 (unified memory): intent -> per-authority-type boost table.
@@ -410,6 +455,7 @@ function computeNodeScore(args: {
   alwaysIncludeLabels: Set<string>;
   authorityBoost: number;
   outcomeCounts?: OutcomeCounts;
+  staleValue?: string | null;
 }): number {
   const {
     node,
@@ -420,6 +466,7 @@ function computeNodeScore(args: {
     alwaysIncludeLabels,
     authorityBoost,
     outcomeCounts,
+    staleValue,
   } = args;
 
   let score = 0;
@@ -453,6 +500,18 @@ function computeNodeScore(args: {
   // Zero-history nodes get exactly 0 here — neutral by construction.
   if (outcomeCounts && outcomeCounts.total > 0) {
     score += outcomeScoreTerm(outcomeCounts, weights.outcome);
+  }
+
+  // Phase 11: temporal-validity deprioritisation. Binary flag, no accumulation — a
+  // node either carries an open es-staleness fact (its basis moved) or not. Weighted
+  // below authority by construction (max magnitude = weights.staleness = 0.5 < one
+  // full authority boost of ±2), and added BEFORE the factual floor clamp, exactly
+  // like the outcome term: a stale doc lowers the floor class's score, and clamped
+  // provisional synths pin to that (penalised) floor — "stale basis → less trust".
+  // Unflagged nodes get exactly 0 here — neutral by construction. The penalty lowers
+  // rank but NEVER removes the node: nothing in this term feeds a filter.
+  if (staleValue) {
+    score += staleScoreTerm(true, weights.staleness);
   }
 
   return score;
@@ -936,6 +995,31 @@ export async function expandScopedRetrieval(
     });
   }
 
+  // Phase 11 (unified memory): es-staleness flag read. Capability-gated like
+  // concerns/refined/outcome/rules-out: clients without getStalenessFlags degrade to
+  // pre-Phase-11 scoring with zero extra calls. One batch reader over the already-
+  // bounded pool (concurrency 8 + maxNodes enforced inside the client, same shape as
+  // getOutcomeCounts); read failures degrade to "unflagged" (neutral) per node, never
+  // abort. The flag applies to ANY node type that carries it — the CREATE path flags
+  // syntheses, but a doc drawer could in principle carry one too, and a flagged doc
+  // can enter the pool via the concerns block or the direct doc scan; the read side
+  // stays type-agnostic. The surfaced `stale` field is set BEFORE scoring so it rides
+  // into selected_nodes/ranked_nodes (the spread copies) automatically.
+  const stalenessEnabled = typeof client.getStalenessFlags === "function";
+  let staleValueByNode: Map<string, string> | undefined;
+  if (stalenessEnabled && scopedNodes.length > 0) {
+    const raw = await client
+      .getStalenessFlags(scopedNodes.map((n) => n.node_id))
+      .catch(() => new Map<string, string | null>());
+    staleValueByNode = new Map([...raw].filter(([, v]) => v !== null));
+  }
+  if (staleValueByNode && staleValueByNode.size > 0) {
+    for (const node of scopedNodes) {
+      const value = staleValueByNode.get(node.node_id);
+      if (value) node.stale = { value };
+    }
+  }
+
   const rankedNodes = scopedNodes.map((node) => {
     node.score = computeNodeScore({
       node,
@@ -946,6 +1030,7 @@ export async function expandScopedRetrieval(
       alwaysIncludeLabels: alwaysIncludeLabelSet,
       authorityBoost: intent ? INTENT_AUTHORITY_BOOSTS[intent][node.source_type] : 0,
       outcomeCounts: outcomeCountsByNode?.get(node.node_id),
+      staleValue: staleValueByNode?.get(node.node_id) ?? null,
     });
     return node;
   });
@@ -1049,6 +1134,19 @@ export async function expandScopedRetrieval(
             enabled: true,
             nodes_labeled: ruledOutNodesLabeled,
             weight: weights.ruledOut,
+          }
+        : undefined,
+      // Phase 11 envelope honesty: state what the staleness read did. Present ONLY when
+      // some node was flagged — unflagged pools (and clients without the reader) keep
+      // their envelopes byte-identical to pre-Phase-11 output, so this block never adds
+      // noise to the common case. `applied` is true whenever a node was flagged: the
+      // flag is binary and strictly negative, so any flag moved that node's score.
+      stale_expansion: stalenessEnabled && scopedNodes.length > 0 && staleValueByNode && staleValueByNode.size > 0
+        ? {
+            enabled: true,
+            applied: true,
+            nodes_flagged: staleValueByNode.size,
+            weight: weights.staleness,
           }
         : undefined,
       // Phase 10 envelope honesty: state what the shared-skills scan did. Present only

@@ -15,6 +15,7 @@ Scope: $ARGUMENTS (default: the current project's memory if no scope is given). 
 - Approximate backlog (source memories not yet represented in any synthesized-from summary node).
 - Whether that backlog is above the auto-consolidation volume threshold (ESHEPHERD_AUTO_CONSOLIDATION_MESSAGE_THRESHOLD) — i.e. whether a `/consolidate` is due.
 - Number of **re-synthesis candidates**: summary closets accumulating `es-outcome: revise` outcomes (rule: >= 2 revise AND more revise than accept over the recent window). This is a re-synthesis backlog, separate from the counts above — those closets were consulted and revised repeatedly, so their synthesis should be redone, not just validated.
+- Number of **staleness-flagged summary nodes** (`stale_source_changed_nodes`): consolidated summaries carrying an open `es-staleness: source-changed` flag (their basis doc changed after synthesis, set by `/ingest-docs`). This is a staleness backlog, separate from the counts above — those syntheses may still be correct but their basis moved, so they need re-validation or re-synthesis against the new source, never deletion. Flagged docs are surfaced by retrieval deprioritisation, not this count.
 
 Fast path for quick counts: call `palace_flock_status` first. It counts at parent-drawer granularity (not chunk rows) and returns the exact fields this command needs.
 
@@ -27,7 +28,8 @@ Fallback only if unavailable: use `palace_report` + aggregate graph queries, not
 3. Flag any low-confidence or single-source items in the sample that would be skipped.
 4. List existing closets with `es-status: provisional` in scope — synthesized but never validated/promoted. This is a different backlog than item 1: nothing new to synthesize, just nothing yet run through dream-auditor.
 5. List the re-synthesis candidates (bounded sample from the tool's `re_synthesis.candidates`) — closets with repeated `es-outcome: revise` history that should be re-synthesized. Note their accept/revise counts so the operator can weigh them.
+6. List the staleness-flagged summaries (bounded sample from the tool's `staleness.candidates`) — syntheses whose source doc changed since synthesis. Note each one's flag value so the operator can weigh re-validation vs re-synthesis; the flag is soft by design, so never delete the node on this basis alone.
 
 Read-only: do not call `add_drawer`, `kg_add`, `apply_merge`, or otherwise write/modify any memory.
 
-End with the next action, named: `/consolidate` if there's a normal backlog to clear, `/consolidate-deep` if it's been a while (validation/merge/relocation are also due), name the re-synthesis candidates when they exist (a targeted re-synthesis of those closets is the follow-up), or nothing further if counts are all at zero.
+End with the next action, named: `/consolidate` if there's a normal backlog to clear, `/consolidate-deep` if it's been a while (validation/merge/relocation are also due), name the re-synthesis candidates when they exist (a targeted re-synthesis of those closets is the follow-up), name the staleness-flagged summaries when they exist (re-validate or re-synthesize them against the changed doc — advisory, the flag is soft), or nothing further if counts are all at zero.

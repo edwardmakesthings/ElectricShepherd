@@ -484,3 +484,189 @@ test("setClosetSourceType never invalidates an es-status fact", async () => {
     assert.equal(call.args.predicate, "es-source-type");
   }
 });
+
+
+// ── Phase 11: es-staleness axis (temporal validity flag) ─────────────────────
+
+test("getStaleness reads the stamped value and returns null when unflagged", async () => {
+  const { client } = makeRecordingClient({
+    kg_query: (args) => {
+      if (args.predicate !== "es-staleness") return { facts: [] };
+      if (args.entity === "stamped") {
+        return { facts: [{ current: true, subject: "stamped", predicate: "es-staleness", object: "source-changed" }] };
+      }
+      return { facts: [] };
+    },
+  });
+
+  assert.equal(await client.getStaleness("stamped"), "source-changed");
+  assert.equal(await client.getStaleness("unflagged"), null);
+});
+
+test("getStaleness ignores invalidated facts and returns null on read failure (never throws)", async () => {
+  const { client } = makeRecordingClient({
+    kg_query: (args) => {
+      if (args.predicate === "es-staleness") {
+        if (args.entity === "retired") {
+          return { facts: [{ current: false, subject: "retired", predicate: "es-staleness", object: "source-changed" }] };
+        }
+        throw new Error("kg_query exploded");
+      }
+      return { facts: [] };
+    },
+  });
+
+  assert.equal(await client.getStaleness("retired"), null);
+  assert.equal(await client.getStaleness("broken"), null);
+});
+
+test("getStalenessFlags returns per-node markers and degrades to null on failure", async () => {
+  const { client } = makeRecordingClient({
+    kg_query: (args) => {
+      if (args.predicate !== "es-staleness") return { facts: [] };
+      if (args.entity === "node-a") {
+        return { facts: [{ current: true, subject: "node-a", predicate: "es-staleness", object: "source-changed" }] };
+      }
+      if (args.entity === "node-broken") throw new Error("kg_query exploded");
+      return { facts: [] };
+    },
+  });
+
+  const flags = await client.getStalenessFlags(["node-a", "node-b", "node-broken"]);
+  assert.equal(flags.get("node-a"), "source-changed");
+  assert.equal(flags.get("node-b"), null);
+  assert.equal(flags.get("node-broken"), null);
+});
+
+test("setStalenessFlag invalidates the previous es-staleness value then adds the new one", async () => {
+  const { client, calls } = makeRecordingClient({
+    kg_query: (args) => {
+      if (args.predicate === "es-staleness") {
+        return { facts: [{ current: true, subject: "drawer-1", predicate: "es-staleness", object: "source-changed" }] };
+      }
+      return { facts: [] };
+    },
+  });
+
+  const ok = await client.setStalenessFlag("drawer-1", "basis-drifted", "run-9");
+  assert.equal(ok, true);
+
+  const invalidates = calls.filter((call) => call.name.endsWith("kg_invalidate"));
+  assert.equal(invalidates.length, 1);
+  assert.deepEqual(invalidates[0].args, { subject: "drawer-1", predicate: "es-staleness", object: "source-changed" });
+
+  const adds = calls.filter((call) => call.name.endsWith("kg_add"));
+  assert.equal(adds.length, 1);
+  assert.deepEqual(adds[0].args, {
+    subject: "drawer-1",
+    predicate: "es-staleness",
+    object: "basis-drifted",
+    source_closet: "drawer-1",
+    source_run_id: "run-9",
+  });
+});
+
+test("setStalenessFlag skips invalidation and duplicate add when the value is already current", async () => {
+  const { client, calls } = makeRecordingClient({
+    kg_query: (args) => {
+      if (args.predicate === "es-staleness") {
+        return { facts: [{ current: true, subject: "drawer-1", predicate: "es-staleness", object: "source-changed" }] };
+      }
+      return { facts: [] };
+    },
+  });
+
+  const ok = await client.setStalenessFlag("drawer-1", "source-changed");
+  assert.equal(ok, true);
+  // Idempotent re-set: no invalidation, no duplicate kg_add.
+  assert.equal(calls.filter((call) => call.name.endsWith("kg_invalidate")).length, 0);
+  assert.equal(calls.filter((call) => call.name.endsWith("kg_add")).length, 0);
+});
+
+test("setStalenessFlag never invalidates es-status or es-source-type facts", async () => {
+  const { client, calls } = makeRecordingClient({
+    kg_query: (args) => {
+      if (args.predicate === "es-staleness") {
+        return { facts: [{ current: true, subject: "drawer-1", predicate: "es-staleness", object: "source-changed" }] };
+      }
+      if (args.predicate === "es-status") {
+        return { facts: [{ current: true, subject: "drawer-1", predicate: "es-status", object: "provisional" }] };
+      }
+      if (args.predicate === "es-source-type") {
+        return { facts: [{ current: true, subject: "drawer-1", predicate: "es-source-type", object: "synthesis" }] };
+      }
+      return { facts: [] };
+    },
+  });
+
+  await client.setStalenessFlag("drawer-1", "basis-drifted");
+
+  const invalidates = calls.filter((call) => call.name.endsWith("kg_invalidate"));
+  // Every invalidate is scoped to the es-staleness predicate only.
+  for (const call of invalidates) {
+    assert.equal(call.args.predicate, "es-staleness");
+  }
+  assert.ok(!invalidates.some((call) => call.args.predicate === "es-status"));
+  assert.ok(!invalidates.some((call) => call.args.predicate === "es-source-type"));
+});
+
+test("es-staleness is independently settable alongside es-status and es-source-type (no cross-predicate invalidation)", async () => {
+  const { client, calls } = makeRecordingClient({
+    kg_query: (args) => {
+      if (args.predicate === "es-status") {
+        return { facts: [{ current: true, subject: "drawer-1", predicate: "es-status", object: "provisional" }] };
+      }
+      if (args.predicate === "es-source-type") {
+        return { facts: [{ current: true, subject: "drawer-1", predicate: "es-source-type", object: "transcript" }] };
+      }
+      if (args.predicate === "es-staleness") {
+        return { facts: [{ current: true, subject: "drawer-1", predicate: "es-staleness", object: "source-changed" }] };
+      }
+      return { facts: [] };
+    },
+  });
+
+  await client.setClosetStatus("drawer-1", "active");
+  await client.setClosetSourceType("drawer-1", "synthesis");
+  await client.setStalenessFlag("drawer-1", "basis-drifted");
+
+  const invalidates = calls.filter((call) => call.name.endsWith("kg_invalidate"));
+  // Each setter only ever invalidates facts on ITS OWN predicate.
+  for (const call of invalidates) {
+    assert.ok(
+      ["es-status", "es-source-type", "es-staleness"].includes(call.args.predicate),
+      `unexpected invalidate predicate: ${call.args.predicate}`,
+    );
+  }
+  const statusInvalidates = invalidates.filter((call) => call.args.predicate === "es-status");
+  const typeInvalidates = invalidates.filter((call) => call.args.predicate === "es-source-type");
+  const stalenessInvalidates = invalidates.filter((call) => call.args.predicate === "es-staleness");
+  assert.equal(statusInvalidates.length, 1);
+  assert.equal(statusInvalidates[0].args.object, "provisional");
+  assert.equal(typeInvalidates.length, 1);
+  assert.equal(typeInvalidates[0].args.object, "transcript");
+  assert.equal(stalenessInvalidates.length, 1);
+  assert.equal(stalenessInvalidates[0].args.object, "source-changed");
+
+  // No setter touched another axis's facts.
+  assert.ok(!invalidates.some((call) => call.args.predicate === "es-status" && call.args.object !== "provisional"));
+  assert.ok(!invalidates.some((call) => call.args.predicate === "es-source-type" && call.args.object !== "transcript"));
+  assert.ok(!invalidates.some((call) => call.args.predicate === "es-staleness" && call.args.object !== "source-changed"));
+});
+
+test("setStalenessFlag returns false on failure without throwing", async () => {
+  const { client } = makeRecordingClient({
+    kg_add: () => {
+      throw new Error("kg_add exploded");
+    },
+  });
+
+  assert.equal(await client.setStalenessFlag("drawer-1", "source-changed"), false);
+});
+
+test("setStalenessFlag returns false for an empty node id without any writes", async () => {
+  const { client, calls } = makeRecordingClient({});
+
+  assert.equal(await client.setStalenessFlag("   ", "source-changed"), false);
+  assert.equal(calls.length, 0);
+});

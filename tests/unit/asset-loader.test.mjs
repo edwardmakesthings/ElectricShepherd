@@ -110,6 +110,20 @@ test("mergeWithoutOverride keeps user-defined entries", () => {
   assert.equal(merged.mapper.mode, "subagent");
 });
 
+test("memory-status command documents the staleness backlog category", () => {
+  const { commands } = loadPackagedAssets(repoRoot);
+  assert.match(
+    commands["memory-status"].template,
+    /staleness/i,
+    "quick counts must mention the staleness category"
+  );
+  assert.match(
+    commands["memory-status"].template,
+    /deprioritised|retrieval/i,
+    "must say flagged docs are surfaced by retrieval deprioritisation"
+  );
+});
+
 test("real bundled assets parse into the expected dreamer agents and commands", () => {
   const { agents, commands } = loadPackagedAssets(repoRoot);
   for (const name of ["dreamer", "dream-mapper", "dream-auditor"]) {

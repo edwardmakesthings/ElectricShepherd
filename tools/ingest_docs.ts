@@ -13,6 +13,10 @@
  *      the changed set by construction; every OPEN outgoing KG fact on a changed drawer
  *      is invalidated (the miner purges drawers but never touches the separate KG store),
  *      then the owned axis is re-stamped `es-source-type: doc`;
+ *   2b. Phase 11 synthesis staleness — for each changed doc, incoming `concerns` edges
+ *       identify syntheses that reference it; those syntheses are SOFT-flagged
+ *       `es-staleness: source-changed`. Flag only: the pass NEVER invalidates or deletes
+ *       a synthesis node or any of its lineage (the synthesis may still be correct).
  *   3. dry-run by default — the first call makes NO mutating MCP call (no mine, no KG).
  *
  * Bounded by construction: each snapshot walks at most `max_pages` pages of
@@ -88,6 +92,10 @@ export type IngestReport = {
   fact_check_failed?: number;
   restamped_doc?: number;
   stamp_failed?: number;
+  concerns_checked?: number;
+  synthesis_flagged?: number;
+  flag_failures?: number;
+  skipped_non_synthesis?: number;
   not_covered_by_page_cap?: number;
   truncated?: boolean;
   next_step?: string;
@@ -225,6 +233,132 @@ export async function invalidateAndRestamp(
   return { invalidated, invalidateFailed, factCheckFailed: false, restamped, stampFailed };
 }
 
+// ── Phase 11: es-staleness axis (soft flagging of concerned syntheses) ────────
+// `es-staleness` is a cross-type KG edge, NOT lineage: it must never count toward
+// height or feed any lineage traversal. One-hop by design — a staleness flag is a
+// single marker on the node whose basis moved. The subject is the flagged synthesis;
+// the object is the flag value (`source-changed`). Flagging is SOFT: this pass NEVER
+// invalidates or deletes a synthesis node or any of its lineage (the synthesis may
+// still be correct — silent deletion of possibly-good knowledge is worse than a flag).
+
+export const STALENESS_PREDICATE = "es-staleness";
+export const STALENESS_SOURCE_CHANGED = "source-changed";
+
+/**
+ * Read a node's current es-staleness value (single-marker axis), tolerant of
+ * failure. Mirrors `setStalenessFlag`'s read side in adapter/memgraph.ts: one-hop
+ * outgoing, predicate-scoped to `es-staleness`, open facts only; the first value
+ * wins. Returns null when unflagged OR when the query itself failed — the writer
+ * treats both as "no known prior", which is safe: a stale read can at worst leave
+ * one extra retired marker, never invalidate anything but es-staleness.
+ */
+export async function currentStalenessValue(call: CallTool, nodeId: string): Promise<string | null> {
+  let facts: Record<string, unknown>[];
+  try {
+    facts = parseFacts(
+      await call("kg_query", { entity: nodeId, direction: "outgoing", predicate: STALENESS_PREDICATE, recurse: false }),
+    );
+  } catch {
+    return null; // read failure degrades to "no known prior" — never aborts the pass
+  }
+  for (const fact of facts) {
+    if (fact.current !== true) continue;
+    const predicate = asText(fact.predicate || fact.relation || fact.type).trim();
+    if (predicate !== STALENESS_PREDICATE) continue;
+    const subject = asText(fact.subject || fact.source || fact.from || fact.head || fact.entity).trim();
+    if (subject !== nodeId) continue;
+    const value = asText(fact.object || fact.target || fact.to || fact.tail || fact.value).trim();
+    if (value) return value;
+  }
+  return null;
+}
+
+/**
+ * Open incoming `concerns` targets for one doc drawer (the syntheses that reference
+ * it), tolerant of failure. Returns null when the query itself failed — callers must
+ * treat that as "unknown", never as "no concerns". Deduped, order-preserving.
+ */
+export async function openIncomingConcerns(call: CallTool, docDrawerId: string): Promise<string[] | null> {
+  let facts: Record<string, unknown>[];
+  try {
+    facts = parseFacts(
+      await call("kg_query", { entity: docDrawerId, direction: "incoming", predicate: "concerns", recurse: false }),
+    );
+  } catch {
+    return null; // query failed — count as concerns_check_failed, never guess
+  }
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const fact of facts) {
+    if (fact.current !== true) continue;
+    const predicate = asText(fact.predicate || fact.relation || fact.type).trim();
+    if (predicate !== "concerns") continue;
+    // Incoming: the doc is the object; the synthesis is the subject.
+    const target = asText(fact.subject || fact.source || fact.from || fact.head || fact.entity).trim();
+    if (!target || seen.has(target)) continue;
+    seen.add(target);
+    out.push(target);
+  }
+  return out;
+}
+
+/**
+ * Phase 11 synthesis staleness pass for ONE changed doc drawer: find incoming
+ * `concerns` edges (syntheses referencing this doc) and soft-flag each one
+ * `es-staleness: source-changed`.
+ *
+ * Single-marker discipline (mirrors `setStalenessFlag` in adapter/memgraph.ts, which
+ * the tool-level call transport cannot invoke directly): read the node's current
+ * es-staleness value first; if it already equals `source-changed`, do NOTHING
+ * (idempotent re-run — no duplicate write); if a DIFFERENT open value exists,
+ * invalidate ONLY that prior `es-staleness` fact before adding. The invalidation is
+ * scoped to predicate `es-staleness` alone — never synthesis lineage or any other
+ * axis. Best-effort throughout; counts are returned, never thrown.
+ */
+export async function flagConcernedSyntheses(
+  call: CallTool,
+  docDrawerId: string,
+  sourceRunId?: string,
+): Promise<{ concernsChecked: number; flagged: number; flagFailed: number; skippedNonSynthesis: number }> {
+  const targets = await openIncomingConcerns(call, docDrawerId);
+  if (targets === null) return { concernsChecked: 0, flagged: 0, flagFailed: 1, skippedNonSynthesis: 0 };
+
+  let flagged = 0;
+  let flagFailed = 0;
+  let skippedNonSynthesis = 0;
+  for (const synthesisId of targets) {
+    // A synthesis node is drawer-shaped (`drawer_…`). Anything else that points at
+    // the doc via `concerns` is not a valid staleness subject — skip, don't flag.
+    if (!synthesisId.startsWith("drawer_")) {
+      skippedNonSynthesis += 1;
+      continue;
+    }
+    try {
+      const previous = await currentStalenessValue(call, synthesisId);
+      if (previous === STALENESS_SOURCE_CHANGED) {
+        // Already current — no invalidation, no duplicate write.
+        flagged += 1;
+        continue;
+      }
+      if (previous) {
+        // A different open marker exists: retire ONLY the prior es-staleness fact.
+        await call("kg_invalidate", { subject: synthesisId, predicate: STALENESS_PREDICATE, object: previous });
+      }
+      await call("kg_add", {
+        subject: synthesisId,
+        predicate: STALENESS_PREDICATE,
+        object: STALENESS_SOURCE_CHANGED,
+        source_closet: synthesisId,
+        ...(sourceRunId ? { source_run_id: sourceRunId } : {}),
+      });
+      flagged += 1;
+    } catch {
+      flagFailed += 1; // counted, never aborts the pass
+    }
+  }
+  return { concernsChecked: targets.length, flagged, flagFailed, skippedNonSynthesis };
+}
+
 /**
  * The ingest core (exported for unit testing).
  *
@@ -233,7 +367,9 @@ export async function invalidateAndRestamp(
  *
  * Apply: pre-snapshot → `mine {source, mode:"projects", wing, dry_run:false}` →
  * post-snapshot → invalidate open outgoing facts on changed drawer IDs (bounded) →
- * re-stamp `es-source-type: doc` on them.
+ * re-stamp `es-source-type: doc` on them → soft-flag syntheses whose `concerns`
+ * target a changed doc with `es-staleness: source-changed` (flag only, never
+ * invalidates a synthesis or its lineage).
  */
 export async function runDocIngest(args: {
   call: CallTool;
@@ -291,7 +427,8 @@ export async function runDocIngest(args: {
       next_step:
         `Apply will mine ${path} into ${wing}/${room} (reused=${reused}), re-mine changed files ` +
         `(mtime-detected by the substrate; unchanged files are skipped), invalidate KG facts on drawers whose content changed, ` +
-        `and re-stamp es-source-type: doc. Re-run with dry_run:false to apply.`,
+        `re-stamp es-source-type: doc, and soft-flag syntheses that concern a changed doc with es-staleness: source-changed. ` +
+        `Re-run with dry_run:false to apply.`,
     };
   }
 
@@ -396,6 +533,20 @@ export async function runDocIngest(args: {
     if (result.stampFailed) totals.stampFailed += 1;
   });
 
+  // PHASE 11: soft-flag syntheses whose `concerns` target a changed doc. Runs AFTER
+  // the hard invalidation pass so the flag is never swept up in it; bounded by the
+  // same maxChanged cap and concurrency pool (one incoming query + one kg_add per
+  // hit, no further fan-out). Flag only — no synthesis node or lineage is ever
+  // invalidated here.
+  const stalenessTotals = { concernsChecked: 0, flagged: 0, flagFailed: 0, skippedNonSynthesis: 0 };
+  await mapLimit(changed, concurrency, async (drawerId) => {
+    const result = await flagConcernedSyntheses(args.call, drawerId);
+    stalenessTotals.concernsChecked += result.concernsChecked;
+    stalenessTotals.flagged += result.flagged;
+    stalenessTotals.flagFailed += result.flagFailed;
+    stalenessTotals.skippedNonSynthesis += result.skippedNonSynthesis;
+  });
+
   const report: IngestReport = {
     ok: true,
     wing,
@@ -411,11 +562,15 @@ export async function runDocIngest(args: {
     fact_check_failed: totals.factCheckFailed,
     restamped_doc: totals.restampedDoc,
     stamp_failed: totals.stampFailed,
+    concerns_checked: stalenessTotals.concernsChecked,
+    synthesis_flagged: stalenessTotals.flagged,
+    flag_failures: stalenessTotals.flagFailed,
+    skipped_non_synthesis: stalenessTotals.skippedNonSynthesis,
     not_covered_by_page_cap: Math.max(0, post.total - post.ids.length),
     truncated,
   };
-  if (totals.invalidateFailed > 0 || totals.stampFailed > 0 || totals.factCheckFailed > 0) {
-    report.next_step = `Re-run /ingest-docs to retry ${totals.invalidateFailed} failed invalidation(s), ${totals.factCheckFailed} unread drawer(s), and ${totals.stampFailed} failed stamp(s).`;
+  if (totals.invalidateFailed > 0 || totals.stampFailed > 0 || totals.factCheckFailed > 0 || stalenessTotals.flagFailed > 0) {
+    report.next_step = `Re-run /ingest-docs to retry ${totals.invalidateFailed} failed invalidation(s), ${totals.factCheckFailed} unread drawer(s), ${totals.stampFailed} failed stamp(s), and ${stalenessTotals.flagFailed} failed staleness flag(s).`;
   }
   return report;
 }
@@ -432,7 +587,7 @@ function clampNumber(value: unknown, fallback: number, min: number, max: number)
 
 export default tool({
   description:
-    "Phase 3 doc ingestion: mine a docs directory into the project wing's `reference` room via substrate mempalace_mine (projects mode), stamp every ingested drawer es-source-type: doc, and on re-ingest invalidate stale KG facts on changed drawers (bounded pre/post ID snapshot + id-diff). Reuses an existing reference-like room via get_taxonomy before minting one. Dry-run by default — the first call makes no mutating MCP call; pass dry_run:false to apply.",
+    "Phase 3 doc ingestion: mine a docs directory into the project wing's `reference` room via substrate mempalace_mine (projects mode), stamp every ingested drawer es-source-type: doc, and on re-ingest invalidate stale KG facts on changed drawers (bounded pre/post ID snapshot + id-diff) and soft-flag syntheses that concern a changed doc with es-staleness: source-changed (flag only — never invalidates a synthesis). Reuses an existing reference-like room via get_taxonomy before minting one. Dry-run by default — the first call makes no mutating MCP call; pass dry_run:false to apply.",
   args: {
     path: tool.schema.string().describe("Directory of docs to mine (required)."),
     wing: tool.schema.string().optional().describe("Wing to mine into. Defaults to this project's wing."),

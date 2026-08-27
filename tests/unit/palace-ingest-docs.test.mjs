@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   boundedIdSnapshot,
+  flagConcernedSyntheses,
   invalidateAndRestamp,
   parseReminedFilesFromMineOutput,
   pickReferenceRoom,
@@ -62,6 +63,13 @@ function makeFakePalace({ taxonomy = {}, rooms = {}, mineBehavior = null, kgFact
       return result;
     }
     if (name === "kg_query") {
+      const predicate = payload.predicate;
+      // Predicate-scoped handlers win over the bare entity handler — lets a test
+      // model "outgoing facts" and "incoming concerns" on the same entity.
+      const scoped = predicate ? kgFacts[`${payload.entity}:${predicate}`] : undefined;
+      if (scoped === "throw") throw new Error(`kg_query failed for ${payload.entity} (${predicate})`);
+      if (typeof scoped === "function") return scoped(payload) || { facts: [] };
+      if (Array.isArray(scoped)) return { facts: scoped };
       const handler = kgFacts[payload.entity];
       if (handler === "throw") throw new Error(`kg_query failed for ${payload.entity}`);
       if (typeof handler === "function") return handler(payload) || { facts: [] };
@@ -386,4 +394,291 @@ test("invalidateAndRestamp: broad invalidation + doc re-stamp in one pass", asyn
   const adds = calls.filter((c) => c.name === "kg_add");
   assert.equal(adds.length, 1);
   assert.deepEqual(adds[0].args, { subject: "d9", predicate: "es-source-type", object: "doc", source_closet: "d9" });
+});
+
+// ── Phase 11: es-staleness axis (soft flagging of concerned syntheses) ─────────
+
+test("apply: changed doc with incoming concerns → synthesis is soft-flagged, never invalidated", async () => {
+  const mineBehavior = ({ state }) => {
+    // d2 is re-mined under the same id (content changed).
+    state[`${WING}/reference`] = [
+      { drawer_id: "d1", metadata: { source_file: "a.md" } },
+      { drawer_id: "d2", metadata: { source_file: "b.md" } },
+    ];
+    return { success: true, output: "[DRY RUN] b.md -> room:reference (1 drawer)" };
+  };
+
+  const { call, calls } = makeFakePalace({
+    taxonomy: { [WING]: { reference: 2 } },
+    rooms: {
+      [`${WING}/reference`]: [
+        { drawer_id: "d1", metadata: { source_file: "a.md" } },
+        { drawer_id: "d2", metadata: { source_file: "b.md" } },
+      ],
+    },
+    mineBehavior,
+    kgFacts: {
+      // d2's own outgoing facts (Phase 3 hard-invalidation scope).
+      d2: [fact("d2", "es-source-type", "doc"), fact("d2", "in-hall", "api")],
+      // Two syntheses concern d2: one already carries source-changed (idempotent,
+      // no writes), the other carries a DIFFERENT open value (must be retired first).
+      "d2:concerns": [
+        { subject: "drawer_syn_a", predicate: "concerns", object: "d2", current: true },
+        { subject: "drawer_syn_b", predicate: "concerns", object: "d2", current: true },
+      ],
+      // The staleness reads the flagging pass performs (single-marker discipline).
+      "drawer_syn_a:es-staleness": [
+        fact("drawer_syn_a", "es-staleness", "source-changed"),
+      ],
+      "drawer_syn_b:es-staleness": [
+        fact("drawer_syn_b", "es-staleness", "basis-drifted"),
+      ],
+    },
+  });
+
+  const report = await runDocIngest({ call, path: docDir, wing: WING, dryRun: false });
+
+  assert.equal(report.ok, true);
+  // The flagging pass ran over the changed doc and saw both concerns edges.
+  assert.equal(report.concerns_checked, 2);
+  assert.equal(report.synthesis_flagged, 2);
+  assert.equal(report.flag_failures, 0);
+
+  // Single-marker discipline: syn_a already carries source-changed → NO write for it;
+  // syn_b's prior marker is retired (scoped to es-staleness, exact old value), then the
+  // new marker is added with the exact Phase 11 triple.
+  const stalenessAdds = calls.filter((c) => c.name === "kg_add" && c.args.predicate === "es-staleness");
+  assert.equal(stalenessAdds.length, 1);
+  assert.deepEqual(stalenessAdds[0].args, {
+    subject: "drawer_syn_b",
+    predicate: "es-staleness",
+    object: "source-changed",
+    source_closet: "drawer_syn_b",
+  });
+
+  const stalenessInvalidates = calls.filter(
+    (c) => c.name === "kg_invalidate" && c.args.predicate === "es-staleness",
+  );
+  assert.equal(stalenessInvalidates.length, 1);
+  assert.deepEqual(stalenessInvalidates[0].args, {
+    subject: "drawer_syn_b",
+    predicate: "es-staleness",
+    object: "basis-drifted",
+  });
+
+  // CRITICAL guardrail: no synthesis node or lineage fact is invalidated OFF-AXIS —
+  // the only synthesis-subject invalidations are the scoped es-staleness retirements
+  // (syn_a's concerns edge, syn_b's synthesized-from lineage, etc. all survive).
+  const offAxisSynthesisInvalidations = calls.filter(
+    (c) =>
+      c.name === "kg_invalidate" &&
+      ["drawer_syn_a", "drawer_syn_b"].includes(c.args.subject) &&
+      c.args.predicate !== "es-staleness",
+  );
+  assert.equal(offAxisSynthesisInvalidations.length, 0);
+
+  // Phase 3 hard invalidation on the changed doc itself is unchanged.
+  const d2Invalidations = calls.filter((c) => c.name === "kg_invalidate" && c.args.subject === "d2");
+  assert.equal(d2Invalidations.length, 2);
+});
+
+test("apply: staleness flag failures are counted but do not abort ingest_docs", async () => {
+  const mineBehavior = ({ state }) => {
+    state[`${WING}/reference`] = [
+      { drawer_id: "d1", metadata: { source_file: "a.md" } },
+      { drawer_id: "d2", metadata: { source_file: "b.md" } },
+    ];
+    return { success: true, output: "[DRY RUN] b.md -> room:reference (1 drawer)" };
+  };
+
+  const { call, calls } = makeFakePalace({
+    taxonomy: { [WING]: { reference: 2 } },
+    rooms: {
+      [`${WING}/reference`]: [
+        { drawer_id: "d1", metadata: { source_file: "a.md" } },
+        { drawer_id: "d2", metadata: { source_file: "b.md" } },
+      ],
+    },
+    mineBehavior,
+    kgFacts: {
+      d2: [fact("d2", "es-source-type", "doc")],
+      "d2:concerns": [
+        { subject: "drawer_syn_a", predicate: "concerns", object: "d2", current: true },
+        { subject: "drawer_syn_b", predicate: "concerns", object: "d2", current: true },
+      ],
+      // The flag write for syn_a fails; syn_b's staleness read also fails (degrades to unflagged).
+      "__fail__:kg_add:drawer_syn_a": true,
+      "drawer_syn_b:es-staleness": "throw",
+    },
+  });
+
+  const report = await runDocIngest({ call, path: docDir, wing: WING, dryRun: false });
+
+  assert.equal(report.ok, true); // the pass did NOT abort
+  assert.equal(report.concerns_checked, 2);
+  assert.equal(report.synthesis_flagged, 1); // syn_b succeeded
+  assert.equal(report.flag_failures, 1); // syn_a's kg_add failed
+  assert.match(report.next_step || "", /retry/);
+
+  // Both add attempts are recorded (the fake logs the call before throwing); the
+  // report counters are what prove syn_a's write failed and was counted, not swallowed.
+  const stalenessAdds = calls.filter((c) => c.name === "kg_add" && c.args.predicate === "es-staleness");
+  assert.deepEqual(new Set(stalenessAdds.map((c) => c.args.subject)), new Set(["drawer_syn_a", "drawer_syn_b"]));
+  // No es-staleness invalidation was issued for either node (neither had a prior value).
+  const stalenessInvalidates = calls.filter(
+    (c) => c.name === "kg_invalidate" && c.args.predicate === "es-staleness",
+  );
+  assert.equal(stalenessInvalidates.length, 0);
+});
+
+test("apply: no concerns edges → no staleness writes, counters zero", async () => {
+  const mineBehavior = ({ state }) => {
+    state[`${WING}/reference`] = [
+      { drawer_id: "d1", metadata: { source_file: "a.md" } },
+      { drawer_id: "d2", metadata: { source_file: "b.md" } },
+    ];
+    return { success: true, output: "[DRY RUN] b.md -> room:reference (1 drawer)" };
+  };
+
+  const { call, calls } = makeFakePalace({
+    taxonomy: { [WING]: { reference: 2 } },
+    rooms: {
+      [`${WING}/reference`]: [
+        { drawer_id: "d1", metadata: { source_file: "a.md" } },
+        { drawer_id: "d2", metadata: { source_file: "b.md" } },
+      ],
+    },
+    mineBehavior,
+    kgFacts: { d2: [fact("d2", "es-source-type", "doc")] }, // no concerns edges anywhere
+  });
+
+  const report = await runDocIngest({ call, path: docDir, wing: WING, dryRun: false });
+
+  assert.equal(report.ok, true);
+  assert.equal(report.concerns_checked, 0);
+  assert.equal(report.synthesis_flagged, 0);
+  assert.equal(report.flag_failures, 0);
+  const stalenessWrites = calls.filter(
+    (c) => (c.name === "kg_add" || c.name === "kg_invalidate") && c.args.predicate === "es-staleness",
+  );
+  assert.equal(stalenessWrites.length, 0);
+});
+
+test("flagConcernedSyntheses: idempotent — already-current flag produces no writes at all", async () => {
+  const { call, calls } = makeFakePalace({
+    kgFacts: {
+      d2: [fact("d2", "es-source-type", "doc")],
+      "d2:concerns": [{ subject: "drawer_syn_a", predicate: "concerns", object: "d2", current: true }],
+      // syn_a already carries the exact flag value.
+      "drawer_syn_a:es-staleness": [fact("drawer_syn_a", "es-staleness", "source-changed")],
+    },
+  });
+
+  const result = await flagConcernedSyntheses(call, "d2");
+
+  assert.deepEqual(result, { concernsChecked: 1, flagged: 1, flagFailed: 0, skippedNonSynthesis: 0 });
+  // Single-marker idempotency: the read sees source-changed already current, so NO
+  // kg_add (not even an identical triple) and NO invalidation are issued.
+  const stalenessWrites = calls.filter(
+    (c) => (c.name === "kg_add" || c.name === "kg_invalidate") && c.args.predicate === "es-staleness",
+  );
+  assert.equal(stalenessWrites.length, 0);
+});
+
+test("flagConcernedSyntheses: different prior staleness value is invalidated, then source-changed set", async () => {
+  const { call, calls } = makeFakePalace({
+    kgFacts: {
+      d2: [fact("d2", "es-source-type", "doc")],
+      "d2:concerns": [{ subject: "drawer_syn_a", predicate: "concerns", object: "d2", current: true }],
+      // syn_a carries a DIFFERENT open es-staleness value.
+      "drawer_syn_a:es-staleness": [fact("drawer_syn_a", "es-staleness", "basis-drifted")],
+    },
+  });
+
+  const result = await flagConcernedSyntheses(call, "d2");
+
+  assert.deepEqual(result, { concernsChecked: 1, flagged: 1, flagFailed: 0, skippedNonSynthesis: 0 });
+
+  // The prior marker is retired — scoped to es-staleness with the EXACT old value.
+  const invalidates = calls.filter((c) => c.name === "kg_invalidate" && c.args.predicate === "es-staleness");
+  assert.equal(invalidates.length, 1);
+  assert.deepEqual(invalidates[0].args, { subject: "drawer_syn_a", predicate: "es-staleness", object: "basis-drifted" });
+
+  // Then the new single marker is added.
+  const adds = calls.filter((c) => c.name === "kg_add" && c.args.predicate === "es-staleness");
+  assert.equal(adds.length, 1);
+  assert.deepEqual(adds[0].args, {
+    subject: "drawer_syn_a",
+    predicate: "es-staleness",
+    object: "source-changed",
+    source_closet: "drawer_syn_a",
+  });
+
+  // Ordering: invalidate the old value before adding the new one.
+  const invIdx = calls.findIndex((c) => c.name === "kg_invalidate" && c.args.predicate === "es-staleness");
+  const addIdx = calls.findIndex((c) => c.name === "kg_add" && c.args.predicate === "es-staleness");
+  assert.ok(invIdx >= 0 && invIdx < addIdx, "prior value must be invalidated before the new marker is added");
+
+  // Guardrail: nothing outside es-staleness was touched (no concerns/lineage invalidation).
+  const offAxisInvalidates = calls.filter(
+    (c) => c.name === "kg_invalidate" && c.args.predicate !== "es-staleness",
+  );
+  assert.equal(offAxisInvalidates.length, 0);
+});
+
+test("flagConcernedSyntheses: retired prior value is not re-invalidated; unflagged node gets a bare add", async () => {
+  const { call, calls } = makeFakePalace({
+    kgFacts: {
+      d2: [fact("d2", "es-source-type", "doc")],
+      "d2:concerns": [
+        { subject: "drawer_syn_a", predicate: "concerns", object: "d2", current: true },
+        { subject: "drawer_syn_b", predicate: "concerns", object: "d2", current: true },
+      ],
+      // syn_a's prior value is already RETIRED (current: false) — must not be re-invalidated.
+      "drawer_syn_a:es-staleness": [{ subject: "drawer_syn_a", predicate: "es-staleness", object: "basis-drifted", current: false }],
+      // syn_b has no es-staleness facts at all (unflagged).
+    },
+  });
+
+  const result = await flagConcernedSyntheses(call, "d2");
+
+  assert.deepEqual(result, { concernsChecked: 2, flagged: 2, flagFailed: 0, skippedNonSynthesis: 0 });
+  // No invalidation at all — the retired value is not a live marker.
+  const invalidates = calls.filter((c) => c.name === "kg_invalidate");
+  assert.equal(invalidates.length, 0);
+  // One bare add per node.
+  const adds = calls.filter((c) => c.name === "kg_add" && c.args.predicate === "es-staleness");
+  assert.deepEqual(new Set(adds.map((c) => c.args.subject)), new Set(["drawer_syn_a", "drawer_syn_b"]));
+});
+
+test("flagConcernedSyntheses: non-drawer concern targets are skipped and counted", async () => {
+  const { call, calls } = makeFakePalace({
+    kgFacts: {
+      d2: [fact("d2", "es-source-type", "doc")],
+      "d2:concerns": [
+        { subject: "drawer_syn_a", predicate: "concerns", object: "d2", current: true },
+        { subject: "not-a-drawer", predicate: "concerns", object: "d2", current: true },
+      ],
+    },
+  });
+
+  const result = await flagConcernedSyntheses(call, "d2");
+
+  assert.deepEqual(result, { concernsChecked: 2, flagged: 1, flagFailed: 0, skippedNonSynthesis: 1 });
+  const stalenessAdds = calls.filter((c) => c.name === "kg_add" && c.args.predicate === "es-staleness");
+  assert.equal(stalenessAdds.length, 1);
+  assert.equal(stalenessAdds[0].args.subject, "drawer_syn_a");
+});
+
+test("flagConcernedSyntheses: incoming concerns query failure is counted as a flag failure", async () => {
+  const { call } = makeFakePalace({
+    kgFacts: {
+      d2: [fact("d2", "es-source-type", "doc")],
+      "d2:concerns": "throw",
+    },
+  });
+
+  const result = await flagConcernedSyntheses(call, "d2");
+
+  assert.deepEqual(result, { concernsChecked: 0, flagged: 0, flagFailed: 1, skippedNonSynthesis: 0 });
 });

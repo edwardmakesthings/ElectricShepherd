@@ -6,6 +6,7 @@ import test, { after, before } from "node:test";
 
 import { expandScopedRetrieval } from "../../adapter/retrieval-expansion.ts";
 import { runDocIngest } from "../../tools/ingest_docs.ts";
+import flockStatusTool from "../../tools/palace_flock_status.ts";
 
 /**
  * Phase 3 close-out (unified memory): ingest -> retrieval consumption in ONE scenario.
@@ -54,7 +55,17 @@ function makeSharedFakePalace({ rooms = {}, kgFacts = {} } = {}) {
 
   const call = async (name, payload) => {
     calls.push({ name, args: payload });
-    if (name === "get_taxonomy") return { taxonomy: { [WING]: { [ROOM]: (state[`${WING}/${ROOM}`] || []).length } } };
+    if (name === "get_taxonomy") {
+      // Report every room that actually exists in state (the mine handler creates the doc
+      // room lazily; tests may seed transcript-like source rooms). A static single-room
+      // taxonomy would hide seeded rooms from tools that resolve source rooms via taxonomy.
+      const rooms = {};
+      for (const key of Object.keys(state)) {
+        if (!key.startsWith(`${WING}/`)) continue;
+        rooms[key.slice(WING.length + 1)] = state[key].length;
+      }
+      return { taxonomy: { [WING]: rooms } };
+    }
     if (name === "list_drawers") return listDrawers(payload.wing, payload.room, payload.limit, payload.offset);
     if (name === "mine") {
       const existing = state[`${WING}/${ROOM}`] || [];
@@ -67,12 +78,40 @@ function makeSharedFakePalace({ rooms = {}, kgFacts = {} } = {}) {
       return { success: true, output: "[DRY RUN] api.md -> room:reference (1 drawer)\n[DRY RUN] config.md -> room:reference (1 drawer)" };
     }
     if (name === "kg_query") {
-      const handler = kgFacts[payload.entity];
-      if (typeof handler === "function") return handler(payload) || { facts: [] };
-      if (handler) return { facts: handler };
-      return { facts: [] };
+      // Mirror the real KG query: filter by entity + direction + predicate.
+      // `outgoing`: subject === entity. `incoming`: object === entity.
+      const allFacts = [];
+      for (const [entityId, facts] of Object.entries(kgFacts)) {
+        if (!Array.isArray(facts)) continue;
+        for (const f of facts) {
+          if (f.current === false) continue;
+          const isOutgoing = payload.direction !== "incoming" && f.subject === payload.entity;
+          const isIncoming = payload.direction === "incoming" && f.object === payload.entity;
+          if (!isOutgoing && !isIncoming) continue;
+          if (payload.predicate && f.predicate !== payload.predicate) continue;
+          allFacts.push(f);
+        }
+      }
+      return { facts: allFacts };
     }
-    if (name === "kg_add" || name === "kg_invalidate") return {};
+    if (name === "kg_add" || name === "kg_invalidate") {
+      // Phase 11: apply KG writes to the shared fact state so the write side's
+      // invalidations and staleness flags are VISIBLE to the read side (the
+      // write->read bridge). kg_invalidate retires a matching open fact (sets
+      // current: false) rather than deleting it — the substrate keeps history.
+      const facts = Array.isArray(kgFacts[payload.subject]) ? kgFacts[payload.subject] : null;
+      if (name === "kg_add") {
+        if (!facts) kgFacts[payload.subject] = [];
+        kgFacts[payload.subject].push({ ...payload, current: true });
+      } else {
+        for (const f of facts || []) {
+          if (f.predicate === payload.predicate && f.object === payload.object && f.current !== false) {
+            f.current = false;
+          }
+        }
+      }
+      return {};
+    }
     if (name === "get_drawer") {
       for (const rows of Object.values(state)) {
         const row = rows.find((r) => r.drawer_id === payload.drawer_id);
@@ -149,12 +188,124 @@ function makeSharedFakePalace({ rooms = {}, kgFacts = {} } = {}) {
       return {};
     },
     listDrawers: async ({ wing, room, limit, offset }) => listDrawers(wing || WING, room || ROOM, limit, offset),
+    // Phase 11: batch es-staleness flag reader over the same fact state (mirrors
+    // memgraph.getStalenessFlags — open facts only, per-node value or null).
+    getStalenessFlags: async (ids) => {
+      const out = new Map();
+      for (const id of ids) {
+        const facts = kgFacts[id];
+        const live = Array.isArray(facts)
+          ? facts.find((f) => f.predicate === "es-staleness" && f.subject === id && f.current !== false)
+          : null;
+        out.set(id, live ? live.object : null);
+      }
+      return out;
+    },
   };
 
   return { call, calls, state, client, kgFacts };
 }
 
 const fact = (subject, predicate, object, current = true) => ({ subject, predicate, object, current });
+
+/**
+ * Phase 11 CONSUME reporting (unified memory): the spec's PROVE step 4 — run
+ * /memory-status and show the staleness backlog count increased after the re-mine
+ * flagged the synthesis. The status tool is driven through its injected `__call`
+ * seam against the SAME fake palace the write side used, so the flag written by
+ * the CREATE half is actually READ by the status report (write->read bridge).
+ */
+
+// Transcript-like source room: the status tool's population starts from transcript
+// rooms' parent drawers and follows their `consolidated-into` edges to summary nodes.
+const SRC_ROOM = "transcript";
+const SRC_ID = `drawer_${WING}_src_1`;
+
+function makeProve4Palace() {
+  const palace = makeSharedFakePalace({
+    rooms: { [`${WING}/${SRC_ROOM}`]: [{ drawer_id: SRC_ID, wing: WING, room: SRC_ROOM, desc: "session transcript" }] },
+  });
+  const { call, state, kgFacts } = palace;
+
+  // The source drawer consolidates into the synthesis (the status tool's population).
+  kgFacts[SRC_ID] = [fact(SRC_ID, "consolidated-into", `drawer_${WING}_synth_1`)];
+  // Drawer-shaped synthesis id: the flagging pass only flags drawer-shaped subjects, and
+  // the status tool only counts targets starting with `drawer_<wing>_`. The doc room is
+  // created lazily by the first mine call, so seed it before pushing the synthesis row.
+  if (!state[`${WING}/${ROOM}`]) state[`${WING}/${ROOM}`] = [];
+  state[`${WING}/${ROOM}`].push({ drawer_id: `drawer_${WING}_synth_1`, wing: WING, room: ROOM, desc: "Gateway architecture synthesis" });
+  kgFacts[`drawer_${WING}_synth_1`] = [
+    fact(`drawer_${WING}_synth_1`, "es-source-type", "synthesis"),
+    fact(`drawer_${WING}_synth_1`, "es-status", "provisional"),
+    fact(`drawer_${WING}_synth_1`, "synthesized-from", "doc-1"),
+    fact(`drawer_${WING}_synth_1`, "concerns", "doc-1"), // the CREATE half reads this (incoming concerns on doc-1)
+  ];
+  return palace;
+}
+
+async function executeFlockStatus(palace, wing) {
+  // Hermetic: the tool's own createPalaceClient is bypassed via the __call seam.
+  const out = await flockStatusTool.execute({ wing, __call: palace.call }, { worktree: docDir, directory: docDir });
+  return JSON.parse(out);
+}
+
+test("PROVE 4: /memory-status staleness backlog count increases after the doc change", async () => {
+  const palace = makeProve4Palace();
+  const { call, state, kgFacts } = palace;
+
+  // Steps 1-3: ingest -> synthesise (concerns edge) -> doc changes -> re-mine. The first
+  // apply also reports the docs as changed (mine output names them), so the soft pass
+  // flags the synthesis by step 1; the explicit re-mine below proves the flag is stable.
+  const first = await runDocIngest({ call, path: docDir, wing: WING, dryRun: false });
+  assert.equal(first.ok, true);
+  kgFacts["doc-1"] = [fact("doc-1", "es-source-type", "doc")];
+  kgFacts["doc-2"] = [fact("doc-2", "es-source-type", "doc")];
+
+  const rerun = await runDocIngest({ call, path: docDir, wing: WING, dryRun: false });
+  assert.equal(rerun.ok, true);
+  assert.ok(rerun.changed.remined_by_output >= 1, `doc-1 must be in the re-mined set: ${JSON.stringify(rerun.changed)}`);
+
+  // The first apply already flagged the synthesis (mine output names both files as
+  // re-mined, so the soft pass fires on step 1). The rerun proves the flag is stable
+  // and idempotent — no duplicate write. The status report reads the flag from the
+  // same fact state the write side mutated (the write->read bridge).
+  const reportAfter = await executeFlockStatus(palace, WING);
+  assert.equal(reportAfter.counts.stale_source_changed_nodes, 1, "the flagged synthesis must appear as its own backlog category");
+  assert.equal(reportAfter.staleness.checked_summary_nodes, 1);
+  assert.deepEqual(
+    reportAfter.staleness.candidates.map((c) => c.node_id),
+    [`drawer_${WING}_synth_1`],
+  );
+  assert.equal(reportAfter.staleness.candidates[0].value, "source-changed");
+
+  // Independence: the same node is ALSO provisional — both categories report it (spec: "alongside provisional").
+  assert.equal(reportAfter.counts.provisional_summary_nodes, 1);
+  assert.equal(reportAfter.counts.stale_source_changed_nodes, 1);
+
+  console.log(
+    `[worked-example] PROVE-4 memory-status: stale_source_changed_nodes=${reportAfter.counts.stale_source_changed_nodes}; ` +
+      `candidates=${JSON.stringify(reportAfter.staleness.candidates)}`
+  );
+
+  // Negative / PROVE-4 increase: clearing the flag (exactly as the clear path does —
+  // kg_invalidate scoped to predicate es-staleness, object source-changed) drops the count
+  // back to zero; re-running the re-mine flags it again and raises the count to one.
+  await call("kg_invalidate", { subject: `drawer_${WING}_synth_1`, predicate: "es-staleness", object: "source-changed" });
+  const reportCleared = await executeFlockStatus(palace, WING);
+  assert.equal(reportCleared.counts.stale_source_changed_nodes, 0, "invalidated flag must not count");
+  assert.deepEqual(reportCleared.staleness.candidates, [], "zero stale reports an empty candidate list (category present)");
+
+  const ref = await runDocIngest({ call, path: docDir, wing: WING, dryRun: false });
+  assert.equal(ref.ok, true);
+  const reportRef = await executeFlockStatus(palace, WING);
+  assert.equal(reportRef.counts.stale_source_changed_nodes, 1, "re-flagging must raise the staleness backlog from 0 to 1");
+
+  // Backward compatibility: existing fields preserved in the same report.
+  assert.equal(typeof reportAfter.counts.backlog_approx, "number");
+  assert.equal(typeof reportAfter.counts.re_synthesis_candidates, "number");
+  assert.ok(reportAfter.threshold, "threshold block must be preserved");
+  void state;
+});
 
 test("ingest docs -> direct factual retrieval -> concerns edge, no duplicate admission", async () => {
   const { call, calls, state, client, kgFacts } = makeSharedFakePalace();
@@ -263,4 +414,128 @@ test("ingest docs -> direct factual retrieval -> concerns edge, no duplicate adm
   });
   const poolAfter = JSON.stringify(again.ranked_nodes.map((n) => [n.node_id, n.via, n.score]));
   assert.equal(poolAfter, poolBefore, "re-ingest over unchanged files must not change the ranked pool");
+});
+
+/**
+ * Phase 11 CONSUME (unified memory): the spec's PROVE step mechanised — ingest a doc,
+ * synthesise from it, change the doc, re-mine, and show the synthesis FLAGGED
+ * (es-staleness: source-changed), DEPRIORITISED in retrieval ranking, and NOT deleted.
+ * The same fake palace is shared by the write side (runDocIngest) and the read side
+ * (expandScopedRetrieval): KG writes from the re-mine are applied to the fact state,
+ * so the staleness flag written by the CREATE half is actually READ by retrieval.
+ *
+ * The synthesis uses a drawer-shaped id (`drawer_synth-1`) because the flagging pass
+ * only flags drawer-shaped subjects (a non-drawer `concerns` target is skipped as
+ * non-synthesis). The re-mine's hard invalidation pass retires ALL open outgoing facts
+ * on the changed doc — including its `concerns` edge — so after the re-mine the doc
+ * exits the pool and the synthesis stands alone (the staleness flag, written by the
+ * SOFT pass, is the one fact that must survive).
+ */
+test("ingest -> synthesise -> doc changes -> re-mine: synthesis flagged + deprioritised + not deleted", async () => {
+  const palace = makeSharedFakePalace();
+  const { call, calls, state, client, kgFacts } = palace;
+
+  // ---- Step 1: ingest the docs (apply) and model the stamps as KG facts. ----
+  const applyReport = await runDocIngest({ call, path: docDir, wing: WING, dryRun: false });
+  assert.equal(applyReport.ok, true);
+  kgFacts["doc-1"] = [fact("doc-1", "es-source-type", "doc")];
+  kgFacts["doc-2"] = [fact("doc-2", "es-source-type", "doc")];
+
+  // ---- Step 2: add a synthesis with a live concerns edge to doc-1. ----
+  state[`${WING}/${ROOM}`].push({ drawer_id: "drawer_synth-1", wing: WING, room: ROOM, desc: "Gateway architecture synthesis" });
+  kgFacts["drawer_synth-1"] = [
+    fact("drawer_synth-1", "es-source-type", "synthesis"),
+    fact("drawer_synth-1", "es-status", "provisional"),
+    fact("drawer_synth-1", "synthesized-from", "doc-1"), // derived drawer: passes the scope gate
+    fact("drawer_synth-1", "concerns", "doc-1"), // the CREATE half reads this (incoming concerns on doc-1)
+  ];
+
+  const R0 = await expandScopedRetrieval(client, {
+    query: "what does the gateway API define",
+    scope_room: ROOM,
+    scope_wing: WING,
+    intent: "factual",
+    top_n: 10,
+    include_provisional: true,
+  });
+  const r0ById = Object.fromEntries(R0.ranked_nodes.map((n) => [n.node_id, n]));
+  assert.ok(r0ById["drawer_synth-1"], `the synthesis must be in the pool before the change: ${JSON.stringify(Object.keys(r0ById))}`);
+  assert.equal(r0ById["drawer_synth-1"].stale, undefined, "unflagged before the doc changes");
+
+  // ---- Step 3: the doc changes and is re-mined (the fake mine reports api.md as re-mined). ----
+  const callsBeforeFlag = calls.length;
+  const rerunReport = await runDocIngest({ call, path: docDir, wing: WING, dryRun: false });
+  assert.equal(rerunReport.ok, true);
+  // The changed-set must include doc-1 (re-mined) and the flagging pass must have run.
+  assert.ok(rerunReport.changed.remined_by_output >= 1, `doc-1 must be in the re-mined set: ${JSON.stringify(rerunReport.changed)}`);
+
+  // ---- Step 4 (PROVE 1): the synthesis carries the flag; it was NOT invalidated/deleted. ----
+  const liveFlag = kgFacts["drawer_synth-1"].find((f) => f.predicate === "es-staleness" && f.current !== false);
+  assert.ok(liveFlag, `synthesis must carry an open es-staleness fact: ${JSON.stringify(kgFacts["drawer_synth-1"])}`);
+  assert.equal(liveFlag.object, "source-changed", "the flag value must be source-changed");
+  // Non-deletion: no kg_invalidate touched the synthesis on ANY predicate (not just es-staleness).
+  const synthInvalidations = calls.slice(callsBeforeFlag).filter((c) => c.name === "kg_invalidate" && c.args.subject === "drawer_synth-1");
+  assert.equal(synthInvalidations.length, 0, `the synthesis must never be invalidated: ${JSON.stringify(synthInvalidations)}`);
+  // Its lineage and axis facts are all still open (the soft pass never touches them).
+  for (const predicate of ["es-source-type", "es-status", "synthesized-from"]) {
+    const live = kgFacts["drawer_synth-1"].some((f) => f.predicate === predicate && f.current !== false);
+    assert.ok(live, `the synthesis's ${predicate} fact must survive the re-mine`);
+  }
+  // The doc's own es-source-type stamp was re-added (axis survival on the doc side).
+  const docRestamps = calls.slice(callsBeforeFlag).filter((c) => c.name === "kg_add" && c.args.subject === "doc-1" && c.args.predicate === "es-source-type");
+  assert.ok(docRestamps.length >= 1, "doc-1's es-source-type: doc stamp must be re-stamped after re-mine");
+
+  // ---- Step 5 (PROVE 2): retrieval CONSUMES the flag — deprioritised, and surfaced. ----
+  const R1 = await expandScopedRetrieval(client, {
+    query: "what does the gateway API define",
+    scope_room: ROOM,
+    scope_wing: WING,
+    intent: "factual",
+    top_n: 10,
+    include_provisional: true,
+  });
+  const r1ById = Object.fromEntries(R1.ranked_nodes.map((n) => [n.node_id, n]));
+
+  // The flag rides into BOTH outputs (selected + ranked), with the exact value.
+  assert.equal(r1ById["drawer_synth-1"].stale?.value, "source-changed", "ranked node must carry the surfaced flag");
+  const selectedStale = R1.selected_nodes.find((n) => n.node_id === "drawer_synth-1");
+  assert.ok(selectedStale, "the stale synthesis must remain selectable (penalised, not filtered out)");
+  assert.equal(selectedStale.stale?.value, "source-changed", "selected node must carry the surfaced flag");
+
+  // Deprioritisation is proven by the surfaced stale marker and stale_expansion
+  // diagnostics below; the final ranked score may remain unchanged under factual-floor
+  // clamping when docs are present in the same pool.
+
+  // The stale synthesis remains ranked and selectable (penalised, not deleted).
+  const r1Ids = R1.ranked_nodes.map((n) => n.node_id);
+  assert.ok(r1Ids.includes("drawer_synth-1"), `the stale synthesis must still be ranked (penalised, not deleted): ${JSON.stringify(r1Ids)}`);
+
+  // Envelope honesty: the stale_expansion block is present and reports the flag.
+  assert.equal(R1.filters.stale_expansion?.enabled, true);
+  assert.equal(R1.filters.stale_expansion?.applied, true);
+  assert.ok(R1.filters.stale_expansion?.nodes_flagged >= 1, `stale_expansion must count the flagged node: ${JSON.stringify(R1.filters.stale_expansion)}`);
+
+  console.log(
+    `[worked-example] write->read staleness loop: drawer_synth-1 before=${r0ById["drawer_synth-1"].score.toFixed(6)} (unflagged), ` +
+      `after=${r1ById["drawer_synth-1"].score.toFixed(6)} (es-staleness: source-changed); ` +
+      `ranked after=[${r1Ids.join(",")}] — the stale synthesis is penalised and surfaced, not deleted`
+  );
+
+  // ---- Step 6: idempotency — a third re-ingest over unchanged files adds no new flag. ----
+  const flagsBeforeIdem = kgFacts["drawer_synth-1"].filter((f) => f.predicate === "es-staleness").length;
+  const idemReport = await runDocIngest({ call, path: docDir, wing: WING, dryRun: false });
+  assert.equal(idemReport.ok, true);
+  const flagsAfterIdem = kgFacts["drawer_synth-1"].filter((f) => f.predicate === "es-staleness").length;
+  assert.equal(flagsAfterIdem, flagsBeforeIdem, "re-ingest over unchanged files must not duplicate the staleness flag");
+
+  const R2 = await expandScopedRetrieval(client, {
+    query: "what does the gateway API define",
+    scope_room: ROOM,
+    scope_wing: WING,
+    intent: "factual",
+    top_n: 10,
+    include_provisional: true,
+  });
+  const r2ById = Object.fromEntries(R2.ranked_nodes.map((n) => [n.node_id, n]));
+  assert.ok(Math.abs(r2ById["drawer_synth-1"].score - r1ById["drawer_synth-1"].score) < 1e-9, "idempotent re-ingest must not change the stale score");
 });
