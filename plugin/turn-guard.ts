@@ -51,7 +51,7 @@ import {
 } from "../adapter/turn-guard-helpers.ts"
 import type { AutoConsolidationTrigger, MemcoreInjectionRecord } from "../adapter/turn-guard-helpers.ts"
 import { loadPackagedAssets, mergeWithoutOverride, loadInstructionPaths, dedupeAppendInstructions } from "../adapter/asset-loader.ts"
-import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts"
+import { loadRuntimeConfig } from "../adapter/runtime-config.ts"
 import deleteDrawersTool from "../tools/delete_drawers.ts"
 import moveDrawersTool from "../tools/move_drawers.ts"
 import captureTranscriptTool from "../tools/capture_transcript.ts"
@@ -130,6 +130,15 @@ const DEFAULT_LOOP_GUARD_ENABLED = true
 const DEFAULT_LOOP_REPEAT_THRESHOLD = 3
 const DEFAULT_LOOP_WINDOW_SIZE = 12
 const DEFAULT_LOOP_MAX_INTERVENTIONS = 3
+const DEFAULT_TASK_WATCHDOG_ENABLED = true
+const DEFAULT_TASK_WATCHDOG_THRESHOLD = 3
+const DEFAULT_TASK_WATCHDOG_MAX_ESCALATIONS = 2
+const DEFAULT_TASK_SERIALIZE_TYPES = ["explore", "review-diff", "run-tests"]
+const DEFAULT_TASK_SERIALIZE_COOLDOWN_MS = 15000
+const DEFAULT_TASK_SWAP_QWEN_MATCH = "qwen"
+const DEFAULT_TASK_SWAP_QWEN_TO_MODEL = "litellm/implementer-gemma4-31b"
+const DEFAULT_TASK_SWAP_GEMMA_MATCH = "gemma"
+const DEFAULT_TASK_SWAP_GEMMA_TO_MODEL = "litellm/implementer-qwen3.8-27b"
 // Any mutating tool is progress, and clears the repeat window. This is what
 // keeps a legitimate verify cycle (typecheck -> edit -> typecheck) from ever
 // looking like a loop, without needing to exempt the verify tools themselves.
@@ -280,19 +289,6 @@ const CHECKPOINT_MODES = new Set(["build", "plan"])
 // Set ESHEPHERD_RETRY_ENABLED=true to opt back in — useful if you encounter a
 // provider that still mis-signals. Expected to be a no-op on llama-server.
 
-function getBoolEnv(name: string, fallback: boolean): boolean {
-  const raw = String(process?.env?.[name] ?? "").trim().toLowerCase()
-  if (!raw) return fallback
-  if (["1", "true", "yes", "on"].includes(raw)) return true
-  if (["0", "false", "no", "off"].includes(raw)) return false
-  return fallback
-}
-
-function getNumberEnv(name: string, fallback: number): number {
-  const raw = Number(process?.env?.[name] ?? "")
-  return Number.isFinite(raw) && raw > 0 ? raw : fallback
-}
-
 function parseCSV(value: string | undefined): string[] {
   if (!value) return []
   return value
@@ -327,7 +323,7 @@ function findSessionID(event: any): string {
   )
 }
 
-function resolveScopeDirFromEvent(event: any, fallbackDirectory: string): string {
+function resolveScopeDirFromEvent(event: any, fallbackDirectory: string, configuredScopeDir?: string): string {
   const candidates = [
     event?.properties?.cwd,
     event?.properties?.workingDirectory,
@@ -335,7 +331,7 @@ function resolveScopeDirFromEvent(event: any, fallbackDirectory: string): string
     event?.properties?.path,
     event?.properties?.info?.cwd,
     event?.message?.info?.cwd,
-    process?.env?.ESHEPHERD_SCOPE_DIR,
+    configuredScopeDir,
     fallbackDirectory,
     process.cwd(),
   ]
@@ -580,15 +576,24 @@ function killProcessTree(child: { pid?: number; kill: (signal?: string) => boole
   }
 }
 
-async function loadMemcoreMarkdown(projectRoot: string, scopeDir: string): Promise<{ markdown: string; loaderInfo: Record<string, unknown> }> {
+async function loadMemcoreMarkdown(
+  projectRoot: string,
+  scopeDir: string,
+  options: {
+    maxScopes: number
+    directFileName: string
+    storeRoots: string[]
+    timeoutMs: number
+  },
+): Promise<{ markdown: string; loaderInfo: Record<string, unknown> }> {
   const loaderScript = join(projectRoot, "scripts", "run-mem-core-loader.ts")
   if (!existsSync(loaderScript)) {
     return { markdown: "", loaderInfo: { reason: "loader-script-not-found", loaderScript } }
   }
 
-  const maxScopes = String(getNumberEnv("ESHEPHERD_MEMCORE_MAX_SCOPES", DEFAULT_MEMCORE_MAX_SCOPES))
-  const directFileName = String(process?.env?.ESHEPHERD_MEMCORE_DIRECT_FILE || "memory.md")
-  const storeRoots = parseCSV(process?.env?.ESHEPHERD_MEMCORE_STORE_ROOTS || ".electric-shepherd/memory")
+  const maxScopes = String(options.maxScopes)
+  const directFileName = options.directFileName
+  const storeRoots = options.storeRoots
 
   const args = [
     "--experimental-strip-types",
@@ -615,7 +620,7 @@ async function loadMemcoreMarkdown(projectRoot: string, scopeDir: string): Promi
       cwd: projectRoot,
       encoding: "utf8",
       maxBuffer: 2 * 1024 * 1024,
-      timeout: getNumberEnv("ESHEPHERD_MEMCORE_LOADER_TIMEOUT_MS", DEFAULT_MEMCORE_LOADER_TIMEOUT_MS),
+      timeout: options.timeoutMs,
       killSignal: "SIGKILL",
     })
     return {
@@ -683,6 +688,7 @@ async function runSourceCaptureCommand(
   projectRoot: string,
   sid: string,
   eventType: string,
+  options: { command: string; timeoutMs: number },
 ): Promise<{
   attempted: boolean;
   ok: boolean;
@@ -696,7 +702,7 @@ async function runSourceCaptureCommand(
   drawer_id?: string;
   location?: string;
 }> {
-  const configured = String(process?.env?.ESHEPHERD_SOURCE_CAPTURE_CMD || "").trim()
+  const configured = String(options.command || "").trim()
   // Default script resolves inside the ElectricShepherd install (ESHEPHERD_ROOT),
   // not the consumer project's root — the script ships with the plugin and
   // sources its env from there (repo .env -> sibling docker/.env fallback).
@@ -712,7 +718,7 @@ async function runSourceCaptureCommand(
       cwd: ESHEPHERD_ROOT,
       encoding: "utf8",
       maxBuffer: 2 * 1024 * 1024,
-      timeout: getNumberEnv("ESHEPHERD_SOURCE_CAPTURE_TIMEOUT_MS", DEFAULT_SOURCE_CAPTURE_TIMEOUT_MS),
+      timeout: options.timeoutMs,
       killSignal: "SIGKILL",
       env: {
         ...process.env,
@@ -928,6 +934,56 @@ function normalizeModelSpec(candidate: any): { providerID: string; modelID: stri
   return null
 }
 
+function resolveTaskSwapTarget(args: {
+  current?: { providerID: string; modelID: string } | undefined
+  qwenMatch: string
+  qwenToProvider?: string
+  qwenToModel?: string
+  gemmaMatch: string
+  gemmaToProvider?: string
+  gemmaToModel?: string
+  fallbackProvider?: string
+  fallbackModel?: string
+}): { providerID: string; modelID: string; reason: string } | null {
+  const currentProvider = String(args.current?.providerID ?? "").trim()
+  const currentModel = String(args.current?.modelID ?? "").trim().toLowerCase()
+  const qwenMatch = String(args.qwenMatch || "").trim().toLowerCase()
+  const gemmaMatch = String(args.gemmaMatch || "").trim().toLowerCase()
+
+  const qwenToModel = String(args.qwenToModel || "").trim()
+  const qwenToProvider = String(args.qwenToProvider || currentProvider).trim()
+  const gemmaToModel = String(args.gemmaToModel || "").trim()
+  const gemmaToProvider = String(args.gemmaToProvider || currentProvider).trim()
+  const fallbackModel = String(args.fallbackModel || "").trim()
+  const fallbackProvider = String(args.fallbackProvider || currentProvider).trim()
+
+  if (qwenMatch && currentModel.includes(qwenMatch) && qwenToProvider && qwenToModel) {
+    return {
+      providerID: qwenToProvider,
+      modelID: qwenToModel,
+      reason: `matched ${qwenMatch}`,
+    }
+  }
+
+  if (gemmaMatch && currentModel.includes(gemmaMatch) && gemmaToProvider && gemmaToModel) {
+    return {
+      providerID: gemmaToProvider,
+      modelID: gemmaToModel,
+      reason: `matched ${gemmaMatch}`,
+    }
+  }
+
+  if (fallbackProvider && fallbackModel) {
+    return {
+      providerID: fallbackProvider,
+      modelID: fallbackModel,
+      reason: "fallback",
+    }
+  }
+
+  return null
+}
+
 function getPromptRoutingFromToolHook(input: any, output: any): {
   agent?: string
   model?: { providerID: string; modelID: string }
@@ -991,7 +1047,28 @@ export const TurnGuard = async ({ client, directory }: any) => {
     cwd: projectRoot,
     env: process.env,
   })
-  applyRuntimeConfigToEnv(process.env, runtimeConfig)
+  const cfgRaw = (path: string): string => {
+    const parts = path.split(".").filter(Boolean)
+    let node: any = runtimeConfig.valuesByPath
+    for (const part of parts) {
+      if (!node || typeof node !== "object") return ""
+      node = node?.[part]
+    }
+    if (typeof node === "undefined" || node === null) return ""
+    return String(node)
+  }
+  const cfgBool = (path: string, fallback: boolean): boolean => {
+    const raw = cfgRaw(path).trim().toLowerCase()
+    if (!raw) return fallback
+    if (["1", "true", "yes", "on"].includes(raw)) return true
+    if (["0", "false", "no", "off"].includes(raw)) return false
+    return fallback
+  }
+  const cfgNum = (path: string, fallback: number): number => {
+    const raw = Number(cfgRaw(path))
+    return Number.isFinite(raw) && raw > 0 ? raw : fallback
+  }
+  const cfgCSV = (path: string): string[] => parseCSV(cfgRaw(path))
 
   const globalState = globalThis as any
   const instanceDirs: Set<string> =
@@ -1015,58 +1092,55 @@ export const TurnGuard = async ({ client, directory }: any) => {
   console.log("[turn-guard] registering hooks: event(message.updated, session.idle, session.compacted, session.started), experimental.session.compacting, tool.execute.before")
   console.log(
     `[turn-guard] retry guard: ${
-      getBoolEnv("ESHEPHERD_RETRY_ENABLED", DEFAULT_RETRY_ENABLED)
-        ? `ON (ESHEPHERD_RETRY_ENABLED=true, max ${Math.max(1, Number(process?.env?.ESHEPHERD_MAX_RETRIES_PER_SESSION) || DEFAULT_MAX_RETRIES_PER_SESSION)}/session)`
+      cfgBool("retry.enabled", DEFAULT_RETRY_ENABLED)
+        ? `ON (ESHEPHERD_RETRY_ENABLED=true, max ${Math.max(1, cfgNum("retry.maxRetriesPerSession", DEFAULT_MAX_RETRIES_PER_SESSION))}/session)`
         : "OFF by default (ESHEPHERD_RETRY_ENABLED=true to opt in)"
     }`,
   )
-  const memcoreInjectEnabled = getBoolEnv("ESHEPHERD_MEMCORE_REINJECT_ENABLED", false)
-  const memcoreInjectOnIdle = getBoolEnv("ESHEPHERD_MEMCORE_REINJECT_ON_IDLE", false)
-  const memcoreInjectOnCompacted = getBoolEnv("ESHEPHERD_MEMCORE_REINJECT_ON_COMPACT", false)
-  const memcoreInjectOnStart = getBoolEnv("ESHEPHERD_MEMCORE_REINJECT_ON_START", false)
+  const memcoreInjectEnabled = cfgBool("memcore.reinject.enabled", false)
+  const memcoreInjectOnIdle = cfgBool("memcore.reinject.onIdle", false)
+  const memcoreInjectOnCompacted = cfgBool("memcore.reinject.onCompact", false)
+  const memcoreInjectOnStart = cfgBool("memcore.reinject.onStart", false)
   // Diagnostic probe for the experimental.session.compacting hook input shape.
   // Logs keys/types/lengths only (never message or prompt text). It did its job
   // 2026-08-19 (answered: input is { sessionID } only, no messages). Default OFF
   // now — a full config echo per compaction is noise once the shape is known;
   // set ESHEPHERD_PRECOMPACT_PROBE=true to re-enable when debugging the hook.
-  const precompactProbeEnabled = getBoolEnv("ESHEPHERD_PRECOMPACT_PROBE", false)
+  const precompactProbeEnabled = cfgBool("compaction.precompactProbeEnabled", false)
   // Post-compaction transcript archiver: on session.compacted, read back the full
   // session log (compaction RETAINS prior messages — verified against the SDK:
   // session.messages returns them, delimited by summary:true/agent:compaction
   // markers) and write the just-compacted region to a durable file so the facts
   // the summary dropped are not lost. Default ON; ESHEPHERD_COMPACT_ARCHIVE=false
   // to disable. Declared with the other env reads, above every use.
-  const compactArchiveEnabled = getBoolEnv("ESHEPHERD_COMPACT_ARCHIVE", true)
+  const compactArchiveEnabled = cfgBool("compaction.archiveEnabled", true)
   // Replace OpenCode's default compaction prompt with the pointer-oriented
   // template above. Independent of the mem-core switches: the template is about
   // summary SHAPE, mem-core is about what extra facts ride along.
-  const compactPromptOverrideEnabled = getBoolEnv("ESHEPHERD_COMPACT_PROMPT_OVERRIDE", true)
-  const memcoreMaxChars = getNumberEnv("ESHEPHERD_MEMCORE_MAX_CHARS", DEFAULT_MEMCORE_MAX_CHARS)
-  const injectionCooldownMs = getNumberEnv("ESHEPHERD_MEMCORE_INJECTION_COOLDOWN_MS", DEFAULT_INJECTION_COOLDOWN_MS)
-  const retryEnabled = getBoolEnv("ESHEPHERD_RETRY_ENABLED", DEFAULT_RETRY_ENABLED)
-  const retryDisabledAgents = toLowerSet(parseCSV(process?.env?.ESHEPHERD_RETRY_DISABLED_AGENTS))
-  const retryDisabledModes = toLowerSet(parseCSV(process?.env?.ESHEPHERD_RETRY_DISABLED_MODES))
-  const consolidationWriteGuardEnabled = getBoolEnv("ESHEPHERD_CONSOLIDATION_WRITE_GUARD_ENABLED", true)
-  const sourceCaptureVerifyEnabled = getBoolEnv("ESHEPHERD_SOURCE_CAPTURE_VERIFY_ENABLED", true)
+  const compactPromptOverrideEnabled = cfgBool("compaction.promptOverrideEnabled", true)
+  const memcoreMaxChars = cfgNum("memcore.maxChars", DEFAULT_MEMCORE_MAX_CHARS)
+  const injectionCooldownMs = cfgNum("memcore.injectionCooldownMs", DEFAULT_INJECTION_COOLDOWN_MS)
+  const retryEnabled = cfgBool("retry.enabled", DEFAULT_RETRY_ENABLED)
+  const retryDisabledAgents = toLowerSet(cfgCSV("retry.disabledAgents"))
+  const retryDisabledModes = toLowerSet(cfgCSV("retry.disabledModes"))
+  const consolidationWriteGuardEnabled = cfgBool("consolidation.writeGuardEnabled", true)
+  const sourceCaptureVerifyEnabled = cfgBool("sourceCapture.verifyEnabled", true)
   // Automatic consolidation ("consolidate in the background"): ON by default.
   // It triggers memory writes in the background, throttled by the idle delay,
   // message threshold, and cooldown below — so "on" means "occasionally," not
   // "every turn." Set ESHEPHERD_AUTO_CONSOLIDATION_ENABLED=false to opt out
   // (e.g. ad-hoc opencode runs on machines where background writes are unwanted).
-  const autoConsolidationEnabled = getBoolEnv("ESHEPHERD_AUTO_CONSOLIDATION_ENABLED", true)
-  const autoConsolidationOnIdle = getBoolEnv("ESHEPHERD_AUTO_CONSOLIDATION_ON_IDLE", true)
-  const autoConsolidationOnCompact = getBoolEnv("ESHEPHERD_AUTO_CONSOLIDATION_ON_COMPACT", true)
-  const autoConsolidationIdleDelayMs = getNumberEnv("ESHEPHERD_AUTO_CONSOLIDATION_IDLE_DELAY_MS", DEFAULT_AUTOCONSOLIDATION_IDLE_DELAY_MS)
-  const autoConsolidationMessageThreshold = getNumberEnv("ESHEPHERD_AUTO_CONSOLIDATION_MESSAGE_THRESHOLD", DEFAULT_AUTOCONSOLIDATION_MESSAGE_THRESHOLD)
-  const autoConsolidationCooldownMs = getNumberEnv("ESHEPHERD_AUTO_CONSOLIDATION_COOLDOWN_MS", DEFAULT_AUTOCONSOLIDATION_COOLDOWN_MS)
-  const autoConsolidationTimeoutMs = getNumberEnv("ESHEPHERD_AUTO_CONSOLIDATION_TIMEOUT_MS", DEFAULT_AUTOCONSOLIDATION_TIMEOUT_MS)
-  const autoConsolidationMaxTrackedSessions = getNumberEnv(
-    "ESHEPHERD_AUTO_CONSOLIDATION_MAX_TRACKED_SESSIONS",
-    DEFAULT_AUTOCONSOLIDATION_MAX_TRACKED_SESSIONS,
-  )
+  const autoConsolidationEnabled = cfgBool("consolidation.auto.enabled", true)
+  const autoConsolidationOnIdle = cfgBool("consolidation.auto.onIdle", true)
+  const autoConsolidationOnCompact = cfgBool("consolidation.auto.onCompact", true)
+  const autoConsolidationIdleDelayMs = cfgNum("consolidation.auto.idleDelayMs", DEFAULT_AUTOCONSOLIDATION_IDLE_DELAY_MS)
+  const autoConsolidationMessageThreshold = cfgNum("consolidation.auto.messageThreshold", DEFAULT_AUTOCONSOLIDATION_MESSAGE_THRESHOLD)
+  const autoConsolidationCooldownMs = cfgNum("consolidation.auto.cooldownMs", DEFAULT_AUTOCONSOLIDATION_COOLDOWN_MS)
+  const autoConsolidationTimeoutMs = cfgNum("commands.autoConsolidation.timeoutMs", DEFAULT_AUTOCONSOLIDATION_TIMEOUT_MS)
+  const autoConsolidationMaxTrackedSessions = cfgNum("consolidation.auto.maxTrackedSessions", DEFAULT_AUTOCONSOLIDATION_MAX_TRACKED_SESSIONS)
   const allowedConsolidationWriters = new Set(
-    parseCSV(process?.env?.ESHEPHERD_ALLOWED_CONSOLIDATION_WRITERS).length > 0
-      ? parseCSV(process?.env?.ESHEPHERD_ALLOWED_CONSOLIDATION_WRITERS).map((item) => item.toLowerCase())
+    cfgCSV("consolidation.allowedWriters").length > 0
+      ? cfgCSV("consolidation.allowedWriters").map((item) => item.toLowerCase())
       : DEFAULT_ALLOWED_CONSOLIDATION_WRITERS,
   )
 
@@ -1084,7 +1158,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
   const retryChainBySession = new Map<string, number>()
   const maxRetriesPerSession = Math.max(
     1,
-    Number(process?.env?.ESHEPHERD_MAX_RETRIES_PER_SESSION) || DEFAULT_MAX_RETRIES_PER_SESSION,
+    cfgNum("retry.maxRetriesPerSession", DEFAULT_MAX_RETRIES_PER_SESSION),
   )
   const startupConfirmedBySession = new Set<string>()
   const inspectedStopBySession = new Map<string, Set<string>>()
@@ -1094,19 +1168,50 @@ export const TurnGuard = async ({ client, directory }: any) => {
   // mutating tool and by each intervention (so the nudge gets a clean slate).
   const toolWindowBySession = new Map<string, string[]>()
   const loopInterventionsBySession = new Map<string, number>()
-  const loopGuardEnabled = getBoolEnv("ESHEPHERD_LOOPGUARD_ENABLED", DEFAULT_LOOP_GUARD_ENABLED)
-  const loopRepeatThreshold = getNumberEnv("ESHEPHERD_LOOPGUARD_THRESHOLD", DEFAULT_LOOP_REPEAT_THRESHOLD)
-  const loopWindowSize = getNumberEnv("ESHEPHERD_LOOPGUARD_WINDOW", DEFAULT_LOOP_WINDOW_SIZE)
-  const loopMaxInterventions = getNumberEnv("ESHEPHERD_LOOPGUARD_MAX_INTERVENTIONS", DEFAULT_LOOP_MAX_INTERVENTIONS)
+  const taskWindowBySession = new Map<string, string[]>()
+  const taskEscalationsBySession = new Map<string, number>()
+  const taskRecentLaunchBySession = new Map<string, Map<string, number>>()
+  const loopGuardEnabled = cfgBool("loopGuard.enabled", DEFAULT_LOOP_GUARD_ENABLED)
+  const loopRepeatThreshold = cfgNum("loopGuard.repeatThreshold", DEFAULT_LOOP_REPEAT_THRESHOLD)
+  const loopWindowSize = cfgNum("loopGuard.windowSize", DEFAULT_LOOP_WINDOW_SIZE)
+  const loopMaxInterventions = cfgNum("loopGuard.maxInterventions", DEFAULT_LOOP_MAX_INTERVENTIONS)
   const loopMutationTools = toLowerSet(
-    process?.env?.ESHEPHERD_LOOPGUARD_MUTATION_TOOLS
-      ? parseCSV(process.env.ESHEPHERD_LOOPGUARD_MUTATION_TOOLS)
+    cfgCSV("loopGuard.mutationTools").length > 0
+      ? cfgCSV("loopGuard.mutationTools")
       : DEFAULT_LOOP_MUTATION_TOOLS,
   )
   const loopExemptTools = toLowerSet([
     ...DEFAULT_LOOP_EXEMPT_TOOLS,
-    ...parseCSV(process?.env?.ESHEPHERD_LOOPGUARD_EXEMPT_TOOLS),
+    ...cfgCSV("loopGuard.exemptTools"),
   ])
+  const taskWatchdogEnabled = cfgBool("taskWatchdog.enabled", DEFAULT_TASK_WATCHDOG_ENABLED)
+  const taskWatchdogThreshold = cfgNum("taskWatchdog.repeatThreshold", DEFAULT_TASK_WATCHDOG_THRESHOLD)
+  const taskWatchdogMaxEscalations = cfgNum("taskWatchdog.maxEscalations", DEFAULT_TASK_WATCHDOG_MAX_ESCALATIONS)
+  const taskSerializeCsv = cfgCSV("taskWatchdog.serializeTypes")
+  const taskSerializeTypes = toLowerSet(
+    taskSerializeCsv.length > 0 ? taskSerializeCsv : DEFAULT_TASK_SERIALIZE_TYPES,
+  )
+  const taskSerializeCooldownMs = cfgNum("taskWatchdog.serializeCooldownMs", DEFAULT_TASK_SERIALIZE_COOLDOWN_MS)
+  const taskSwapQwenMatch = String(
+    cfgRaw("taskWatchdog.swap.qwen.match") || DEFAULT_TASK_SWAP_QWEN_MATCH,
+  )
+    .trim()
+    .toLowerCase()
+  const taskSwapQwenToProvider = String(cfgRaw("taskWatchdog.swap.qwen.toProvider") || "").trim()
+  const taskSwapQwenToModel = String(
+    cfgRaw("taskWatchdog.swap.qwen.toModel") || DEFAULT_TASK_SWAP_QWEN_TO_MODEL,
+  ).trim()
+  const taskSwapGemmaMatch = String(
+    cfgRaw("taskWatchdog.swap.gemma.match") || DEFAULT_TASK_SWAP_GEMMA_MATCH,
+  )
+    .trim()
+    .toLowerCase()
+  const taskSwapGemmaToProvider = String(cfgRaw("taskWatchdog.swap.gemma.toProvider") || "").trim()
+  const taskSwapGemmaToModel = String(
+    cfgRaw("taskWatchdog.swap.gemma.toModel") || DEFAULT_TASK_SWAP_GEMMA_TO_MODEL,
+  ).trim()
+  const taskFallbackProvider = String(cfgRaw("taskWatchdog.fallback.provider") || "").trim()
+  const taskFallbackModel = String(cfgRaw("taskWatchdog.fallback.model") || "").trim()
   // Loop-guard status banner. Emitted HERE, after the consts above are
   // initialized — emitting it earlier is a temporal-dead-zone ReferenceError
   // that throws before the hooks object returns, silently disabling the plugin.
@@ -1119,18 +1224,18 @@ export const TurnGuard = async ({ client, directory }: any) => {
   )
 
   // --- deliberation-spiral guard state ---
-  const spiralGuardEnabled = getBoolEnv("ESHEPHERD_SPIRALGUARD_ENABLED", DEFAULT_SPIRAL_GUARD_ENABLED)
-  const spiralInvestigateThreshold = getNumberEnv("ESHEPHERD_SPIRALGUARD_INVESTIGATE_THRESHOLD", DEFAULT_SPIRAL_INVESTIGATE_THRESHOLD)
-  const spiralReversalThreshold = getNumberEnv("ESHEPHERD_SPIRALGUARD_REVERSAL_THRESHOLD", DEFAULT_SPIRAL_REVERSAL_THRESHOLD)
-  const spiralMaxInterventions = getNumberEnv("ESHEPHERD_SPIRALGUARD_MAX_INTERVENTIONS", DEFAULT_SPIRAL_MAX_INTERVENTIONS)
-  const spiralExemptReflection = getBoolEnv("ESHEPHERD_SPIRALGUARD_EXEMPT_REFLECTION", true)
-  const spiralGuardDisabledModes = toLowerSet(parseCSV(process?.env?.ESHEPHERD_SPIRALGUARD_DISABLED_MODES))
-  const spiralGuardDisabledAgents = toLowerSet(parseCSV(process?.env?.ESHEPHERD_SPIRALGUARD_DISABLED_AGENTS))
+  const spiralGuardEnabled = cfgBool("spiralGuard.enabled", DEFAULT_SPIRAL_GUARD_ENABLED)
+  const spiralInvestigateThreshold = cfgNum("spiralGuard.investigateThreshold", DEFAULT_SPIRAL_INVESTIGATE_THRESHOLD)
+  const spiralReversalThreshold = cfgNum("spiralGuard.reversalThreshold", DEFAULT_SPIRAL_REVERSAL_THRESHOLD)
+  const spiralMaxInterventions = cfgNum("spiralGuard.maxInterventions", DEFAULT_SPIRAL_MAX_INTERVENTIONS)
+  const spiralExemptReflection = cfgBool("spiralGuard.exemptReflection", true)
+  const spiralGuardDisabledModes = toLowerSet(cfgCSV("spiralGuard.disabledModes"))
+  const spiralGuardDisabledAgents = toLowerSet(cfgCSV("spiralGuard.disabledAgents"))
   const spiralExemptProviders = toLowerSet(
-    parseCSV(process?.env?.ESHEPHERD_SPIRALGUARD_EXEMPT_PROVIDERS).concat(DEFAULT_SPIRAL_EXEMPT_PROVIDERS),
+    cfgCSV("spiralGuard.exemptProviders").concat(DEFAULT_SPIRAL_EXEMPT_PROVIDERS),
   )
   const spiralExemptModelPrefixes = toLowerSet(
-    parseCSV(process?.env?.ESHEPHERD_SPIRALGUARD_EXEMPT_MODEL_PREFIXES).concat(
+    cfgCSV("spiralGuard.exemptModelPrefixes").concat(
       DEFAULT_SPIRAL_EXEMPT_MODEL_PREFIXES,
     ),
   )
@@ -1161,6 +1266,11 @@ export const TurnGuard = async ({ client, directory }: any) => {
       loopRepeatThreshold,
       loopWindowSize,
       loopMaxInterventions,
+      taskWatchdogEnabled,
+      taskWatchdogThreshold,
+      taskWatchdogMaxEscalations,
+      taskSerializeTypes: [...taskSerializeTypes],
+      taskSerializeCooldownMs,
       spiralGuardEnabled,
       spiralInvestigateThreshold,
       spiralReversalThreshold,
@@ -1321,7 +1431,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
     if (args.reason === "compacted" && !memcoreInjectOnCompacted) return false
     if (args.reason === "started" && !memcoreInjectOnStart) return false
 
-    let scopeDir = resolveScopeDirFromEvent(args.event, rootDirectory)
+    let scopeDir = resolveScopeDirFromEvent(args.event, rootDirectory, cfgRaw("memcore.scopeDir"))
     const pathFromMessages = extractPathFromMessageParts(args.messages || [])
     if (pathFromMessages) {
       scopeDir = existsSync(pathFromMessages) && !pathFromMessages.endsWith(".md") && !pathFromMessages.endsWith(".ts")
@@ -1329,7 +1439,12 @@ export const TurnGuard = async ({ client, directory }: any) => {
         : dirname(pathFromMessages)
     }
 
-    const { markdown, loaderInfo } = await loadMemcoreMarkdown(projectRoot, scopeDir)
+    const { markdown, loaderInfo } = await loadMemcoreMarkdown(projectRoot, scopeDir, {
+      maxScopes: cfgNum("memcore.maxScopes", DEFAULT_MEMCORE_MAX_SCOPES),
+      directFileName: cfgRaw("memcore.directFileName") || "memory.md",
+      storeRoots: cfgCSV("memcore.storeRoots").length > 0 ? cfgCSV("memcore.storeRoots") : [".electric-shepherd/memory"],
+      timeoutMs: cfgNum("commands.memcoreLoader.timeoutMs", DEFAULT_MEMCORE_LOADER_TIMEOUT_MS),
+    })
     if (!markdown) {
       appendMemcoreContextLog(projectRoot, {
         type: "memcore-reinject",
@@ -1503,7 +1618,10 @@ export const TurnGuard = async ({ client, directory }: any) => {
   async function verifySourceCapture(sid: string, eventType: string): Promise<void> {
     if (!sourceCaptureVerifyEnabled) return
 
-    const result = await runSourceCaptureCommand(projectRoot, sid, eventType)
+    const result = await runSourceCaptureCommand(projectRoot, sid, eventType, {
+      command: cfgRaw("commands.sourceCapture.command"),
+      timeoutMs: cfgNum("commands.sourceCapture.timeoutMs", DEFAULT_SOURCE_CAPTURE_TIMEOUT_MS),
+    })
     const prev = sourceCaptureBySession.get(sid)
     const next = {
       totalEvents: Number(prev?.totalEvents || 0) + 1,
@@ -1540,7 +1658,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
   //   - settle() is idempotent, so exit/error/timeout racing each other only
   //     clears state once.
   async function runConsolidationCommand(sid: string, trigger: string, onStartFailure?: () => void): Promise<void> {
-    const configured = String(process?.env?.ESHEPHERD_AUTO_CONSOLIDATION_CMD || "").trim()
+    const configured = cfgRaw("commands.autoConsolidation.command")
     const startedAt = new Date().toISOString()
     console.log(`[turn-guard] auto-consolidation start sid=${sid} trigger=${trigger}`)
     writeStatusFile(projectRoot, statusSnapshot({ type: "auto-consolidation-start", sid, trigger, startedAt }))
@@ -2198,6 +2316,9 @@ export const TurnGuard = async ({ client, directory }: any) => {
     pruneToMax(inspectedStopBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(toolWindowBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(loopInterventionsBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(taskWindowBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(taskEscalationsBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(taskRecentLaunchBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralNudgedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralInspectedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(checkpointedSessions, autoConsolidationMaxTrackedSessions)
@@ -2260,6 +2381,9 @@ export const TurnGuard = async ({ client, directory }: any) => {
     pruneToMax(inspectedStopBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(toolWindowBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(loopInterventionsBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(taskWindowBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(taskEscalationsBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(taskRecentLaunchBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralNudgedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralInspectedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(checkpointedSessions, autoConsolidationMaxTrackedSessions)
@@ -2382,6 +2506,9 @@ export const TurnGuard = async ({ client, directory }: any) => {
     pruneToMax(inspectedStopBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(toolWindowBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(loopInterventionsBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(taskWindowBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(taskEscalationsBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(taskRecentLaunchBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralNudgedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralInspectedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(checkpointedSessions, autoConsolidationMaxTrackedSessions)
@@ -2508,7 +2635,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
         // Instructions (agent discipline) are part of the plugin's behavior,
         // so inject their absolute paths too. Opt out with
         // ESHEPHERD_INJECT_INSTRUCTIONS=false.
-        if (getBoolEnv("ESHEPHERD_INJECT_INSTRUCTIONS", true)) {
+        if (cfgBool("assets.injectInstructions", true)) {
           const instructionPaths = loadInstructionPaths()
           config.instructions = dedupeAppendInstructions(config.instructions, instructionPaths)
           injectedInstructions = instructionPaths.length
@@ -2553,6 +2680,86 @@ export const TurnGuard = async ({ client, directory }: any) => {
       if (loopExemptTools.has(key)) return
 
       const args = output?.args ?? input?.args ?? {}
+
+      if (taskWatchdogEnabled && key === "task") {
+        const subagentType = String(args?.subagent_type ?? "").trim().toLowerCase()
+        const description = String(args?.description ?? "").trim()
+        const prompt = String(args?.prompt ?? "").trim()
+        const now = Date.now()
+
+        if (subagentType && taskSerializeTypes.has(subagentType)) {
+          const launches = taskRecentLaunchBySession.get(sid) ?? new Map<string, number>()
+          const lastLaunchAt = Number(launches.get(subagentType) ?? 0)
+          const elapsed = now - lastLaunchAt
+          if (lastLaunchAt > 0 && elapsed < taskSerializeCooldownMs) {
+            const waitSec = Math.max(1, Math.ceil((taskSerializeCooldownMs - elapsed) / 1000))
+            const nudgeText =
+              `${LOOP_GUARD_MARKER} STOP. You are spawning \`${subagentType}\` tasks too quickly in parallel.\n\n` +
+              `This \`task\` call was BLOCKED. Wait about ${waitSec}s, then launch the next \`${subagentType}\` task serially.\n\n` +
+              `Do not retry immediately; queue it and continue with non-overlapping work.`
+            throw new Error(nudgeText)
+          }
+          launches.set(subagentType, now)
+          taskRecentLaunchBySession.set(sid, launches)
+        }
+
+        const taskSignature = computeToolSignature("task", {
+          subagent_type: subagentType,
+          description,
+          prompt,
+        })
+        const taskWindow = taskWindowBySession.get(sid) ?? []
+        const taskEscalationsUsed = taskEscalationsBySession.get(sid) ?? 0
+        const taskDecision = decideLoopIntervention({
+          window: taskWindow,
+          signature: taskSignature,
+          repeatThreshold: taskWatchdogThreshold,
+          interventionsUsed: taskEscalationsUsed,
+          maxInterventions: taskWatchdogMaxEscalations,
+        })
+
+        if (taskDecision.exhausted) {
+          console.log(
+            `[turn-guard] task watchdog: repeated ${subagentType || "task"} ${taskDecision.count}x in sid=${sid} ` +
+              `but escalation budget (${taskWatchdogMaxEscalations}) is spent; letting it through`,
+          )
+        } else if (taskDecision.shouldIntervene) {
+          const routing = await resolveLoopGuardRouting(sid, input, output)
+          const swapTarget = resolveTaskSwapTarget({
+            current: routing.model,
+            qwenMatch: taskSwapQwenMatch,
+            qwenToProvider: taskSwapQwenToProvider,
+            qwenToModel: taskSwapQwenToModel,
+            gemmaMatch: taskSwapGemmaMatch,
+            gemmaToProvider: taskSwapGemmaToProvider,
+            gemmaToModel: taskSwapGemmaToModel,
+            fallbackProvider: taskFallbackProvider,
+            fallbackModel: taskFallbackModel,
+          })
+
+          if (swapTarget) {
+            args.model = {
+              providerID: swapTarget.providerID,
+              modelID: swapTarget.modelID,
+            }
+            if (output?.args) output.args = args
+            if (input?.args) input.args = args
+            taskEscalationsBySession.set(sid, taskEscalationsUsed + 1)
+            taskWindowBySession.delete(sid)
+
+            console.log(
+              `[turn-guard] task watchdog: escalating repeated ${subagentType || "task"} call ` +
+                `(repeat ${taskDecision.count}x, escalation ${taskEscalationsUsed + 1}/${taskWatchdogMaxEscalations}) ` +
+                `sid=${sid} -> ${swapTarget.providerID}/${swapTarget.modelID} (${swapTarget.reason})`,
+            )
+          }
+        }
+
+        taskWindow.push(taskSignature)
+        while (taskWindow.length > loopWindowSize) taskWindow.shift()
+        taskWindowBySession.set(sid, taskWindow)
+      }
+
       const signature = computeToolSignature(toolName, args)
       const window = toolWindowBySession.get(sid) ?? []
       const interventionsUsed = loopInterventionsBySession.get(sid) ?? 0

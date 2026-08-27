@@ -1,4 +1,4 @@
-import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
+import { getRuntimeConfigEnvMap, loadRuntimeConfig, listRuntimeConfigEnvKeys } from "../adapter/runtime-config.ts";
 import { loadRuntimeEnv } from "./runtime-env.ts";
 
 declare const process: {
@@ -28,13 +28,14 @@ function main(): void {
     cwd,
     env: process.env,
   });
-  applyRuntimeConfigToEnv(process.env, runtimeConfig);
+  const envMap = getRuntimeConfigEnvMap(runtimeConfig);
 
   for (const warning of runtimeConfig.warnings) {
     process.stderr.write(`[emit-runtime-config-env] warning: ${warning}\n`);
   }
 
-  const lines = Object.entries(runtimeConfig.valuesByEnvKey).map(([key, value]) => {
+  const lines = listRuntimeConfigEnvKeys().map((key) => {
+    const value = envMap[key];
     return `export ${key}=${shellQuote(String(value || ""))}`;
   });
 

@@ -35,12 +35,18 @@ function isTruthyFlag(value: string | undefined): boolean {
   return v === "1" || v === "true" || v === "yes" || v === "on";
 }
 
-function probePidAliveViaMempalace(ownerPid: number): boolean | undefined {
+type ConsolidationLockOptions = {
+  pythonBin?: string;
+  nativePidProbeDisabled?: boolean;
+};
+
+function probePidAliveViaMempalace(ownerPid: number, options?: ConsolidationLockOptions): boolean | undefined {
   if (!(ownerPid > 0)) return undefined;
   const env = process.env || {};
+  if (options?.nativePidProbeDisabled === true) return undefined;
   if (isTruthyFlag(env.ESHEPHERD_CONSOLIDATION_NATIVE_PID_PROBE_DISABLED)) return undefined;
 
-  const pythonBin = (env.ESHEPHERD_PYTHON_BIN || "python").trim() || "python";
+  const pythonBin = String(options?.pythonBin || env.ESHEPHERD_PYTHON_BIN || "python").trim() || "python";
   const script = [
     "import sys",
     "try:",
@@ -90,6 +96,7 @@ export function acquireConsolidationLock(
   projectRoot: string,
   payload: Record<string, unknown>,
   staleMs: number,
+  options?: ConsolidationLockOptions,
 ): boolean {
   const dir = join(projectRoot, CONSOLIDATION_LOCK_DIR);
   mkdirSync(dir, { recursive: true });
@@ -114,7 +121,7 @@ export function acquireConsolidationLock(
       const raw = JSON.parse(readFileSync(lockPath, "utf8"));
       const startedAtMs = Number(raw?.startedAtMs || 0);
       const ownerPid = Number(raw?.pid || 0);
-      const ownerAlive = probePidAliveViaMempalace(ownerPid);
+      const ownerAlive = probePidAliveViaMempalace(ownerPid, options);
       if (ownerAlive === true) {
         return false; // lock owner still running
       }

@@ -78,7 +78,7 @@ export default tool({
     const runtimeConfig = loadRuntimeConfig({ cwd, env: process.env });
     applyRuntimeConfigToEnv(process.env, runtimeConfig);
 
-    const wing = String(args.wing || process.env.ESHEPHERD_PROJECT_WING || "").trim();
+    const wing = String(args.wing || runtimeConfig.valuesByPath.memory?.projectWing || "").trim();
     if (!wing) throw new Error("palace_flock_status: wing is required (no project wing resolved)");
 
     const exactScanCap = clampNumber(args.exact_scan_cap, 300, 20, 5000);
@@ -358,10 +358,11 @@ function clampNumber(value: unknown, fallback: number, min: number, max: number)
 }
 
 function thresholdReport(backlog: number) {
-  const raw = Number(process.env.ESHEPHERD_AUTO_CONSOLIDATION_MESSAGE_THRESHOLD);
+  const runtimeConfig = loadRuntimeConfig({ cwd: process.cwd(), env: process.env });
+  const raw = Number(runtimeConfig.valuesByPath.consolidation?.auto?.messageThreshold);
   const threshold = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_THRESHOLD;
   return {
-    variable: "ESHEPHERD_AUTO_CONSOLIDATION_MESSAGE_THRESHOLD",
+    variable: "consolidation.auto.messageThreshold",
     threshold,
     above_threshold: backlog >= threshold,
   };

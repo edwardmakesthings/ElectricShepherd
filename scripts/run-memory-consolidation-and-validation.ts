@@ -25,7 +25,7 @@ import {
   type CadenceOrchestratorOptions,
   type CadenceOrchestratorResult,
 } from "../adapter/cadence-orchestrator.ts";
-import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
+import { DEFAULT_MCP_TOOL_PREFIX, DEFAULT_MCP_URL, loadRuntimeConfig } from "../adapter/runtime-config.ts";
 import { parseDeadEndDrawerContent, renderDeadEndsBlock } from "../adapter/dead-ends.ts";
 import { loadRuntimeEnv } from "./runtime-env.ts";
 import { acquireConsolidationLock, releaseConsolidationLock } from "./consolidation-lock.ts";
@@ -53,6 +53,8 @@ const SUBAGENT_DEBUG_DIR = ".electric-shepherd/scratch/subagent-output";
 // so both the success path and the top-level catch can release it.
 let heldConsolidationLockRoot: string | null = null;
 let heldNativeConsolidationLease: { projectRoot: string; runId: string } | null = null;
+let configuredPythonBin = "python";
+let configuredNativeCoordinatorPath = "";
 
 function isTruthyFlag(value: string | undefined): boolean {
   if (!value) return false;
@@ -138,7 +140,7 @@ function asString(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
-function parsePositiveInt(value: string | undefined, fallback: number, min = 1): number {
+function parsePositiveInt(value: unknown, fallback: number, min = 1): number {
   const raw = String(value ?? "").trim();
   if (!raw) return fallback;
   const parsed = Number(raw);
@@ -188,15 +190,17 @@ function formatPromptModelArg(model: PromptModelRouting | undefined): string | u
   return `${model.providerID},${model.modelID}`;
 }
 
-function parseMCPHttpOptions(env: Record<string, string | undefined>): {
+function parseMCPHttpOptions(config: Record<string, any>): {
   requestTimeoutMs: number;
   maxRetries: number;
   retryBackoffMs: number;
+  retryMaxBackoffMs: number;
 } {
   return {
-    requestTimeoutMs: parsePositiveInt(env.ESHEPHERD_MCP_REQUEST_TIMEOUT_MS, 60000),
-    maxRetries: parsePositiveInt(env.ESHEPHERD_MCP_MAX_RETRIES, 2, 0),
-    retryBackoffMs: parsePositiveInt(env.ESHEPHERD_MCP_RETRY_BACKOFF_MS, 800),
+    requestTimeoutMs: parsePositiveInt(config.requestTimeoutMs, 60000),
+    maxRetries: parsePositiveInt(config.maxRetries, 2, 0),
+    retryBackoffMs: parsePositiveInt(config.retryBackoffMs, 800),
+    retryMaxBackoffMs: parsePositiveInt(config.retryMaxBackoffMs, 8000),
   };
 }
 
@@ -356,10 +360,14 @@ function parseEmbeddedJSON(text: string, accept: (value: unknown) => boolean = (
   return undefined;
 }
 
-function runNativeCoordinator(args: string[], env: Record<string, string | undefined>): Record<string, unknown> | undefined {
+function runNativeCoordinator(
+  args: string[],
+  env: Record<string, string | undefined>,
+  options?: { pythonBin?: string },
+): Record<string, unknown> | undefined {
   if (!existsSync(NATIVE_COORD_HELPER_PATH)) return undefined;
 
-  const pythonBin = (env.ESHEPHERD_PYTHON_BIN || "python").trim() || "python";
+  const pythonBin = String(options?.pythonBin || "python").trim() || "python";
   try {
     const raw = execFileSync(pythonBin, [NATIVE_COORD_HELPER_PATH, ...args], {
       encoding: "utf8",
@@ -379,6 +387,8 @@ function tryAcquireNativeConsolidationLease(args: {
   runId: string;
   staleMs: number;
   env: Record<string, string | undefined>;
+  nativeCoordinatorPath?: string;
+  pythonBin?: string;
 }): NativeCoordAcquireResult {
   const cmdArgs = [
     "acquire",
@@ -392,12 +402,12 @@ function tryAcquireNativeConsolidationLease(args: {
     String(Math.max(1, Math.floor(args.staleMs))),
   ];
 
-  const queuePath = (args.env.ESHEPHERD_CONSOLIDATION_NATIVE_COORD_PATH || "").trim();
+  const queuePath = String(args.nativeCoordinatorPath || "").trim();
   if (queuePath) {
     cmdArgs.push("--queue-path", queuePath);
   }
 
-  const payload = runNativeCoordinator(cmdArgs, args.env);
+  const payload = runNativeCoordinator(cmdArgs, args.env, { pythonBin: args.pythonBin });
   if (!payload) {
     return { state: "unavailable" };
   }
@@ -417,6 +427,8 @@ function releaseNativeConsolidationLease(args: {
   projectRoot: string;
   runId: string;
   env: Record<string, string | undefined>;
+  nativeCoordinatorPath?: string;
+  pythonBin?: string;
 }): void {
   const cmdArgs = [
     "release",
@@ -428,12 +440,12 @@ function releaseNativeConsolidationLease(args: {
     args.runId,
   ];
 
-  const queuePath = (args.env.ESHEPHERD_CONSOLIDATION_NATIVE_COORD_PATH || "").trim();
+  const queuePath = String(args.nativeCoordinatorPath || "").trim();
   if (queuePath) {
     cmdArgs.push("--queue-path", queuePath);
   }
 
-  runNativeCoordinator(cmdArgs, args.env);
+  runNativeCoordinator(cmdArgs, args.env, { pythonBin: args.pythonBin });
 }
 
 function releaseHeldConsolidationGuards(): void {
@@ -442,6 +454,8 @@ function releaseHeldConsolidationGuards(): void {
       projectRoot: heldNativeConsolidationLease.projectRoot,
       runId: heldNativeConsolidationLease.runId,
       env: process.env,
+      nativeCoordinatorPath: configuredNativeCoordinatorPath,
+      pythonBin: configuredPythonBin,
     });
     heldNativeConsolidationLease = null;
   }
@@ -706,15 +720,14 @@ async function callSubagentAuditor(args: {
   };
 }
 
-function parseConsolidationOptions(argv: string[]): SynthesisConsolidationOptions {
+function parseConsolidationOptions(argv: string[], runtimeConfig: ReturnType<typeof loadRuntimeConfig>): SynthesisConsolidationOptions {
   const runCadence = hasFlag(argv, "--run-cadence");
 
   const defaultSourceWing =
-    (process.env.ESHEPHERD_SOURCE_CAPTURE_WING || "").trim() ||
-    (process.env.ESHEPHERD_PROJECT_WING || "").trim() ||
+    String(runtimeConfig.valuesByPath.sourceCapture?.wing || runtimeConfig.valuesByPath.memory?.projectWing || "opencode").trim() ||
     "opencode";
   const defaultSourceRoom =
-    (process.env.ESHEPHERD_SOURCE_CAPTURE_ROOM || "").trim() ||
+    String(runtimeConfig.valuesByPath.sourceCapture?.room || "source-transcripts").trim() ||
     "source-transcripts";
 
   let query = getArg(argv, "--query") || "memory consolidation candidates";
@@ -734,7 +747,7 @@ function parseConsolidationOptions(argv: string[]): SynthesisConsolidationOption
     targetWing,
     targetRoom,
     targetHall: getArg(argv, "--target-hall") || getArg(argv, "--hall") || undefined,
-    searchLimit: Number(getArg(argv, "--search-limit") || "12"),
+    searchLimit: Number(getArg(argv, "--search-limit") || runtimeConfig.valuesByPath.consolidation?.searchLimit || "12"),
     minimumDistinctSources: Number(getArg(argv, "--min-sources") || "2"),
     minimumContentCharacters: Number(getArg(argv, "--min-content-chars") || "220"),
     minimumPopulatedSections: Number(getArg(argv, "--min-section-count") || "3"),
@@ -746,7 +759,7 @@ function parseConsolidationOptions(argv: string[]): SynthesisConsolidationOption
   };
 }
 
-function parseWorklistOptions(argv: string[]): WorklistOptions {
+function parseWorklistOptions(argv: string[], runtimeConfig: ReturnType<typeof loadRuntimeConfig>): WorklistOptions {
   const allMode = hasFlag(argv, "--all") || hasFlag(argv, "--full-scope") || hasFlag(argv, "--reprocess-all");
   const limit = Number(getArg(argv, "--worklist-limit") || getArg(argv, "--search-limit") || "200");
   // Default 1: one transcript family per subagent run. A single desktop runs one
@@ -754,7 +767,7 @@ function parseWorklistOptions(argv: string[]): WorklistOptions {
   // blast radius, since a timeout loses the entire batch rather than one item.
   const batchSize = Math.max(1, Number(getArg(argv, "--batch-size") || "1"));
   const defaultSourceRoom =
-    (process.env.ESHEPHERD_SOURCE_CAPTURE_ROOM || "").trim() ||
+    String(runtimeConfig.valuesByPath.sourceCapture?.room || "source-transcripts").trim() ||
     "source-transcripts";
   const scopeRoom = getArg(argv, "--room") || getArg(argv, "--target-room") || getArg(argv, "--scope-room") || defaultSourceRoom;
   const processedRoom = getArg(argv, "--processed-room") || `${scopeRoom}-processed`;
@@ -893,7 +906,11 @@ async function getConsolidatedIdsForFamily(
   return { consolidated, unconsolidated };
 }
 
-function parseValidationOptions(argv: string[], consolidation: SynthesisConsolidationOptions): ValidationMergeReviewOptions {
+function parseValidationOptions(
+  argv: string[],
+  consolidation: SynthesisConsolidationOptions,
+  runtimeConfig: ReturnType<typeof loadRuntimeConfig>,
+): ValidationMergeReviewOptions {
   const scopeRoom = getArg(argv, "--scope-room") || consolidation.targetRoom;
   return {
     scopeRoom,
@@ -909,7 +926,7 @@ function parseValidationOptions(argv: string[], consolidation: SynthesisConsolid
     mergeMaxDepth: Number(getArg(argv, "--merge-max-depth") || "20"),
     applyMerges: hasFlag(argv, "--apply-merges"),
     automaticMergeScore: Number(getArg(argv, "--allow-auto-merge-score") || "0.92"),
-    notificationURL: getArg(argv, "--ntfy-url") || process.env.NTFY_URL,
+    notificationURL: getArg(argv, "--ntfy-url") || String(runtimeConfig.valuesByPath.notifications?.ntfyUrl || ""),
     escalationTopic: getArg(argv, "--escalation-topic") || "electric-shepherd-escalations",
   };
 }
@@ -951,11 +968,10 @@ function parseMemcoreApply(argv: string[]): MemcoreApplyOptions {
   };
 }
 
-function discoverLiveMCPConfig(env: Record<string, string | undefined>): DiscoveredMCPConfig | undefined {
-  if (isFalsyFlag(env.ESHEPHERD_MCP_AUTO_DISCOVER)) return undefined;
+function discoverLiveMCPConfig(env: Record<string, string | undefined>, pythonBin: string): DiscoveredMCPConfig | undefined {
   if ((env.MEMPALACE_MCP_URL || "").trim()) return undefined;
 
-  const pythonBin = (env.ESHEPHERD_PYTHON_BIN || "python").trim() || "python";
+  const resolvedPythonBin = String(pythonBin || "python").trim() || "python";
   const script = [
     "import json, os",
     "try:",
@@ -991,7 +1007,7 @@ function discoverLiveMCPConfig(env: Record<string, string | undefined>): Discove
   ].join("\n");
 
   try {
-    const raw = execFileSync(pythonBin, ["-c", script], {
+    const raw = execFileSync(resolvedPythonBin, ["-c", script], {
       encoding: "utf8",
       maxBuffer: 128 * 1024,
       stdio: ["ignore", "pipe", "pipe"],
@@ -1279,7 +1295,14 @@ async function main(): Promise<void> {
     cwd: configCwd,
     env: process.env,
   });
-  applyRuntimeConfigToEnv(process.env, runtimeConfig);
+
+  const mcpAutoDiscover = !isFalsyFlag(String(runtimeConfig.valuesByPath.mcp?.autoDiscover));
+  const pythonBin = String(runtimeConfig.valuesByPath.mcp?.pythonBin || "python").trim() || "python";
+  const nativeCoordinatorPath = String(runtimeConfig.valuesByPath.consolidation?.lock?.nativeCoordinatorPath || "").trim();
+  const worklistPageSize = parsePositiveInt(String(runtimeConfig.valuesByPath.consolidation?.worklist?.pageSize || ""), 50);
+  const memcoreMinFactHeight = Number(runtimeConfig.valuesByPath.memcore?.render?.minFactHeight) || 2;
+  configuredPythonBin = pythonBin;
+  configuredNativeCoordinatorPath = nativeCoordinatorPath;
 
   // P2-1 + P2-3: generate run_id at startup
   const runId = "eshepherd-" + new Date().toISOString().replace(/[:.]/g, "-").slice(0, 17) + "-" + Math.random().toString(36).slice(2, 6);
@@ -1341,14 +1364,14 @@ async function main(): Promise<void> {
   // ESHEPHERD_CONSOLIDATION_LOCK_DISABLED bypass it for tests.
   const lockInherited =
     isTruthyFlag(process.env.ESHEPHERD_CONSOLIDATION_LOCK_INHERITED) ||
-    isTruthyFlag(process.env.ESHEPHERD_CONSOLIDATION_LOCK_DISABLED) ||
+    isTruthyFlag(runtimeConfig.valuesByPath.consolidation?.lock?.disabled) ||
     hasFlag(argv, "--no-lock");
   if (!lockInherited) {
-    const staleMs = Number(process.env.ESHEPHERD_AUTO_CONSOLIDATION_TIMEOUT_MS) || 300000;
+    const staleMs = Number(runtimeConfig.valuesByPath.commands?.autoConsolidation?.timeoutMs) || 300000;
     const lockRoot = process.cwd();
 
     const nativeCoordDisabled =
-      isTruthyFlag(process.env.ESHEPHERD_CONSOLIDATION_NATIVE_COORD_DISABLED) || hasFlag(argv, "--no-native-coord");
+      isTruthyFlag(runtimeConfig.valuesByPath.consolidation?.lock?.nativeCoordinatorDisabled) || hasFlag(argv, "--no-native-coord");
 
     if (!nativeCoordDisabled) {
       const nativeLease = tryAcquireNativeConsolidationLease({
@@ -1356,6 +1379,8 @@ async function main(): Promise<void> {
         runId,
         staleMs,
         env: process.env,
+        nativeCoordinatorPath,
+        pythonBin,
       });
       if (nativeLease.state === "acquired") {
         heldNativeConsolidationLease = { projectRoot: lockRoot, runId };
@@ -1370,7 +1395,17 @@ async function main(): Promise<void> {
     }
 
     if (consolidationCoordMode !== "native-queue") {
-      if (!acquireConsolidationLock(lockRoot, { source: "run-memory-consolidation-and-validation", runId }, staleMs)) {
+      if (
+        !acquireConsolidationLock(
+          lockRoot,
+          { source: "run-memory-consolidation-and-validation", runId },
+          staleMs,
+          {
+            pythonBin,
+            nativePidProbeDisabled: isTruthyFlag(String(runtimeConfig.valuesByPath.consolidation?.lock?.nativePidProbeDisabled)),
+          },
+        )
+      ) {
         flushRunProgress({ status: "skipped", phase: "blocked-lock-held", reason: "consolidation-lock-held" });
         process.stdout.write(`${JSON.stringify({ skipped: true, reason: "consolidation-lock-held" }, null, 2)}\n`);
         return;
@@ -1380,22 +1415,22 @@ async function main(): Promise<void> {
     }
   }
 
-  const consolidationOptions = parseConsolidationOptions(argv);
-  const validationOptions = parseValidationOptions(argv, consolidationOptions);
+  const consolidationOptions = parseConsolidationOptions(argv, runtimeConfig);
+  const validationOptions = parseValidationOptions(argv, consolidationOptions, runtimeConfig);
   const cadenceOptions = parseCadenceOptions(argv, consolidationOptions);
-  const worklistOptions = parseWorklistOptions(argv);
+  const worklistOptions = parseWorklistOptions(argv, runtimeConfig);
   const memcoreApply = parseMemcoreApply(argv);
 
-  const discoveredMCP = discoverLiveMCPConfig(process.env);
+  const discoveredMCP = mcpAutoDiscover ? discoverLiveMCPConfig(process.env, pythonBin) : undefined;
   if (!(process.env.MEMPALACE_MCP_BEARER_TOKEN || "").trim() && discoveredMCP?.bearerToken) {
     process.env.MEMPALACE_MCP_BEARER_TOKEN = discoveredMCP.bearerToken;
   }
 
-  const mcpURL = (process.env.MEMPALACE_MCP_URL || discoveredMCP?.url || "http://localhost:8093/mcp").trim();
+  const mcpURL = String(runtimeConfig.valuesByPath.mcp?.url || discoveredMCP?.url || DEFAULT_MCP_URL).trim();
   const { readURL: readMCPURL, writeURL: writeMCPURL } = resolveConsolidationMCPURLs(mcpURL);
-  const toolPrefix = process.env.MEMGRAPH_TOOL_PREFIX || "mempalace_";
+  const toolPrefix = String(runtimeConfig.valuesByPath.mcp?.toolPrefix || "").trim() || DEFAULT_MCP_TOOL_PREFIX;
   const mcpHeaders = resolveMCPHeadersFromEnv(process.env);
-  const mcpHttpOptions = parseMCPHttpOptions(process.env);
+  const mcpHttpOptions = parseMCPHttpOptions((runtimeConfig.valuesByPath.mcp || {}) as Record<string, any>);
   const activeRouting = getActivePromptRoutingFromEnv(process.env);
   const subagentTimeoutMs = resolveSubagentTimeoutMs(process.env);
 
@@ -1404,6 +1439,7 @@ async function main(): Promise<void> {
     requestTimeoutMs: mcpHttpOptions.requestTimeoutMs,
     maxRetries: mcpHttpOptions.maxRetries,
     retryBackoffMs: mcpHttpOptions.retryBackoffMs,
+    retryMaxBackoffMs: mcpHttpOptions.retryMaxBackoffMs,
   });
   await readMCP.initialize();
 
@@ -1414,6 +1450,7 @@ async function main(): Promise<void> {
         requestTimeoutMs: mcpHttpOptions.requestTimeoutMs,
         maxRetries: mcpHttpOptions.maxRetries,
         retryBackoffMs: mcpHttpOptions.retryBackoffMs,
+        retryMaxBackoffMs: mcpHttpOptions.retryMaxBackoffMs,
       });
   if (writeMCP !== readMCP) await writeMCP.initialize();
 
@@ -1445,13 +1482,13 @@ async function main(): Promise<void> {
           wing: consolidationOptions.targetWing,
           room: sourceRoom,
           limit: worklistOptions.limit,
-          pageSize: parsePositiveInt(process.env.ESHEPHERD_WORKLIST_PAGE_SIZE, 50),
+          pageSize: worklistPageSize,
         })
       : await client.findUnconsolidatedSourceDrawers({
           wing: consolidationOptions.targetWing,
           room: sourceRoom,
           limit: worklistOptions.limit,
-          pageSize: parsePositiveInt(process.env.ESHEPHERD_WORKLIST_PAGE_SIZE, 50),
+          pageSize: worklistPageSize,
         });
   }
 
@@ -1766,8 +1803,8 @@ async function main(): Promise<void> {
     const highHeightFacts = await fetchHighHeightFacts(client, {
       wing: consolidationOptions.targetWing,
       room: consolidationOptions.targetRoom,
-      minHeight: Number(process.env.ESHEPHERD_MEMCORE_MIN_FACT_HEIGHT) || 2,
-      limit: Number(process.env.ESHEPHERD_MEMCORE_RENDER_MAX_FACTS) || 8,
+      minHeight: memcoreMinFactHeight,
+      limit: Number(runtimeConfig.valuesByPath.memcore?.render?.maxFactsPerSection) || 8,
     });
 
     // Phase 8 (prospective memory): fetch live reminders for this wing, match
@@ -1775,9 +1812,9 @@ async function main(): Promise<void> {
     // the render. Bounded fetch (<= max), degrades to "no pending section" on any
     // read failure — the render must never throw or stall on the KG.
     let pendingReminderLines: string[] = [];
-    if (!isFalsyFlag(process.env.ESHEPHERD_MEMCORE_RENDER_INCLUDE_PENDING)) {
+    if (!isFalsyFlag(String(runtimeConfig.valuesByPath.memcore?.render?.includePending))) {
       try {
-        const maxPending = Math.max(0, Number(process.env.ESHEPHERD_MEMCORE_RENDER_MAX_PENDING) || 3);
+        const maxPending = Math.max(0, Number(runtimeConfig.valuesByPath.memcore?.render?.maxPendingReminders) || 3);
         if (maxPending > 0 && typeof client.listReminders === "function") {
           const scopeDir = resolve(memcoreApply.scopeDir || process.cwd());
           const workspaceRoot = findWorkspaceRoot(scopeDir);
@@ -1824,9 +1861,9 @@ async function main(): Promise<void> {
     // degrades to "no dead-ends section" on any read failure — the render must never
     // throw or stall on the KG.
     let deadEndLines: string[] = [...(consolidation.consolidationDraft.deadEnds || [])];
-    if (deadEndLines.length === 0 && !isFalsyFlag(process.env.ESHEPHERD_MEMCORE_RENDER_INCLUDE_DEAD_ENDS)) {
+    if (deadEndLines.length === 0 && !isFalsyFlag(String(runtimeConfig.valuesByPath.memcore?.render?.includeDeadEnds))) {
       try {
-        const maxDeadEnds = Math.max(0, Number(process.env.ESHEPHERD_MEMCORE_RENDER_MAX_DEAD_ENDS) || 3);
+        const maxDeadEnds = Math.max(0, Number(runtimeConfig.valuesByPath.memcore?.render?.maxDeadEnds) || 3);
         if (maxDeadEnds > 0 && typeof client.listScopedDerivedDrawers === "function" && typeof client.getRulesOut === "function") {
           const scopeResult = await client.listScopedDerivedDrawers({
             scope_wing: consolidationOptions.targetWing,
@@ -1862,15 +1899,15 @@ async function main(): Promise<void> {
       validation: validationForRender,
       auditor,
       sourceDescriptions: Object.fromEntries(worklist.map((item) => [item.drawer_id, asString(item.desc)])),
-      includeFacts: !isFalsyFlag(process.env.ESHEPHERD_MEMCORE_RENDER_INCLUDE_FACTS),
-      includePointers: !isFalsyFlag(process.env.ESHEPHERD_MEMCORE_RENDER_INCLUDE_POINTERS),
-      maxFactsPerSection: Number(process.env.ESHEPHERD_MEMCORE_RENDER_MAX_FACTS) || 8,
+      includeFacts: !isFalsyFlag(String(runtimeConfig.valuesByPath.memcore?.render?.includeFacts)),
+      includePointers: !isFalsyFlag(String(runtimeConfig.valuesByPath.memcore?.render?.includePointers)),
+      maxFactsPerSection: Number(runtimeConfig.valuesByPath.memcore?.render?.maxFactsPerSection) || 8,
       highHeightFacts,
       pendingReminderLines,
-      includePending: !isFalsyFlag(process.env.ESHEPHERD_MEMCORE_RENDER_INCLUDE_PENDING),
+      includePending: !isFalsyFlag(String(runtimeConfig.valuesByPath.memcore?.render?.includePending)),
       deadEndLines,
-      includeDeadEnds: !isFalsyFlag(process.env.ESHEPHERD_MEMCORE_RENDER_INCLUDE_DEAD_ENDS),
-      maxDeadEnds: Number(process.env.ESHEPHERD_MEMCORE_RENDER_MAX_DEAD_ENDS) || 3,
+      includeDeadEnds: !isFalsyFlag(String(runtimeConfig.valuesByPath.memcore?.render?.includeDeadEnds)),
+      maxDeadEnds: Number(runtimeConfig.valuesByPath.memcore?.render?.maxDeadEnds) || 3,
     });
 
     const targetFilePath = resolveMemcoreFilePath({
@@ -1953,7 +1990,7 @@ async function main(): Promise<void> {
       skipped: allSkipped.length > 0 ? allSkipped : undefined,
       warnings: traceWarnings.length > 0 ? traceWarnings : undefined,
       consolidationCoordMode,
-      mcpEndpointSource: (process.env.MEMPALACE_MCP_URL || "").trim()
+      mcpEndpointSource: String(runtimeConfig.valuesByPath.mcp?.url || "").trim()
         ? "env"
         : discoveredMCP
           ? "server-registry"

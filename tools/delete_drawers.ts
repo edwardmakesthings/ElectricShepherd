@@ -1,6 +1,6 @@
 import { tool } from "@opencode-ai/plugin";
 import { MCPHttpClient, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-client.ts";
-import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
+import { applyRuntimeConfigToEnv, DEFAULT_MCP_TOOL_PREFIX, DEFAULT_MCP_URL, loadRuntimeConfig } from "../adapter/runtime-config.ts";
 import {
   collectDrawerIDsByScope,
   classifyErrorKind,
@@ -116,7 +116,7 @@ export default tool({
       throw new Error("Use either drawer_ids/ids_file OR source_wing/source_wings/source_room, not both.");
     }
 
-    const toolPrefix = String(args.tool_prefix || process.env.MEMGRAPH_TOOL_PREFIX || "mempalace_").trim();
+    const toolPrefix = String(args.tool_prefix || runtimeConfig.valuesByPath.mcp?.toolPrefix || DEFAULT_MCP_TOOL_PREFIX).trim();
     const listTool = `${toolPrefix}list_drawers`;
     const deleteTool = `${toolPrefix}delete_drawer`;
 
@@ -126,11 +126,15 @@ export default tool({
       // Endpoint: direct MemPalace server by default. The shared docker/.env sets
       // MEMPALACE_MCP_URL to the LiteLLM gateway, which enforces per-key tool
       // allowlists and can deny delete_drawer. ESHEPHERD_DELETE_MCP_URL overrides.
-      const mcpURL = resolveMemPalaceMCPUrl(process.env, "ESHEPHERD_DELETE_MCP_URL");
+      const mcpURL = resolveMemPalaceMCPUrl(process.env, "ESHEPHERD_DELETE_MCP_URL", String(runtimeConfig.valuesByPath.mcp?.url || DEFAULT_MCP_URL));
 
       const headers = mcpURL.includes("localhost:8093") ? {} : resolveMCPHeadersFromEnv(process.env);
       const mcp = new MCPHttpClient(mcpURL, headers, {
         clientName: "electric-shepherd-delete-drawers-tool",
+        requestTimeoutMs: Number(runtimeConfig.valuesByPath.mcp?.requestTimeoutMs || "60000"),
+        maxRetries: Number(runtimeConfig.valuesByPath.mcp?.maxRetries || "2"),
+        retryBackoffMs: Number(runtimeConfig.valuesByPath.mcp?.retryBackoffMs || "800"),
+        retryMaxBackoffMs: Number(runtimeConfig.valuesByPath.mcp?.retryMaxBackoffMs || "8000"),
       });
       await mcp.initialize();
 

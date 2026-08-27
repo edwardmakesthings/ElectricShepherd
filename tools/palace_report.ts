@@ -68,8 +68,8 @@ export default tool({
     const call = async (name: string, payload: Record<string, unknown>) =>
       client.callTool(`${prefix}${name}`, payload);
 
-    const defaultWing = String(process.env.ESHEPHERD_PROJECT_WING || "").trim();
-    const defaultRoom = String(process.env.ESHEPHERD_SOURCE_CAPTURE_ROOM || "").trim();
+    const defaultWing = String(runtimeConfig.valuesByPath.memory?.projectWing || "").trim();
+    const defaultRoom = String(runtimeConfig.valuesByPath.sourceCapture?.room || "").trim();
 
     if (!wing) {
       const taxonomy = parseTaxonomy(await call("get_taxonomy", {}));

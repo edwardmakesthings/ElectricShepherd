@@ -47,8 +47,20 @@ import { loadRuntimeEnv } from "../../scripts/runtime-env.ts";
 const DEFAULT_WING = "eshepherd-test";
 const DEFAULT_ADDED_BY = "electric-shepherd-test-fixture";
 
+function loadFixtureConfig() {
+  const anchorUrl = new URL("../../scripts/_fixture-env-anchor.ts", import.meta.url).href;
+  loadRuntimeEnv({ scriptUrl: anchorUrl, env: process.env });
+  const runtimeConfig = loadRuntimeConfig({
+    cwd: process.cwd(),
+    env: process.env,
+  });
+  applyRuntimeConfigToEnv(process.env, runtimeConfig);
+  return runtimeConfig;
+}
+
 /** True when the integration suite is explicitly enabled. */
 export function isIntegrationEnabled() {
+  loadFixtureConfig();
   return process.env.ESHEPHERD_TEST_INTEGRATION === "1";
 }
 
@@ -73,15 +85,9 @@ export async function createTestRoom(options = {}) {
   // Resolve env the same way the runtime scripts do. The anchor URL points at
   // the scripts dir so `loadRuntimeEnv` computes the ElectricShepherd repo root
   // correctly regardless of where this helper lives.
-  const anchorUrl = new URL("../../scripts/_fixture-env-anchor.ts", import.meta.url).href;
-  loadRuntimeEnv({ scriptUrl: anchorUrl, env: process.env });
-  const runtimeConfig = loadRuntimeConfig({
-    cwd: process.cwd(),
-    env: process.env,
-  });
-  applyRuntimeConfigToEnv(process.env, runtimeConfig);
+  const runtimeConfig = loadFixtureConfig();
 
-  const mcpURL = (process.env.MEMPALACE_MCP_URL || "").trim();
+  const mcpURL = String(runtimeConfig.valuesByPath.mcp?.url || "").trim();
   if (!mcpURL) {
     return {
       available: false,
@@ -95,7 +101,7 @@ export async function createTestRoom(options = {}) {
   const room = `${roomPrefix}-${runId}`;
   const sourceTag = `eshepherd-test://fixture/${runId}`;
   const addedBy = options.addedBy || DEFAULT_ADDED_BY;
-  const toolPrefix = process.env.MEMGRAPH_TOOL_PREFIX || "mempalace_";
+  const toolPrefix = String(runtimeConfig.valuesByPath.mcp?.toolPrefix || "").trim() || "mempalace_";
 
   const headers = resolveMCPHeadersFromEnv(process.env);
   const mcp = new MCPHttpClient(mcpURL, headers, {

@@ -1,6 +1,11 @@
 import { createMemgraphClient } from "../adapter/memgraph.ts";
 import { MCPHttpClient, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-client.ts";
-import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
+import {
+  DEFAULT_MCP_TOOL_PREFIX,
+  DEFAULT_MCP_URL,
+  getRuntimeConfigValueByPath,
+  loadRuntimeConfig,
+} from "../adapter/runtime-config.ts";
 import {
   expandScopedRetrieval,
   type RetrievalExpansionOptions,
@@ -90,7 +95,7 @@ const runtimeProcess = (globalThis as unknown as {
   };
 }).process;
 
-function parseArgs(argv: string[]): RetrievalExpansionOptions {
+function parseArgs(argv: string[], runtimeConfig: ReturnType<typeof loadRuntimeConfig>): RetrievalExpansionOptions {
   const get = (flag: string): string | undefined => {
     const idx = argv.indexOf(flag);
     if (idx >= 0 && idx + 1 < argv.length) return argv[idx + 1];
@@ -151,9 +156,8 @@ function parseArgs(argv: string[]): RetrievalExpansionOptions {
     intent,
     include_docs: includeDocs || undefined,
     // Phase 10 (unified memory): shared skills wing for procedural-intent retrieval.
-    // Resolved from config/env after applyRuntimeConfigToEnv runs in main(); the
-    // expansion itself only acts on it when intent === "procedural".
-    shared_wing: runtimeProcess.env.ESHEPHERD_SHARED_SKILLS_WING || undefined,
+    // Read directly from runtime config; expansion only uses it for procedural intent.
+    shared_wing: getRuntimeConfigValueByPath(runtimeConfig, "memory.sharedSkillsWing") || undefined,
   };
 }
 
@@ -163,18 +167,18 @@ async function main(): Promise<void> {
     cwd: runtimeProcess.cwd(),
     env: runtimeProcess.env,
   });
-  applyRuntimeConfigToEnv(runtimeProcess.env, runtimeConfig);
 
-  const mcpURL = runtimeProcess.env.MEMPALACE_MCP_URL || "http://localhost:8093/mcp";
-  const toolPrefix = runtimeProcess.env.MEMGRAPH_TOOL_PREFIX;
+  const mcpURL = String(runtimeConfig.valuesByPath.mcp?.url || "").trim() || DEFAULT_MCP_URL;
+  const toolPrefix = String(runtimeConfig.valuesByPath.mcp?.toolPrefix || "").trim() || DEFAULT_MCP_TOOL_PREFIX;
   const mcpHeaders = resolveMCPHeadersFromEnv(runtimeProcess.env);
-  const args = parseArgs(runtimeProcess.argv.slice(2));
+  const args = parseArgs(runtimeProcess.argv.slice(2), runtimeConfig);
 
   const mcp = new MCPHttpClient(mcpURL, mcpHeaders, {
     clientName: "electric-shepherd-policy",
-    requestTimeoutMs: Number(runtimeProcess.env.ESHEPHERD_MCP_REQUEST_TIMEOUT_MS || "60000"),
-    maxRetries: Number(runtimeProcess.env.ESHEPHERD_MCP_MAX_RETRIES || "2"),
-    retryBackoffMs: Number(runtimeProcess.env.ESHEPHERD_MCP_RETRY_BACKOFF_MS || "800"),
+    requestTimeoutMs: Number(runtimeConfig.valuesByPath.mcp?.requestTimeoutMs || "60000"),
+    maxRetries: Number(runtimeConfig.valuesByPath.mcp?.maxRetries || "2"),
+    retryBackoffMs: Number(runtimeConfig.valuesByPath.mcp?.retryBackoffMs || "800"),
+    retryMaxBackoffMs: Number(runtimeConfig.valuesByPath.mcp?.retryMaxBackoffMs || "8000"),
   });
   await mcp.initialize();
 

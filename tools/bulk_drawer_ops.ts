@@ -193,11 +193,12 @@ export async function collectDrawerIDsByScope(
 export function resolveMemPalaceMCPUrl(
   env: Record<string, string | undefined>,
   directOverrideVar: string,
+  defaultMcpUrl: string,
 ): string {
   const envUrl = (env.MEMPALACE_MCP_URL || "").trim();
   const isGateway = /\/toolset\//.test(envUrl) || /:4000\//.test(envUrl);
   return (
     (env[directOverrideVar] || "").trim() ||
-    (envUrl && !isGateway ? envUrl : "http://localhost:8093/mcp")
+    (envUrl && !isGateway ? envUrl : defaultMcpUrl)
   );
 }

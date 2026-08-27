@@ -1,3 +1,5 @@
+import { DEFAULT_MCP_TOOL_PREFIX } from "./runtime-config.ts";
+
 export type JsonMap = Record<string, unknown>;
 
 export type ToolCaller = (name: string, args?: JsonMap) => Promise<JsonMap>;
@@ -56,13 +58,11 @@ const TOOL_BASE_NAMES: MemgraphToolMap = {
   getDrawer: "get_drawer",
 };
 
-const DEFAULT_TOOL_PREFIX = "mempalace_";
-
 function resolveToolPrefix(explicit?: string): string {
   if (typeof explicit === "string") return explicit;
   const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
   const fromEnv = env?.MEMGRAPH_TOOL_PREFIX;
-  return typeof fromEnv === "string" && fromEnv.length > 0 ? fromEnv : DEFAULT_TOOL_PREFIX;
+  return typeof fromEnv === "string" && fromEnv.length > 0 ? fromEnv : DEFAULT_MCP_TOOL_PREFIX;
 }
 
 function buildToolMap(prefix: string, overrides?: Partial<MemgraphToolMap>): MemgraphToolMap {

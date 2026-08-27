@@ -4,13 +4,13 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import test from "node:test";
 
-import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../../adapter/runtime-config.ts";
+import { applyRuntimeConfigToEnv, getRuntimeConfigEnvMap, getRuntimeConfigValueByPath, loadRuntimeConfig } from "../../adapter/runtime-config.ts";
 
 function makeTempDir(prefix) {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 
-test("runtime config reads .electric-shepherd/config.jsonc and maps to env keys", () => {
+test("runtime config reads .electric-shepherd/config.jsonc and exposes values by path/env map", () => {
   const root = makeTempDir("eshepherd-config-");
   mkdirSync(join(root, ".electric-shepherd"), { recursive: true });
 
@@ -44,25 +44,24 @@ test("runtime config reads .electric-shepherd/config.jsonc and maps to env keys"
   };
 
   const loaded = loadRuntimeConfig({ cwd: root, env });
-  applyRuntimeConfigToEnv(env, loaded);
+  const envMap = getRuntimeConfigEnvMap(loaded);
 
-  assert.equal(env.MEMPALACE_MCP_URL, "http://example.local/mcp");
-  assert.equal(env.MEMPALACE_MCP_AUTH_HEADER, "x-litellm-api-key");
-  assert.equal(env.MEMPALACE_MCP_AUTH_SCHEME, "Bearer");
-  // Precedence is env > config > default. An explicit env value wins over
-  // config.jsonc so a spawned child can be isolated from the repo's own config
-  // purely through its environment -- config.jsonc is read from the same repo
-  // root by parent and child alike, so config-first would make isolation
-  // impossible.
-  assert.equal(env.ESHEPHERD_SOURCE_CAPTURE_MODE, "append");
-  assert.equal(env.ESHEPHERD_SOURCE_CAPTURE_DEDUP_ENABLED, "false");
-  assert.equal(env.ESHEPHERD_SOURCE_CAPTURE_TIMEOUT_MS, "25000");
-  assert.equal(env.ESHEPHERD_LOOPGUARD_EXEMPT_TOOLS, "compress,my-tool");
+  assert.equal(getRuntimeConfigValueByPath(loaded, "mcp.url"), "http://example.local/mcp");
+  assert.equal(getRuntimeConfigValueByPath(loaded, "mcp.authHeader"), "x-litellm-api-key");
+  assert.equal(getRuntimeConfigValueByPath(loaded, "mcp.authScheme"), "Bearer");
+  // Non-secret runtime config is config-first (with defaults), not env-driven.
+  assert.equal(getRuntimeConfigValueByPath(loaded, "sourceCapture.mode"), "replace");
+  assert.equal(getRuntimeConfigValueByPath(loaded, "sourceCapture.dedupEnabled"), "false");
+  assert.equal(getRuntimeConfigValueByPath(loaded, "commands.sourceCapture.timeoutMs"), "25000");
+  assert.equal(getRuntimeConfigValueByPath(loaded, "loopGuard.exemptTools"), "compress,my-tool");
+  assert.equal(envMap.MEMPALACE_MCP_URL, "http://example.local/mcp");
+  assert.equal(envMap.MEMPALACE_MCP_AUTH_HEADER, "x-litellm-api-key");
+  assert.equal(envMap.MEMPALACE_MCP_AUTH_SCHEME, "Bearer");
 
   rmSync(root, { recursive: true, force: true });
 });
 
-test("runtime config falls back to config/default when no env override is set", () => {
+test("runtime config preserves env input when applyRuntimeConfigToEnv is called", () => {
   const root = makeTempDir("eshepherd-config-default-");
   const env = {
     ESHEPHERD_SOURCE_CAPTURE_MODE: "append",
@@ -81,11 +80,8 @@ test("wing defaults are computed from the project directory name, not a shared l
   const expectedWing = basename(root).toLowerCase().replace(/[ -]/g, "_").replace(/^_+|_+$/g, "");
 
   const loaded = loadRuntimeConfig({ cwd: root, env: {} });
-  const env = {};
-  applyRuntimeConfigToEnv(env, loaded);
-
-  assert.equal(env.ESHEPHERD_PROJECT_WING, expectedWing);
-  assert.equal(env.ESHEPHERD_SOURCE_CAPTURE_WING, expectedWing);
+  assert.equal(getRuntimeConfigValueByPath(loaded, "memory.projectWing"), expectedWing);
+  assert.equal(getRuntimeConfigValueByPath(loaded, "sourceCapture.wing"), expectedWing);
 
   rmSync(root, { recursive: true, force: true });
 });
@@ -96,11 +92,8 @@ test("wing defaults strip sortable numeric prefixes from project directory names
   mkdirSync(root, { recursive: true });
 
   const loaded = loadRuntimeConfig({ cwd: root, env: {} });
-  const env = {};
-  applyRuntimeConfigToEnv(env, loaded);
-
-  assert.equal(env.ESHEPHERD_PROJECT_WING, "sampleproject");
-  assert.equal(env.ESHEPHERD_SOURCE_CAPTURE_WING, "sampleproject");
+  assert.equal(getRuntimeConfigValueByPath(loaded, "memory.projectWing"), "sampleproject");
+  assert.equal(getRuntimeConfigValueByPath(loaded, "sourceCapture.wing"), "sampleproject");
 
   rmSync(parent, { recursive: true, force: true });
 });
@@ -115,10 +108,7 @@ test("an explicit config wing wins over the computed project-name default", () =
   );
 
   const loaded = loadRuntimeConfig({ cwd: root, env: {} });
-  const env = {};
-  applyRuntimeConfigToEnv(env, loaded);
-
-  assert.equal(env.ESHEPHERD_SOURCE_CAPTURE_WING, "shared-wing");
+  assert.equal(getRuntimeConfigValueByPath(loaded, "sourceCapture.wing"), "shared-wing");
 
   rmSync(root, { recursive: true, force: true });
 });
@@ -134,10 +124,7 @@ test("an explicit empty-string config wing still falls back to the computed defa
   );
 
   const loaded = loadRuntimeConfig({ cwd: root, env: {} });
-  const env = {};
-  applyRuntimeConfigToEnv(env, loaded);
-
-  assert.equal(env.ESHEPHERD_SOURCE_CAPTURE_WING, expectedWing);
+  assert.equal(getRuntimeConfigValueByPath(loaded, "sourceCapture.wing"), expectedWing);
 
   rmSync(root, { recursive: true, force: true });
 });

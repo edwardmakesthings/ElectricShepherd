@@ -16,12 +16,12 @@ type RuntimeConfigSpec = {
   allowedValues?: readonly string[]
 }
 
-type ConfigValueSource = "default" | "config" | "env"
+export const DEFAULT_MCP_URL = "http://localhost:8093/mcp"
+export const DEFAULT_MCP_TOOL_PREFIX = "mempalace_"
 
 export type LoadedRuntimeConfig = {
   configPath?: string
-  valuesByEnvKey: Record<string, string>
-  sourceByEnvKey: Record<string, ConfigValueSource>
+  valuesByPath: Record<string, any>
   warnings: string[]
 }
 
@@ -58,13 +58,14 @@ const DEFAULT_SPIRAL_EXEMPT_MODEL_PREFIXES = ["copilot-"]
 // Non-secret configuration surface. Secrets stay in env only.
 // Command-related options are intentionally grouped under commands.* paths.
 export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
-  { envKey: "MEMPALACE_MCP_URL", path: "mcp.url", kind: "string", defaultValue: "http://localhost:8093/mcp" },
+  { envKey: "MEMPALACE_MCP_URL", path: "mcp.url", kind: "string", defaultValue: DEFAULT_MCP_URL },
   { envKey: "ESHEPHERD_MCP_AUTO_DISCOVER", path: "mcp.autoDiscover", kind: "boolean", defaultValue: true },
   { envKey: "ESHEPHERD_MCP_REQUEST_TIMEOUT_MS", path: "mcp.requestTimeoutMs", kind: "number", defaultValue: 60000, min: 1 },
   { envKey: "ESHEPHERD_MCP_MAX_RETRIES", path: "mcp.maxRetries", kind: "number", defaultValue: 2, min: 0 },
   { envKey: "ESHEPHERD_MCP_RETRY_BACKOFF_MS", path: "mcp.retryBackoffMs", kind: "number", defaultValue: 800, min: 1 },
+  { envKey: "ESHEPHERD_MCP_RETRY_MAX_BACKOFF_MS", path: "mcp.retryMaxBackoffMs", kind: "number", defaultValue: 8000, min: 1 },
   { envKey: "ESHEPHERD_PYTHON_BIN", path: "mcp.pythonBin", kind: "string", defaultValue: "python" },
-  { envKey: "MEMGRAPH_TOOL_PREFIX", path: "mcp.toolPrefix", kind: "string", defaultValue: "mempalace_" },
+  { envKey: "MEMGRAPH_TOOL_PREFIX", path: "mcp.toolPrefix", kind: "string", defaultValue: DEFAULT_MCP_TOOL_PREFIX },
   { envKey: "MEMPALACE_MCP_AUTH_HEADER", path: "mcp.authHeader", kind: "string", defaultValue: "Authorization" },
   { envKey: "MEMPALACE_MCP_AUTH_SCHEME", path: "mcp.authScheme", kind: "string", defaultValue: "" },
   { envKey: "ESHEPHERD_DELETE_MCP_URL", path: "mcp.deleteUrl", kind: "string", defaultValue: "" },
@@ -127,6 +128,20 @@ export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
   { envKey: "ESHEPHERD_LOOPGUARD_MUTATION_TOOLS", path: "loopGuard.mutationTools", kind: "csv", defaultValue: DEFAULT_LOOP_MUTATION_TOOLS.join(",") },
   { envKey: "ESHEPHERD_LOOPGUARD_EXEMPT_TOOLS", path: "loopGuard.exemptTools", kind: "csv", defaultValue: DEFAULT_LOOP_EXEMPT_TOOLS.join(",") },
 
+  { envKey: "ESHEPHERD_TASK_WATCHDOG_ENABLED", path: "taskWatchdog.enabled", kind: "boolean", defaultValue: true },
+  { envKey: "ESHEPHERD_TASK_WATCHDOG_THRESHOLD", path: "taskWatchdog.repeatThreshold", kind: "number", defaultValue: 3, min: 1 },
+  { envKey: "ESHEPHERD_TASK_WATCHDOG_MAX_ESCALATIONS", path: "taskWatchdog.maxEscalations", kind: "number", defaultValue: 2, min: 1 },
+  { envKey: "ESHEPHERD_TASK_SERIALIZE_TYPES", path: "taskWatchdog.serializeTypes", kind: "csv", defaultValue: "explore,review-diff,run-tests" },
+  { envKey: "ESHEPHERD_TASK_SERIALIZE_COOLDOWN_MS", path: "taskWatchdog.serializeCooldownMs", kind: "number", defaultValue: 15000, min: 1 },
+  { envKey: "ESHEPHERD_TASK_SWAP_QWEN_MATCH", path: "taskWatchdog.swap.qwen.match", kind: "string", defaultValue: "qwen" },
+  { envKey: "ESHEPHERD_TASK_SWAP_QWEN_TO_PROVIDER", path: "taskWatchdog.swap.qwen.toProvider", kind: "string", defaultValue: "" },
+  { envKey: "ESHEPHERD_TASK_SWAP_QWEN_TO_MODEL", path: "taskWatchdog.swap.qwen.toModel", kind: "string", defaultValue: "litellm/implementer-gemma4-31b" },
+  { envKey: "ESHEPHERD_TASK_SWAP_GEMMA_MATCH", path: "taskWatchdog.swap.gemma.match", kind: "string", defaultValue: "gemma" },
+  { envKey: "ESHEPHERD_TASK_SWAP_GEMMA_TO_PROVIDER", path: "taskWatchdog.swap.gemma.toProvider", kind: "string", defaultValue: "" },
+  { envKey: "ESHEPHERD_TASK_SWAP_GEMMA_TO_MODEL", path: "taskWatchdog.swap.gemma.toModel", kind: "string", defaultValue: "litellm/implementer-qwen3.8-27b" },
+  { envKey: "ESHEPHERD_TASK_WATCHDOG_FALLBACK_PROVIDER", path: "taskWatchdog.fallback.provider", kind: "string", defaultValue: "" },
+  { envKey: "ESHEPHERD_TASK_WATCHDOG_FALLBACK_MODEL", path: "taskWatchdog.fallback.model", kind: "string", defaultValue: "" },
+
   { envKey: "ESHEPHERD_SPIRALGUARD_ENABLED", path: "spiralGuard.enabled", kind: "boolean", defaultValue: true },
   { envKey: "ESHEPHERD_SPIRALGUARD_INVESTIGATE_THRESHOLD", path: "spiralGuard.investigateThreshold", kind: "number", defaultValue: 3, min: 1 },
   { envKey: "ESHEPHERD_SPIRALGUARD_REVERSAL_THRESHOLD", path: "spiralGuard.reversalThreshold", kind: "number", defaultValue: 3, min: 1 },
@@ -146,6 +161,7 @@ export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
   { envKey: "ESHEPHERD_AUTO_CONSOLIDATION_MESSAGE_THRESHOLD", path: "consolidation.auto.messageThreshold", kind: "number", defaultValue: 12, min: 1 },
   { envKey: "ESHEPHERD_AUTO_CONSOLIDATION_COOLDOWN_MS", path: "consolidation.auto.cooldownMs", kind: "number", defaultValue: 600000, min: 1 },
   { envKey: "ESHEPHERD_AUTO_CONSOLIDATION_MAX_TRACKED_SESSIONS", path: "consolidation.auto.maxTrackedSessions", kind: "number", defaultValue: 512, min: 1 },
+  { envKey: "ESHEPHERD_CONSOLIDATION_SEARCH_LIMIT", path: "consolidation.searchLimit", kind: "number", defaultValue: 12, min: 1 },
   { envKey: "ESHEPHERD_CONSOLIDATION_LOCK_DISABLED", path: "consolidation.lock.disabled", kind: "boolean", defaultValue: false },
   {
     envKey: "ESHEPHERD_CONSOLIDATION_NATIVE_COORD_DISABLED",
@@ -256,6 +272,20 @@ function getByPath(root: unknown, path: string): unknown {
     node = node[part]
   }
   return node
+}
+
+function setByPath(root: Record<string, any>, path: string, value: string): void {
+  const parts = path.split(".")
+  let node: Record<string, any> = root
+  for (let i = 0; i < parts.length - 1; i += 1) {
+    const part = parts[i]
+    const child = node[part]
+    if (!child || typeof child !== "object" || Array.isArray(child)) {
+      node[part] = {}
+    }
+    node = node[part]
+  }
+  node[parts[parts.length - 1]] = value
 }
 
 function asBoolean(input: unknown): boolean | undefined {
@@ -381,37 +411,27 @@ export function loadRuntimeConfig(args: {
     }
   }
 
-  const valuesByEnvKey: Record<string, string> = {}
-  const sourceByEnvKey: Record<string, ConfigValueSource> = {}
+  const valuesByPath: Record<string, any> = {}
+  const configuredPaths = new Set<string>()
 
   for (const spec of RUNTIME_CONFIG_SPECS) {
-    // Precedence: explicit env > config file > default. An explicitly-set env var
-    // must win, otherwise a caller cannot isolate a spawned run from project
-    // config (e.g. one-shot consolidation subagents that must start clean of
-    // mem-core injection).
-    const fromEnv = normalizeSpecValue(spec, args.env[spec.envKey])
-    if (typeof fromEnv === "string") {
-      valuesByEnvKey[spec.envKey] = fromEnv
-      sourceByEnvKey[spec.envKey] = "env"
-      continue
-    }
-
     const fromConfig = normalizeSpecValue(spec, getByPath(rawConfig, spec.path))
     if (typeof fromConfig === "string") {
-      valuesByEnvKey[spec.envKey] = fromConfig
-      sourceByEnvKey[spec.envKey] = "config"
+      setByPath(valuesByPath, spec.path, fromConfig)
+      configuredPaths.add(spec.path)
       continue
     }
 
-    valuesByEnvKey[spec.envKey] = defaultStringForSpec(spec)
-    sourceByEnvKey[spec.envKey] = "default"
+    setByPath(valuesByPath, spec.path, defaultStringForSpec(spec))
   }
 
   for (const wingKey of ["ESHEPHERD_PROJECT_WING", "ESHEPHERD_SOURCE_CAPTURE_WING"]) {
     // An explicit "" in config means "unset" here too (matches the documented
     // example config), not "route captures to a blank wing".
-    if (sourceByEnvKey[wingKey] === "default" || valuesByEnvKey[wingKey] === "") {
-      valuesByEnvKey[wingKey] = computeDefaultProjectWing(args.cwd, "opencode")
+    const wingSpec = SPEC_BY_ENV_KEY.get(wingKey)
+    const currentValue = wingSpec ? asString(getByPath(valuesByPath, wingSpec.path)) : undefined
+    if (wingSpec && (!configuredPaths.has(wingSpec.path) || currentValue === "")) {
+      setByPath(valuesByPath, wingSpec.path, computeDefaultProjectWing(args.cwd, "opencode"))
     }
   }
 
@@ -419,24 +439,46 @@ export function loadRuntimeConfig(args: {
   // explicit "" in config means "unset" -> fall back to the spec default, not "route
   // promotions to a blank wing". Distinct from project/source wings above, which are
   // computed from the project directory.
-  if (sourceByEnvKey["ESHEPHERD_SHARED_SKILLS_WING"] === "default" || valuesByEnvKey["ESHEPHERD_SHARED_SKILLS_WING"] === "") {
-    valuesByEnvKey["ESHEPHERD_SHARED_SKILLS_WING"] = defaultStringForSpec(
-      SPEC_BY_ENV_KEY.get("ESHEPHERD_SHARED_SKILLS_WING")!,
-    )
+  const sharedWingSpec = SPEC_BY_ENV_KEY.get("ESHEPHERD_SHARED_SKILLS_WING")
+  const sharedWingValue = sharedWingSpec ? asString(getByPath(valuesByPath, sharedWingSpec.path)) : undefined
+  if (sharedWingSpec && (!configuredPaths.has(sharedWingSpec.path) || sharedWingValue === "")) {
+    setByPath(valuesByPath, sharedWingSpec.path, defaultStringForSpec(sharedWingSpec))
   }
 
   return {
     configPath: pathResult.path,
-    valuesByEnvKey,
-    sourceByEnvKey,
+    valuesByPath,
     warnings,
   }
 }
 
-export function applyRuntimeConfigToEnv(env: RuntimeEnv, config: LoadedRuntimeConfig): void {
-  for (const [key, value] of Object.entries(config.valuesByEnvKey)) {
-    env[key] = value
+function getRuntimeConfigValueByEnvKey(config: LoadedRuntimeConfig, envKey: string): string | undefined {
+  const spec = SPEC_BY_ENV_KEY.get(envKey)
+  if (!spec) return undefined
+  const value = getByPath(config.valuesByPath, spec.path)
+  const normalized = normalizeSpecValue(spec, value)
+  return typeof normalized === "string" ? normalized : undefined
+}
+
+export function getRuntimeConfigEnvMap(config: LoadedRuntimeConfig): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const spec of RUNTIME_CONFIG_SPECS) {
+    out[spec.envKey] = getRuntimeConfigValueByEnvKey(config, spec.envKey) ?? defaultStringForSpec(spec)
   }
+  return out
+}
+
+export function getRuntimeConfigValueByPath(config: LoadedRuntimeConfig, path: string): string | undefined {
+  if (!path.trim()) return undefined
+  const value = getByPath(config.valuesByPath, path)
+  const raw = asString(value)
+  if (typeof raw !== "string") return undefined
+  return raw
+}
+
+export function applyRuntimeConfigToEnv(env: RuntimeEnv, config: LoadedRuntimeConfig): void {
+  void env
+  void config
 }
 
 export function listRuntimeConfigEnvKeys(): string[] {

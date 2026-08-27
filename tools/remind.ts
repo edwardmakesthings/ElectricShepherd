@@ -465,7 +465,7 @@ export default tool({
     const call: CallTool = async (name: string, payload: Record<string, unknown>) =>
       client.callTool(`${prefix}${name}`, payload);
 
-    const wing = String(args.wing || process.env.ESHEPHERD_PROJECT_WING || "").trim();
+    const wing = String(args.wing || runtimeConfig.valuesByPath.memory?.projectWing || "").trim();
     const action = String(args.action || "list").trim().toLowerCase();
 
     if (action === "list") {

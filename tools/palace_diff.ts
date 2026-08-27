@@ -41,7 +41,7 @@ export default tool({
     const runtimeConfig = loadRuntimeConfig({ cwd, env: process.env });
     applyRuntimeConfigToEnv(process.env, runtimeConfig);
 
-    const wing = String(args.wing || process.env.ESHEPHERD_PROJECT_WING || "").trim();
+    const wing = String(args.wing || runtimeConfig.valuesByPath.memory?.projectWing || "").trim();
     if (!wing) throw new Error("palace_diff: wing is required (no project wing resolved)");
 
     const windows = resolveDiffWindows({

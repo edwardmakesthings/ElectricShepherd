@@ -41,6 +41,8 @@ export type MCPHttpClientOptions = {
   maxRetries?: number;
   /** Base backoff in milliseconds between retries. */
   retryBackoffMs?: number;
+  /** Maximum backoff cap in milliseconds between retries. */
+  retryMaxBackoffMs?: number;
 };
 
 export class MCPHttpClient {
@@ -53,6 +55,7 @@ export class MCPHttpClient {
   private readonly requestTimeoutMs: number;
   private readonly maxRetries: number;
   private readonly retryBackoffMs: number;
+  private readonly retryMaxBackoffMs: number;
 
   constructor(
     url: string,
@@ -68,6 +71,7 @@ export class MCPHttpClient {
     this.requestTimeoutMs = Number(options.requestTimeoutMs ?? 600000);
     this.maxRetries = Math.max(0, Math.floor(Number(options.maxRetries ?? 2)));
     this.retryBackoffMs = Math.max(1, Math.floor(Number(options.retryBackoffMs ?? 800)));
+    this.retryMaxBackoffMs = Math.max(this.retryBackoffMs, Math.floor(Number(options.retryMaxBackoffMs ?? 8000)));
   }
 
   private nextID(): number {
@@ -152,7 +156,7 @@ export class MCPHttpClient {
           throw err;
         }
         const jitterMs = Math.floor(Math.random() * 120);
-        const backoffMs = Math.min(this.retryBackoffMs * 2 ** attempt + jitterMs, 8000);
+        const backoffMs = Math.min(this.retryBackoffMs * 2 ** attempt + jitterMs, this.retryMaxBackoffMs);
         await this.sleep(backoffMs);
       } finally {
         clearTimeout(timeout);

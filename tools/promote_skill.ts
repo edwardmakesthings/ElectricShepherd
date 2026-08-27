@@ -528,7 +528,7 @@ export default tool({
     shared_wing: tool.schema
       .string()
       .optional()
-      .describe(`Destination wing for promoted skills. Defaults to ${DEFAULT_SHARED_WING} (or ESHEPHERD_SHARED_SKILLS_WING).`),
+      .describe(`Destination wing for promoted skills. Defaults to ${DEFAULT_SHARED_WING} (or memory.sharedSkillsWing in runtime config).`),
     room: tool.schema.string().optional().describe("Explicit destination room in the shared wing. Default: reuse-or-mint `skills`."),
     dry_run: tool.schema.boolean().optional().describe("Preview without writing (default true). Pass false to apply after approval."),
     tool_prefix: tool.schema.string().optional().describe("MCP tool prefix override."),
@@ -539,9 +539,9 @@ export default tool({
     const runtimeConfig = loadRuntimeConfig({ cwd, env: process.env });
     applyRuntimeConfigToEnv(process.env, runtimeConfig);
 
-    // Shared wing resolution: explicit arg > ESHEPHERD_SHARED_SKILLS_WING (applied
-    // from config/env above) > the canonical default. A location, not a kind.
-    const sharedWing = String(args.shared_wing || process.env.ESHEPHERD_SHARED_SKILLS_WING || "").trim();
+    // Shared wing resolution: explicit arg > runtime config memory.sharedSkillsWing
+    // > the canonical default. A location, not a kind.
+    const sharedWing = String(args.shared_wing || runtimeConfig.valuesByPath.memory?.sharedSkillsWing || "").trim();
 
     const { client, prefix } = await createPalaceClient({
       env: process.env,

@@ -10,6 +10,7 @@
  */
 
 import { MCPHttpClient, resolveMCPHeadersFromEnv } from "./mcp-http-client.ts";
+import { DEFAULT_MCP_TOOL_PREFIX, DEFAULT_MCP_URL } from "./runtime-config.ts";
 
 export type PalaceEnv = Record<string, string | undefined>;
 
@@ -23,12 +24,12 @@ export type PalaceEndpoint = {
 const LOOPBACK_URL = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i;
 
 export function resolvePalaceEndpoint(env: PalaceEnv): PalaceEndpoint {
-  const url = String(env.MEMPALACE_MCP_URL || "").trim() || "http://localhost:8093/mcp";
+  const url = String(env.MEMPALACE_MCP_URL || "").trim() || DEFAULT_MCP_URL;
   return { url, headers: LOOPBACK_URL.test(url) ? {} : resolveMCPHeadersFromEnv(env) };
 }
 
 export function palaceToolPrefix(env: PalaceEnv, override?: string): string {
-  return String(override || env.MEMGRAPH_TOOL_PREFIX || "mempalace_").trim() || "mempalace_";
+  return String(override || env.MEMGRAPH_TOOL_PREFIX || DEFAULT_MCP_TOOL_PREFIX).trim() || DEFAULT_MCP_TOOL_PREFIX;
 }
 
 export async function createPalaceClient(args: {

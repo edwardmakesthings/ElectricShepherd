@@ -6,7 +6,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isTranscriptLikeRoom, parseTaxonomy } from "../adapter/palace-tools.ts";
 import { MCPHttpClient, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-client.ts";
-import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
+import { DEFAULT_MCP_TOOL_PREFIX, DEFAULT_MCP_URL, loadRuntimeConfig } from "../adapter/runtime-config.ts";
 import { loadRuntimeEnv } from "./runtime-env.ts";
 
 const runtimeProcess = (globalThis as unknown as {
@@ -48,12 +48,12 @@ function parseCSV(value: string): string[] {
   return [...new Set(value.split(",").map((v) => v.trim()).filter(Boolean))];
 }
 
-function parseArgs(argv: string[], env: Record<string, string | undefined>): ParsedArgs {
+function parseArgs(argv: string[], runtimeConfig: ReturnType<typeof loadRuntimeConfig>): ParsedArgs {
   const wing =
     getArg(argv, "--wing") ||
-    String(env.ESHEPHERD_PROJECT_WING || "").trim() ||
-    String(env.ESHEPHERD_SOURCE_CAPTURE_WING || "").trim();
-  if (!wing) throw new Error("run-nontranscript-backfill: --wing is required (or set ESHEPHERD_PROJECT_WING)");
+    String(runtimeConfig.valuesByPath.memory?.projectWing || "").trim() ||
+    String(runtimeConfig.valuesByPath.sourceCapture?.wing || "").trim();
+  if (!wing) throw new Error("run-nontranscript-backfill: --wing is required (or set memory.projectWing in config)");
 
   return {
     wing,
@@ -70,11 +70,15 @@ function parseArgs(argv: string[], env: Record<string, string | undefined>): Par
   };
 }
 
-async function resolveRooms(args: ParsedArgs, env: Record<string, string | undefined>): Promise<string[]> {
+async function resolveRooms(
+  args: ParsedArgs,
+  env: Record<string, string | undefined>,
+  runtimeConfig: ReturnType<typeof loadRuntimeConfig>,
+): Promise<string[]> {
   if (args.rooms.length > 0) return args.rooms;
 
-  const mcpURL = String(env.MEMPALACE_MCP_URL || "http://localhost:8093/mcp").trim();
-  const toolPrefix = String(env.MEMGRAPH_TOOL_PREFIX || "mempalace_").trim() || "mempalace_";
+  const mcpURL = String(runtimeConfig.valuesByPath.mcp?.url || "").trim() || DEFAULT_MCP_URL;
+  const toolPrefix = String(runtimeConfig.valuesByPath.mcp?.toolPrefix || "").trim() || DEFAULT_MCP_TOOL_PREFIX;
   const headers = mcpURL.includes("localhost:8093") ? {} : resolveMCPHeadersFromEnv(env);
   const client = new MCPHttpClient(mcpURL, headers, { clientName: "electric-shepherd-nontranscript-backfill" });
   await client.initialize();
@@ -139,16 +143,15 @@ async function runOneRoom(scriptPath: string, repoRoot: string, args: ParsedArgs
 async function main(): Promise<void> {
   loadRuntimeEnv({ scriptUrl: import.meta.url, env: runtimeProcess.env });
   const runtimeConfig = loadRuntimeConfig({ cwd: runtimeProcess.cwd(), env: runtimeProcess.env });
-  applyRuntimeConfigToEnv(runtimeProcess.env, runtimeConfig);
 
   const argv = runtimeProcess.argv.slice(2);
-  const args = parseArgs(argv, runtimeProcess.env);
+  const args = parseArgs(argv, runtimeConfig);
 
   const scriptDir = dirname(fileURLToPath(import.meta.url));
   const repoRoot = resolve(scriptDir, "..");
   const consolidationScript = resolve(repoRoot, "scripts", "run-memory-consolidation-and-validation.ts");
 
-  const rooms = await resolveRooms(args, runtimeProcess.env);
+  const rooms = await resolveRooms(args, runtimeProcess.env, runtimeConfig);
   if (rooms.length === 0) {
     runtimeProcess.stdout.write(
       `${JSON.stringify(
