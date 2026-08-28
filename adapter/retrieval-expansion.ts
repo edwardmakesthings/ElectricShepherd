@@ -928,6 +928,52 @@ export function buildCapabilityCanonicalShape(shape: WorkedExampleShape): string
 export function buildCapabilityBucketId(shapeKey: string, tier: CapabilityTier): string {
   return `capability::${shapeKey}::${tier}`;
 }
+/** Phase 15: closed failure-event vocabulary for per-model failure-mode memory. */
+export const FAILURE_EVENT_VALUES = ["spiral", "loop"] as const;
+
+export type FailureEvent = (typeof FAILURE_EVENT_VALUES)[number];
+
+/** Phase 15: closed intervention-label vocabulary (the guard that issued the nudge). */
+export const INTERVENTION_LABELS = ["spiral-nudge", "retry-nudge", "loop-block"] as const;
+
+export type InterventionLabel = (typeof INTERVENTION_LABELS)[number];
+
+/**
+ * Phase 15: canonical model identity for failure attribution. Deterministic and
+ * cheap — `provider/model` lowercased, exactly the pair used by turn-guard routing
+ * pins (getPromptRouting / resolveLoopGuardRouting), so failure events key to the
+ * same model id that capability routing looks up. Returns null when either half is
+ * missing: unknown model => skip recording rather than guess a bucket.
+ */
+export function canonicalModelId(providerID?: string, modelID?: string): string | null {
+  const provider = String(providerID ?? "").trim().toLowerCase();
+  const model = String(modelID ?? "").trim().toLowerCase();
+  if (!provider || !model) return null;
+  return `${provider}/${model}`;
+}
+
+/**
+ * Phase 15: deterministic failure bucket id for a (model, shapeKey) pair. Mirrors
+ * buildCapabilityBucketId's `capability::<shapeKey>::<tier>` form so the two axes
+ * share one node-naming convention — but under a distinct `failure::` namespace,
+ * never colliding with capability buckets or reserved predicates.
+ */
+export function buildFailureBucketId(modelId: string, shapeKey: string): string {
+  return `failure::${modelId}::${shapeKey}`;
+}
+
+/**
+ * Phase 15: deterministic intervention-patch id for a (model, shapeKey, label)
+ * triple. One node per (model, shape, guard) so repeated identical interventions
+ * accumulate on the same node instead of minting new ones.
+ */
+export function buildFailurePatchId(modelId: string, shapeKey: string, label: InterventionLabel): string {
+  return `failure-patch::${modelId}::${shapeKey}::${label}`;
+}
+
+/** Phase 15: bound intervention text stored as a KG fact (kg object field). */
+export const FAILURE_PATCH_TEXT_MAX_CHARS = 500;
+
 
 /**
  * Phase 13: build a compact worked-example entry for filing to the palace.

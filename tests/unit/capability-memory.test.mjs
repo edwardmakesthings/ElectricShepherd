@@ -32,6 +32,7 @@ const {
   mapTaskStatusToCapabilityOutcome,
   buildCapabilityCanonicalShape,
   buildCapabilityBucketId,
+  buildFailureBucketId,
 } = await import("../../adapter/retrieval-expansion.ts");
 
 // The real CONSUME client.
@@ -338,6 +339,141 @@ test("CONSUME: issues one-hop kg_query per tier bucket with the es-capability-ou
     assert.equal(call.max_depth, 1);
     assert.ok(!("recurse" in call), `recurse must not be set for one-hop queries: ${JSON.stringify(call)}`);
   }
+});
+
+// ── (e2) CONSUME Phase 15: failure-adjusted routing composition ──────────────
+// This repo has no in-repo tier SELECTOR (the orchestrator that delegates units
+// to tiers lives outside this codebase), so the penalty integration is exposed
+// as a deterministic composed API: getFailureAdjustedRouting combines Phase 14
+// capability evidence with Phase 15 per-model failure counts into an adjusted
+// recommendation. An external consumer calls it once before choosing a tier.
+
+function makeCompositeClient(factsByBucket) {
+  return createMemgraphClient({
+    callTool: async (name, args) => {
+      if (name.endsWith("kg_query")) {
+        const entity = String(args?.entity ?? "");
+        return { facts: factsByBucket[entity] || [] };
+      }
+      return {};
+    },
+  });
+}
+
+function failureFacts(bucketId, events) {
+  return events.map((e) => ({ current: true, subject: bucketId, predicate: "es-failure-event", object: e }));
+}
+
+test("Phase 15 CONSUME: high failure propensity flips the recommendation (differential behavior)", async () => {
+  const shape = "aaaa0001";
+  // Capability evidence: local is strong (5/5), cloud is weak (1/5). With no
+  // failure data, Phase 14 alone recommends local.
+  const factsByBucket = {
+    [`capability::${shape}::local`]: outcomeFacts(`capability::${shape}::local`, ["accept", "accept", "accept", "accept", "accept"]),
+    [`capability::${shape}::cloud`]: outcomeFacts(`capability::${shape}::cloud`, ["accept", "failed", "failed", "failed", "failed"]),
+  };
+
+  const modelLocal = "litellm/model-a";
+  const modelCloud = "litellm/model-b";
+  const modelByTier = { local: modelLocal, cloud: modelCloud, deep: null };
+
+  // Baseline: no failure events — the composition must agree with Phase 14.
+  const baseline = await makeCompositeClient(factsByBucket).getFailureAdjustedRouting(shape, modelByTier);
+  assert.equal(baseline.recommendation, "local", `no failures must keep the Phase 14 pick, got ${baseline.recommendation}`);
+  assert.equal(baseline.fallback, false);
+
+  // Now model-a (pinned to local) has a HIGH failure propensity on this shape:
+  // 10 turn-guard interventions. The penalty must flip the recommendation to cloud.
+  factsByBucket[buildFailureBucketId(modelLocal, shape)] = failureFacts(buildFailureBucketId(modelLocal, shape), [
+    "spiral", "loop", "loop", "spiral", "loop", "loop", "spiral", "loop", "spiral", "loop",
+  ]);
+
+  const adjusted = await makeCompositeClient(factsByBucket).getFailureAdjustedRouting(shape, modelByTier);
+  assert.equal(adjusted.recommendation, "cloud", `high failure propensity must flip the pick to cloud, got ${adjusted.recommendation}`);
+  assert.equal(adjusted.fallback, false);
+  // The evidence must be explainable: base rate minus clamped failure rate.
+  assert.ok(Math.abs(adjusted.tiers.local.baseRate - 1.0) < 1e-9, "local base rate must be 5/5");
+  assert.equal(adjusted.tiers.local.failureTotal, 10, "local tier must carry model-a's failure count");
+  // local: 1 - 10/max(10,5) = 0.0 ; cloud: 0.2 - 0/5 = 0.2 — strict differential.
+  assert.ok(Math.abs(adjusted.tiers.local.adjustedScore - 0.0) < 1e-9, "local score = base - failures/max(failures,5)");
+  assert.ok(Math.abs(adjusted.tiers.cloud.adjustedScore - 0.2) < 1e-9, "cloud score = base (no failures)");
+  assert.notEqual(adjusted.recommendation, baseline.recommendation, "the recommendation must differ from the no-failure baseline");
+});
+
+test("Phase 15 CONSUME: penalty magnitude scales with failure count (strict differential)", async () => {
+  const shape = "bbbb0002";
+  // local 5/5 vs cloud 4/5 — a small capability gap (1.0 vs 0.8).
+  const factsByBucket = {
+    [`capability::${shape}::local`]: outcomeFacts(`capability::${shape}::local`, ["accept", "accept", "accept", "accept", "accept"]),
+    [`capability::${shape}::cloud`]: outcomeFacts(`capability::${shape}::cloud`, ["accept", "accept", "accept", "accept", "failed"]),
+  };
+
+  const modelLocal = "litellm/model-a";
+  const modelCloud = "litellm/model-b";
+  const modelByTier = { local: modelLocal, cloud: modelCloud, deep: null };
+
+  // No failures: local wins (1.0 > 0.8).
+  const noFailures = await makeCompositeClient(factsByBucket).getFailureAdjustedRouting(shape, modelByTier);
+  assert.equal(noFailures.recommendation, "local");
+
+  // 2 failures on model-a: local score = 1 - 2/5 = 0.6 < cloud 0.8 => cloud wins.
+  factsByBucket[buildFailureBucketId(modelLocal, shape)] = failureFacts(buildFailureBucketId(modelLocal, shape), ["loop", "spiral"]);
+  const twoFailures = await makeCompositeClient(factsByBucket).getFailureAdjustedRouting(shape, modelByTier);
+  assert.equal(twoFailures.recommendation, "cloud", `2 failures must overcome the capability gap, got ${twoFailures.recommendation}`);
+
+  // The adjusted scores must be explainable and strictly ordered.
+  assert.ok(Math.abs(twoFailures.tiers.local.adjustedScore - (1 - 2 / 5)) < 1e-9, "local score = base - failures/max(failures,5)");
+  assert.ok(Math.abs(twoFailures.tiers.cloud.adjustedScore - 0.8) < 1e-9, "cloud score = base (no failures)");
+  assert.ok(twoFailures.tiers.cloud.adjustedScore > twoFailures.tiers.local.adjustedScore);
+});
+
+test("Phase 15 CONSUME: unknown model on a tier gets no penalty (no guessing)", async () => {
+  const shape = "cccc0003";
+  // local 5/5, cloud 4/5. Local's model is UNKNOWN (null) — its failure bucket
+  // must not be read as bad or good; the recommendation stays capability-based.
+  const factsByBucket = {
+    [`capability::${shape}::local`]: outcomeFacts(`capability::${shape}::local`, ["accept", "accept", "accept", "accept", "accept"]),
+    [`capability::${shape}::cloud`]: outcomeFacts(`capability::${shape}::cloud`, ["accept", "accept", "accept", "accept", "failed"]),
+  };
+  const modelByTier = { local: null, cloud: "litellm/model-b", deep: null };
+
+  const res = await makeCompositeClient(factsByBucket).getFailureAdjustedRouting(shape, modelByTier);
+  assert.equal(res.recommendation, "local", "unknown model must not be penalized");
+  assert.equal(res.tiers.local.failureTotal, 0, "unknown model must read as zero failures (no data)");
+});
+
+test("Phase 15 CONSUME: below min-sample capability evidence still falls back to no-data", async () => {
+  const shape = "dddd0004";
+  // Only 3 samples on local — insufficient, even with zero failures.
+  const factsByBucket = {
+    [`capability::${shape}::local`]: outcomeFacts(`capability::${shape}::local`, ["accept", "accept", "accept"]),
+  };
+  const res = await makeCompositeClient(factsByBucket).getFailureAdjustedRouting(shape, { local: "litellm/model-a" });
+  assert.equal(res.recommendation, "no-data", "insufficient capability sample must fall back");
+  assert.equal(res.fallback, true);
+});
+
+test("Phase 15 CONSUME: degrades gracefully on kg_query failure (no-data, no throw)", async () => {
+  const client = createMemgraphClient({
+    callTool: async () => {
+      throw new Error("server down");
+    },
+  });
+  const res = await client.getFailureAdjustedRouting("eeee0005", { local: "litellm/model-a" });
+  assert.equal(res.recommendation, "no-data");
+  assert.equal(res.fallback, true);
+});
+
+test("Phase 15 CONSUME: failure counts are read from the SAME failure bucket ids (one shape system)", async () => {
+  const shape = extractWorkedExampleShape("Fix the websocket reconnect bug in gateway.ts").shapeKey;
+  const model = "litellm/model-a";
+  const factsByBucket = {
+    [`capability::${shape}::local`]: outcomeFacts(`capability::${shape}::local`, ["accept", "accept", "accept", "accept", "accept"]),
+    [buildFailureBucketId(model, shape)]: failureFacts(buildFailureBucketId(model, shape), ["spiral"]),
+  };
+  const client = makeCompositeClient(factsByBucket);
+  const res = await client.getFailureAdjustedRouting(shape, { local: model, cloud: null, deep: null });
+  assert.equal(res.tiers.local.failureTotal, 1, "failure count must come from failure::<model>::<shapeKey>");
 });
 
 // ── (f) Predicate collision check: es-capability-* is NOT in the reserved set ─

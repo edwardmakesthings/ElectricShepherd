@@ -1494,6 +1494,257 @@ export class MemgraphClient {
 
     return { tiers: tierCounts, recommendation, fallback, threshold: minSample };
   }
+  // ── Phase 15: per-model failure-mode memory axes ────────────────────────────
+  // `es-failure-event` edges record one turn-guard intervention (spiral / loop)
+  // attributed to a (model, task-shape) bucket. The subject is the deterministic
+  // failure bucket id (`failure::<provider/model>::<shapeKey>`, shapeKey from the
+  // SAME Phase 14/13 shape function — no second shape system); the object is one
+  // of spiral | loop. Edges ACCUMULATE like es-capability-outcome: multiple edges
+  // per bucket are expected and meaningful, nothing here invalidates them.
+  //
+  // `es-failure-shape` carries the canonical shape summary on the same bucket for
+  // explainability (best-effort). `es-intervention-label` / `es-intervention-text`
+  // live on patch nodes (`failure-patch::<model>::<shapeKey>::<label>`) and record
+  // the prompt intervention that broke the loop for that (model, shape) — durable
+  // procedural knowledge about a specific model.
+  //
+  // NOTE: `es-failure-*` / `es-intervention-*` predicates are NEW and deliberately
+  // distinct from the reserved set (synthesized-from, consolidated-into, merged-into,
+  // in-hall, es-status, es-source-type, es-outcome, concerns, triggers-on, rules-out,
+  // es-staleness) and from Phase 14's `es-capability-*`. They must never count toward
+  // height or feed lineage traversal.
+
+  static readonly FAILURE_EVENT_PREDICATE = "es-failure-event";
+  static readonly FAILURE_SHAPE_PREDICATE = "es-failure-shape";
+  static readonly INTERVENTION_LABEL_PREDICATE = "es-intervention-label";
+  static readonly INTERVENTION_TEXT_PREDICATE = "es-intervention-text";
+
+  /**
+   * Record ONE failure event edge for a (model, shape) bucket. Accumulation —
+   * never invalidates or overwrites existing edges. `validFrom` timestamps the
+   * edge so consumers can window recent history. Throws on an invalid event value:
+   * the axis is closed to exactly spiral | loop.
+   */
+  async recordFailureEvent(bucketId: string, event: string, validFrom?: string): Promise<void> {
+    const id = this.asString(bucketId).trim();
+    if (!id) throw new Error("recordFailureEvent: bucketId is required");
+    if (event !== "spiral" && event !== "loop") {
+      throw new Error(`recordFailureEvent: invalid event "${event}" — must be spiral | loop`);
+    }
+    await this.kgAdd({
+      subject: id,
+      predicate: MemgraphClient.FAILURE_EVENT_PREDICATE,
+      object: event,
+      valid_from: validFrom,
+      source_closet: id,
+    });
+  }
+
+  /**
+   * Best-effort stamp of the canonical shape summary on a failure bucket. Returns
+   * true on success, false on failure — never throws in the normal flow.
+   */
+  async setFailureShape(bucketId: string, canonicalShape: string): Promise<boolean> {
+    const id = this.asString(bucketId).trim();
+    const shape = this.asString(canonicalShape).trim();
+    if (!id || !shape) return false;
+    try {
+      await this.kgAdd({
+        subject: id,
+        predicate: MemgraphClient.FAILURE_SHAPE_PREDICATE,
+        object: shape.slice(0, 200),
+        source_closet: id,
+      });
+      return true;
+    } catch {
+      // non-fatal: leave the axis "unknown" rather than fail the caller
+      return false;
+    }
+  }
+
+  /**
+   * Record a successful intervention (prompt patch) for a (model, shape, label)
+   * node. The label is stamped on every write (idempotent — repeated identical
+   * writes are harmless); the text is bounded by the caller before being passed.
+   * Never throws in the normal flow.
+   */
+  async recordIntervention(patchId: string, label: string, text: string): Promise<boolean> {
+    const id = this.asString(patchId).trim();
+    const lbl = this.asString(label).trim();
+    if (!id || !lbl) return false;
+    try {
+      await this.kgAdd({ subject: id, predicate: MemgraphClient.INTERVENTION_LABEL_PREDICATE, object: lbl, source_closet: id });
+      const clipped = this.asString(text).trim().slice(0, 500);
+      if (clipped) {
+        await this.kgAdd({ subject: id, predicate: MemgraphClient.INTERVENTION_TEXT_PREDICATE, object: clipped, source_closet: id });
+      }
+      return true;
+    } catch {
+      // non-fatal: an intervention write failure degrades to "no known patch"
+      return false;
+    }
+  }
+
+  /**
+   * Phase 15 CONSUME (routing signal): aggregate failure events for a
+   * (model, shape) bucket. One one-hop outgoing kg_query on es-failure-event.
+   * Read failures degrade to zero counts (neutral) — a failed read must never look
+   * like "this model is bad" or "this model is fine"; it looks like "no data".
+   */
+  async getFailureCounts(
+    bucketId: string,
+  ): Promise<{ spiral: number; loop: number; total: number }> {
+    const id = this.asString(bucketId).trim();
+    if (!id) return { spiral: 0, loop: 0, total: 0 };
+    try {
+      const result = await this.kgQuery({
+        entity: id,
+        direction: "outgoing",
+        predicate: MemgraphClient.FAILURE_EVENT_PREDICATE,
+        recurse: false,
+        max_depth: 1,
+      });
+      let spiral = 0;
+      let loop = 0;
+      for (const fact of this.parseKgFacts(result)) {
+        if (!this.asBoolean(fact.current, true)) continue;
+        const value = this.asString(fact.object).trim();
+        if (value === "spiral") spiral += 1;
+        else if (value === "loop") loop += 1;
+        // unknown values are ignored — the axis is closed by construction
+      }
+      return { spiral, loop, total: spiral + loop };
+    } catch {
+      // non-fatal: a failed read reads as "no history" (neutral)
+      return { spiral: 0, loop: 0, total: 0 };
+    }
+  }
+
+  /**
+   * Phase 15 CONSUME (prompt patches): fetch known successful intervention texts
+   * for every patch node of a (model, shape). Bounded by maxPatches (default 4) —
+   * one one-hop kg_query per candidate label. Read failures degrade to no patches;
+   * absent data yields an empty list (no injection, no prompt bloat).
+   */
+  async getFailureInterventions(
+    modelId: string,
+    shapeKey: string,
+    options?: { maxPatches?: number },
+  ): Promise<string[]> {
+    const model = this.asString(modelId).trim();
+    const shape = this.asString(shapeKey).trim();
+    if (!model || !shape) return [];
+    const maxPatches = Math.max(1, Math.min(8, Number(options?.maxPatches ?? 4)));
+    // Closed label vocabulary — the only patch nodes that can exist.
+    const labels = ["spiral-nudge", "retry-nudge", "loop-block"];
+    const out: string[] = [];
+    for (const label of labels.slice(0, maxPatches)) {
+      const patchId = `failure-patch::${model}::${shape}::${label}`;
+      try {
+        const result = await this.kgQuery({
+          entity: patchId,
+          direction: "outgoing",
+          predicate: MemgraphClient.INTERVENTION_TEXT_PREDICATE,
+          recurse: false,
+          max_depth: 1,
+        });
+        for (const fact of this.parseKgFacts(result)) {
+          if (!this.asBoolean(fact.current, true)) continue;
+          const text = this.asString(fact.object).trim();
+          if (text && !out.includes(text)) out.push(text);
+        }
+      } catch {
+        // non-fatal: skip this label
+      }
+    }
+    return out.slice(0, maxPatches);
+  }
+
+  /**
+   * Phase 15 CONSUME (routing signal): combine Phase 14 capability evidence with
+   * Phase 15 per-model failure counts into an ADJUSTED tier recommendation.
+   *
+   * This repo has no in-repo tier SELECTOR — the orchestrator that delegates units
+   * to tiers lives outside this codebase (the task tool is invoked by the agent, not
+   * by a routing function here). So the penalty integration is exposed as a
+   * deterministic composed API: an external consumer calls this once before
+   * choosing a tier and reads `recommendation` + `evidence`.
+   * TODO(external-consumer): wire this into orchestrate-cloud's tier selection.
+   *
+   * Deterministic scoring (no LLM, no embeddings):
+   *   base(tier)      = accept / total            (Phase 14 evidence; undefined if total < minSample)
+   *   failureRate(m,s)= failures / max(failures, MIN_FAILURE_SAMPLE)
+   *                    where failures = es-failure-event count for `failure::<model>::<shapeKey>`;
+   *                    the denominator is clamped at MIN_FAILURE_SAMPLE so a single nudge
+   *                    cannot dominate (mirrors Phase 14's min-sample discipline).
+   *   score(tier)     = base(tier) - failureRate(modelOf(tier), shape)
+   *   pick            = highest score among tiers with base defined; deterministic
+   *                     tie-break order: local, cloud, deep. No eligible tier => "no-data".
+   *
+   * A model whose outputs get REVISE'd / nudged on a task class loses to a sibling
+   * on that class independent of overall capability — exactly the spec's CONSUME #1.
+   */
+  async getFailureAdjustedRouting(
+    shapeKey: string,
+    modelByTier: Record<string, string | null>,
+    options?: { minSample?: number; minFailureSample?: number },
+  ): Promise<{
+    recommendation: string;
+    fallback: boolean;
+    threshold: number;
+    tiers: Record<string, { baseRate: number | null; failureTotal: number; adjustedScore: number | null }>;
+  }> {
+    const key = this.asString(shapeKey).trim();
+    const minSample = Math.max(1, Number(options?.minSample ?? 5));
+    const minFailureSample = Math.max(1, Number(options?.minFailureSample ?? 5));
+
+    if (!key) {
+      return { recommendation: "no-data", fallback: true, threshold: minSample, tiers: {} };
+    }
+
+    const evidence = await this.getCapabilityRoutingEvidence(key, { minSample });
+    const tierNames = ["local", "cloud", "deep"];
+    const tiers: Record<string, { baseRate: number | null; failureTotal: number; adjustedScore: number | null }> = {};
+
+    for (const tier of tierNames) {
+      const counts = evidence.tiers[tier];
+      const total = counts?.total ?? 0;
+      const sufficient = Boolean(counts?.sufficient_sample);
+      const baseRate = sufficient && total > 0 ? counts.accept / total : null;
+
+      // Failure propensity of the model pinned to this tier for THIS shape.
+      // Unknown model (null/empty) => no penalty: an unattributable bucket must not
+      // look like "this model is bad" or "fine" — it looks like no data.
+      const modelId = this.asString(modelByTier?.[tier] ?? "").trim();
+      let failureTotal = 0;
+      if (modelId) {
+        const counts2 = await this.getFailureCounts(`failure::${modelId}::${key}`);
+        failureTotal = counts2.total;
+      }
+      const failureRate = failureTotal / Math.max(failureTotal, minFailureSample);
+      tiers[tier] = {
+        baseRate,
+        failureTotal,
+        adjustedScore: baseRate === null ? null : baseRate - failureRate,
+      };
+    }
+
+    let recommendation = "no-data";
+    let fallback = true;
+    let bestScore = -Infinity;
+    for (const tier of tierNames) {
+      const score = tiers[tier].adjustedScore;
+      if (score === null) continue;
+      if (score > bestScore) {
+        bestScore = score;
+        recommendation = tier;
+        fallback = false;
+      }
+    }
+
+    return { recommendation, fallback, threshold: minSample, tiers };
+  }
+
 
   /**
    * Phase 8 (unified memory): prospective-memory read side. One bounded page of

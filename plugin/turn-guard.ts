@@ -53,7 +53,7 @@ import type { AutoConsolidationTrigger, MemcoreInjectionRecord } from "../adapte
 import { loadPackagedAssets, mergeWithoutOverride, loadInstructionPaths, dedupeAppendInstructions } from "../adapter/asset-loader.ts"
 import { loadRuntimeConfig, getRuntimeConfigEnvMap, DEFAULT_MCP_URL, DEFAULT_MCP_TOOL_PREFIX } from "../adapter/runtime-config.ts"
 import { MCPHttpClient, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-client.ts"
-import { retrieveSimilarWorkedExamples, formatWorkedExampleDemonstration, WORKED_EXAMPLE_MAX_INJECT, WORKED_EXAMPLE_RELEVANCE_FLOOR, extractWorkedExampleShape, buildWorkedExampleEntry, WORKED_EXAMPLE_FILE_AGENT_TYPES, WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS, CAPABILITY_TIER_BY_SUBAGENT, mapTaskStatusToCapabilityOutcome, buildCapabilityCanonicalShape, buildCapabilityBucketId } from "../adapter/retrieval-expansion.ts"
+import { retrieveSimilarWorkedExamples, formatWorkedExampleDemonstration, WORKED_EXAMPLE_MAX_INJECT, WORKED_EXAMPLE_RELEVANCE_FLOOR, extractWorkedExampleShape, buildWorkedExampleEntry, WORKED_EXAMPLE_FILE_AGENT_TYPES, WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS, CAPABILITY_TIER_BY_SUBAGENT, mapTaskStatusToCapabilityOutcome, buildCapabilityCanonicalShape, buildCapabilityBucketId, canonicalModelId, buildFailureBucketId, buildFailurePatchId, FAILURE_PATCH_TEXT_MAX_CHARS } from "../adapter/retrieval-expansion.ts"
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts"
 import deleteDrawersTool from "../tools/delete_drawers.ts"
 import moveDrawersTool from "../tools/move_drawers.ts"
@@ -166,8 +166,21 @@ const DEFAULT_WORKED_EXAMPLE_FILING_ENABLED = true
 // outcome is derived from the task tool part status (success/failed/aborted), NOT
 // from Phase 7's es-outcome axis (human-authoritative). Best-effort: any failure
 // degrades to a log line and never throws into the turn.
-const DEFAULT_CAPABILITY_RECORDING_ENABLED = true
-// looking like a loop, without needing to exempt the verify tools themselves.
+  const DEFAULT_CAPABILITY_RECORDING_ENABLED = true
+// Phase 15 CREATE: when a turn-guard intervention fires (loop nudge, spiral
+// detection), record a failure event attributed to (model, task shape) plus the
+// successful intervention text. Shape reuses Phase 14's extractWorkedExampleShape /
+// buildCapabilityCanonicalShape — no second shape system. Model identity is
+// deterministic from routing context (provider/model); unknown => skip. The
+// failure axis uses NEW es-failure-* / es-intervention-* predicates, never
+// es-outcome (Phase 7 is human-authoritative). Best-effort: any failure degrades
+// to a log line and never throws into the turn.
+const DEFAULT_FAILURE_RECORDING_ENABLED = true
+// Phase 15 CONSUME: when delegating via the task tool, inject known successful
+// intervention patches for (model, shape) — only on an exact (model, shapeKey)
+// match, so absent data yields no injection and no prompt bloat.
+const DEFAULT_FAILURE_PATCH_INJECTION_ENABLED = true
+  // looking like a loop, without needing to exempt the verify tools themselves.
 const DEFAULT_LOOP_MUTATION_TOOLS = [
   "write",
   "edit",
@@ -1280,9 +1293,40 @@ export const TurnGuard = async ({ client, directory }: any) => {
     "taskWatchdog.capabilityRecording.enabled",
     DEFAULT_CAPABILITY_RECORDING_ENABLED,
   )
+  // Phase 15 CREATE: config for recording per-model failure events + interventions.
+  const failureRecordingEnabled = cfgBool(
+    "taskWatchdog.failureRecording.enabled",
+    DEFAULT_FAILURE_RECORDING_ENABLED,
+  )
+  // Phase 15 CONSUME: config for injecting (model, shape) intervention patches.
+  const failurePatchInjectionEnabled = cfgBool(
+    "taskWatchdog.failurePatchInjection.enabled",
+    DEFAULT_FAILURE_PATCH_INJECTION_ENABLED,
+  )
   // Session-local dedup for capability recording — prevents double-recording the
   // same (message, part) on repeated idle events. Keyed by subagentType:shapeKey.
   const capabilityRecordedBySession = new Map<string, Set<string>>()
+  // Phase 15 CREATE: session-local dedup for failure-event recording. Turn-guard
+  // events can fire repeatedly in one session (repeated loop nudges on the same
+  // model/shape); identical (bucketId, event) pairs are recorded once per session.
+  const failureRecordedBySession = new Map<string, Set<string>>()
+  // Phase 15 CREATE: pending intervention patches awaiting proof of success.
+  // An intervention text is NOT durable knowledge the moment it is attempted —
+  // only when there is deterministic evidence it actually broke the loop/spiral.
+  // Each guard that issues a nudge queues its patch here (keyed by message id);
+  // onMessageUpdated later confirms or expires it:
+  //   - retry / spiral nudges: confirmed when the next assistant stop for this
+  //     session is considered complete by the SAME predicates issueRetry uses
+  //     (hasUsefulPayload && !endsMidIntent && (!reviewRequired || hasReview)).
+  //     That is the "subsequent clean completion" signal — no LLM, just the
+  //     existing turn-guard observable state.
+  //   - loop-block nudges: confirmed when the model's next tool call in this
+  //     session is a DIFFERENT signature than the one that was blocked (the
+  //     guard itself wipes its window after a nudge, so any next non-exempt tool
+  //     call is by construction different). Repeating the identical call
+  //     expires the pending patch instead.
+  // Expired / unconfirmed patches are dropped — failed attempts never persist.
+  const pendingInterventionBySession = new Map<string, Array<{ key: string; label: string; text: string }>>()
   let workedExampleClientPromise: Promise<any> | null = null
   function getWorkedExampleClient(): Promise<any> {
     if (!workedExampleClientPromise) {
@@ -1306,6 +1350,9 @@ export const TurnGuard = async ({ client, directory }: any) => {
             mcp.callTool(`${toolPrefix}diary_write`, args),
           kgAdd: (args: Record<string, unknown>) =>
             mcp.callTool(`${toolPrefix}kg_add`, args),
+          // Phase 15 CONSUME: bounded one-hop KG read for failure-mode patches.
+          kgQuery: (args: Record<string, unknown>) =>
+            mcp.callTool(`${toolPrefix}kg_query`, args),
         }
       })().catch((err) => {
         console.log(`[turn-guard] worked-example injection: palace client init failed: ${String(err)}`)
@@ -1491,6 +1538,193 @@ export const TurnGuard = async ({ client, directory }: any) => {
     }
   }
 
+  // Phase 15 CREATE (worked-intervention persistence): stamp the prompt patch that
+  // BROKE a loop/spiral for this (model, shape) — durable procedural knowledge.
+  // Called ONLY from confirmPendingInterventions with evidence of success; never
+  // called at nudge time (an attempted nudge is not proof it worked). Best-effort:
+  // any failure degrades to a log line and NEVER throws into the turn.
+  async function persistWorkedIntervention(args: {
+    sid: string
+    model?: { providerID: string; modelID: string } | null
+    taskText: string
+    interventionLabel: "spiral-nudge" | "retry-nudge" | "loop-block"
+    interventionText: string
+  }): Promise<void> {
+    if (!failureRecordingEnabled) return
+    const { sid, model, taskText, interventionLabel, interventionText } = args
+
+    // Gate 1: deterministic model identity — unknown model => skip (no guessing).
+    const modelId = canonicalModelId(model?.providerID, model?.modelID)
+    if (!modelId) return
+
+    // Gate 2: shape from the SAME Phase 14/13 shape function.
+    const shape = extractWorkedExampleShape(taskText)
+    const text = String(interventionText || "").trim().slice(0, FAILURE_PATCH_TEXT_MAX_CHARS)
+    if (!text) return
+
+    try {
+      const palaceClient = await getWorkedExampleClient()
+      if (palaceClient && typeof palaceClient.kgAdd === "function") {
+        const patchId = buildFailurePatchId(modelId, shape.shapeKey, interventionLabel)
+        await palaceClient.kgAdd({
+          subject: patchId,
+          predicate: "es-intervention-label",
+          object: interventionLabel,
+          source_closet: patchId,
+        })
+        await palaceClient.kgAdd({
+          subject: patchId,
+          predicate: "es-intervention-text",
+          object: text,
+          source_closet: patchId,
+        })
+        console.log(
+          `[turn-guard] failure recording: WORKED intervention ${interventionLabel} persisted ` +
+            `for ${modelId} (shape=${shape.shapeKey}, patch=${patchId}) sid=${sid}`,
+        )
+      }
+    } catch (err) {
+      // Intervention recording failure must never break the turn.
+      console.log(`[turn-guard] failure recording: intervention failed, continuing: ${String(err)}`)
+    }
+  }
+
+  // Phase 15 CREATE (failure-event recording): record a per-model failure event
+  // when a loop/spiral intervention FIRES, attributed to (model, task shape). The
+  // model is the deterministic `provider/model` from routing context; if unknown,
+  // skip — an unattributable event is worse than no event. The shape reuses
+  // Phase 14's extractWorkedExampleShape / buildCapabilityCanonicalShape (the SAME
+  // shape function, per spec). Failure events are recorded at event time: the
+  // nudge/spiral WAS attempted, and that attempt is a real data point for routing
+  // penalties. The intervention TEXT, by contrast, is only durable once proven to
+  // have worked — see queuePendingIntervention / confirmPendingInterventions.
+  // Best-effort: any failure degrades to a log line and NEVER throws into the turn.
+  async function maybeRecordModelFailure(args: {
+    sid: string
+    model?: { providerID: string; modelID: string } | null
+    taskText: string
+    event: "spiral" | "loop"
+    interventionLabel: "spiral-nudge" | "retry-nudge" | "loop-block"
+    interventionText: string
+  }): Promise<void> {
+    if (!failureRecordingEnabled) return
+    const { sid, model, taskText, event } = args
+
+    // Gate 1: deterministic model identity — unknown model => skip (no guessing).
+    const modelId = canonicalModelId(model?.providerID, model?.modelID)
+    if (!modelId) return
+
+    // Gate 2: shape from the SAME Phase 14/13 shape function.
+    const shape = extractWorkedExampleShape(taskText)
+
+    // Gate 3: session-local dedup — repeated identical (bucket, event) in one
+    // session records once (the pattern is already captured; a second nudge on the
+    // same bucket adds nothing to the count).
+    const bucketId = buildFailureBucketId(modelId, shape.shapeKey)
+    const dedupKey = `${bucketId}:${event}`
+    const recordedBySession = failureRecordedBySession.get(sid) ?? new Set<string>()
+    if (recordedBySession.has(dedupKey)) {
+      console.log(
+        `[turn-guard] failure recording: skipping duplicate ${dedupKey} sid=${sid}`,
+      )
+      return
+    }
+
+    try {
+      const palaceClient = await getWorkedExampleClient()
+      if (palaceClient && typeof palaceClient.kgAdd === "function") {
+        await palaceClient.kgAdd({
+          subject: bucketId,
+          predicate: "es-failure-event",
+          object: event,
+          valid_from: new Date().toISOString(),
+          source_closet: bucketId,
+        })
+        // Best-effort shape metadata for explainability (idempotent on the read side).
+        try {
+          await palaceClient.kgAdd({
+            subject: bucketId,
+            predicate: "es-failure-shape",
+            object: buildCapabilityCanonicalShape(shape).slice(0, 200),
+            source_closet: bucketId,
+          })
+        } catch (shapeErr) {
+          console.log(`[turn-guard] failure recording: shape stamp failed (non-fatal): ${String(shapeErr)}`)
+        }
+        recordedBySession.add(dedupKey)
+        failureRecordedBySession.set(sid, recordedBySession)
+        console.log(
+          `[turn-guard] failure recording: recorded ${event} for ${modelId} ` +
+            `(shape=${shape.workClass}/${shape.sizeBucket}/${shape.shapeKey}, bucket=${bucketId}) sid=${sid}`,
+        )
+      }
+    } catch (err) {
+      // Recording failure must never break the turn.
+      console.log(`[turn-guard] failure recording: event failed, continuing: ${String(err)}`)
+    }
+  }
+
+  // Phase 15 CREATE: queue an attempted intervention patch for later success
+  // confirmation. Deduped by key (message id); a new nudge on the same message
+  // replaces the pending entry so only the latest wording is confirmable.
+  function queuePendingIntervention(sid: string, key: string, label: string, text: string): void {
+    if (!failureRecordingEnabled) return
+    const t = String(text || "").trim().slice(0, FAILURE_PATCH_TEXT_MAX_CHARS)
+    if (!t) return
+    const list = pendingInterventionBySession.get(sid) ?? []
+    const next = list.filter((p) => p.key !== key)
+    next.push({ key, label, text: t })
+    // Bound the queue: at most one pending entry per guard site (3 sites), so a
+    // pathological session cannot grow this unbounded.
+    while (next.length > 6) next.shift()
+    pendingInterventionBySession.set(sid, next)
+  }
+
+  // Phase 15 CREATE (success signal): confirm or expire the pending intervention
+  // patches for this session and persist the ones with evidence of success.
+  // `confirmedKey` is the key whose nudge demonstrably broke the loop/spiral:
+  //   - retry / spiral nudges — called from onMessageUpdated when the next
+  //     assistant stop is considered complete by issueRetry's own predicates
+  //     (subsequent clean completion, no LLM);
+  //   - loop-block nudges — called from tool.execute.before when the model's next
+  //     tool call has a DIFFERENT signature than the blocked one.
+  // Every OTHER pending entry is expired (dropped without persistence): its
+  // intervention did not demonstrably work, so it must not become durable
+  // procedural knowledge. Best-effort: never throws into the turn.
+  async function confirmPendingInterventions(args: {
+    sid: string
+    confirmedKey?: string
+    model?: { providerID: string; modelID: string } | null
+    taskText: string
+  }): Promise<void> {
+    if (!failureRecordingEnabled) return
+    const { sid, confirmedKey, model, taskText } = args
+    const list = pendingInterventionBySession.get(sid) ?? []
+    if (list.length === 0) return
+    const confirmed = confirmedKey ? list.filter((p) => p.key === confirmedKey) : []
+    const expired = list.filter((p) => !confirmedKey || p.key !== confirmedKey)
+    pendingInterventionBySession.delete(sid)
+    for (const entry of expired) {
+      console.log(
+        `[turn-guard] failure recording: intervention ${entry.label} NOT proven to work — expired, not persisted sid=${sid}`,
+      )
+    }
+    if (confirmed.length === 0) return
+    for (const entry of confirmed) {
+      try {
+        await persistWorkedIntervention({
+          sid,
+          model: model ?? null,
+          taskText,
+          interventionLabel: entry.label as "spiral-nudge" | "retry-nudge" | "loop-block",
+          interventionText: entry.text,
+        })
+      } catch (err) {
+        console.log(`[turn-guard] failure recording: confirm failed, continuing: ${String(err)}`)
+      }
+    }
+  }
+
   // Loop-guard status banner. Emitted HERE, after the consts above are
   // initialized — emitting it earlier is a temporal-dead-zone ReferenceError
   // that throws before the hooks object returns, silently disabling the plugin.
@@ -1554,6 +1788,8 @@ export const TurnGuard = async ({ client, directory }: any) => {
       workedExampleSearchTimeoutMs,
       workedExampleFilingEnabled,
       capabilityRecordingEnabled,
+      failureRecordingEnabled,
+      failurePatchInjectionEnabled,
       spiralInvestigateThreshold,
       spiralReversalThreshold,
       spiralMaxInterventions,
@@ -2223,6 +2459,10 @@ export const TurnGuard = async ({ client, directory }: any) => {
       )
       // Turn is genuinely complete — reset the retry chain counter for this session.
       retryChainBySession.delete(sid)
+      // Phase 15 CREATE (success signal): a clean completion right after an
+      // attempted nudge is deterministic evidence the intervention worked —
+      // persist the pending patch(es); expire any that were not confirmed here.
+      void confirmPendingInterventions({ sid, confirmedKey: messageID, model: routing.model ?? null, taskText: parentText })
       return false
     }
 
@@ -2320,6 +2560,22 @@ export const TurnGuard = async ({ client, directory }: any) => {
       body,
     })
 
+    // Phase 15 CREATE: attribute the stalled stop to (model, shape) at nudge time.
+    // Task text = the real user prompt when prev is a user turn, else this turn's
+    // own text. The intervention text is only QUEUED here — it becomes durable
+    // knowledge only if confirmPendingInterventions later proves it worked (the
+    // next stop being considered complete). Fire-and-forget — best-effort.
+    const retryTaskText = prevIsUser ? parentText : getText(last.parts ?? [])
+    void maybeRecordModelFailure({
+      sid,
+      model: activeModel ?? null,
+      taskText: retryTaskText,
+      event: "loop",
+      interventionLabel: "retry-nudge",
+      interventionText: String(body.parts[0].text),
+    })
+    queuePendingIntervention(sid, messageID, "retry-nudge", String(body.parts[0].text))
+
     return true
   }
 
@@ -2401,6 +2657,10 @@ export const TurnGuard = async ({ client, directory }: any) => {
     )
 
     const routing = spiralRouting
+    // Phase 15 CREATE: task text for shape attribution — the real user prompt
+    // (prev) when it is a user turn, else this turn's own text. Deterministic and
+    // cheap; the shape function tolerates any text.
+    const spiralTaskText = prevIsUser ? parentText : text
     const body: any = {
       parts: [
         {
@@ -2423,6 +2683,20 @@ export const TurnGuard = async ({ client, directory }: any) => {
       query: { directory },
       body,
     })
+
+    // Phase 15 CREATE: attribute the spiral to (model, shape) at nudge time. The
+    // intervention text is only QUEUED — it becomes durable knowledge only if
+    // confirmPendingInterventions later proves it worked (the next stop being
+    // considered complete by issueRetry's predicates). Fire-and-forget — best-effort.
+    void maybeRecordModelFailure({
+      sid,
+      model: routing.model ?? null,
+      taskText: spiralTaskText,
+      event: "spiral",
+      interventionLabel: "spiral-nudge",
+      interventionText: String(body.parts[0].text),
+    })
+    queuePendingIntervention(sid, messageID, "spiral-nudge", String(body.parts[0].text))
 
     return true
   }
@@ -2618,6 +2892,8 @@ export const TurnGuard = async ({ client, directory }: any) => {
     pruneToMax(taskRecentLaunchBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(workedExampleFiledByShape, autoConsolidationMaxTrackedSessions)
     pruneToMax(capabilityRecordedBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(failureRecordedBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(pendingInterventionBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralNudgedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralInspectedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(checkpointedSessions, autoConsolidationMaxTrackedSessions)
@@ -2736,6 +3012,8 @@ export const TurnGuard = async ({ client, directory }: any) => {
     pruneToMax(taskRecentLaunchBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(workedExampleFiledByShape, autoConsolidationMaxTrackedSessions)
     pruneToMax(capabilityRecordedBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(failureRecordedBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(pendingInterventionBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralNudgedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralInspectedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(checkpointedSessions, autoConsolidationMaxTrackedSessions)
@@ -2863,6 +3141,8 @@ export const TurnGuard = async ({ client, directory }: any) => {
     pruneToMax(taskRecentLaunchBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(workedExampleFiledByShape, autoConsolidationMaxTrackedSessions)
     pruneToMax(capabilityRecordedBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(failureRecordedBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(pendingInterventionBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralNudgedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralInspectedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(checkpointedSessions, autoConsolidationMaxTrackedSessions)
@@ -3162,6 +3442,67 @@ export const TurnGuard = async ({ client, directory }: any) => {
           }
         }
 
+        // Phase 15 CONSUME (prompt patches): inject known successful intervention
+        // patches for the EXACT (model, shapeKey) pair. The model is resolved from
+        // delegation context (hook args or session cache); the shape reuses Phase
+        // 14's extractWorkedExampleShape on the ORIGINAL prompt (same text as the
+        // CREATE side). Absent data => no injection, no prompt bloat. Any failure
+        // degrades to no injection — a read hiccup must never block a delegation.
+        if (failurePatchInjectionEnabled && hasPrompt) {
+          try {
+            const routing = await resolveLoopGuardRouting(sid, input, output)
+            const modelId = canonicalModelId(routing.model?.providerID, routing.model?.modelID)
+            if (modelId) {
+              const shape = extractWorkedExampleShape(prompt)
+              const palaceClient = await getWorkedExampleClient()
+              if (palaceClient && typeof palaceClient.kgQuery === "function") {
+                // Bounded read: one kg_query per candidate label (max 3).
+                const patchTexts: string[] = []
+                for (const label of ["spiral-nudge", "retry-nudge", "loop-block"]) {
+                  try {
+                    const result: any = await palaceClient.kgQuery({
+                      entity: buildFailurePatchId(modelId, shape.shapeKey, label),
+                      direction: "outgoing",
+                      predicate: "es-intervention-text",
+                      recurse: false,
+                      max_depth: 1,
+                    })
+                    const facts = Array.isArray(result?.facts) ? result.facts : []
+                    for (const fact of facts) {
+                      if (fact && fact.current === false) continue
+                      const t = String(fact?.object ?? "").trim()
+                      if (t && !patchTexts.includes(t)) patchTexts.push(t)
+                    }
+                  } catch {
+                    // non-fatal: skip this label
+                  }
+                }
+                if (patchTexts.length > 0) {
+                  const patchHeading = "## Known failure modes for this model on this class of task"
+                  const patchBlock =
+                    `\n\n---\n${patchHeading}\n\n` +
+                    "This model has previously failed on this class of task in the ways below. " +
+                    "Apply these interventions proactively:\n" +
+                    patchTexts.map((t, i) => `${i + 1}. ${t}`).join("\n") + "\n---\n"
+                  args.prompt = `${args.prompt}${patchBlock}`
+                  if (output?.args) output.args = args
+                  if (input?.args) input.args = args
+                  console.log(
+                    `[turn-guard] failure-patch injection: appended ${patchTexts.length} patch(es) ` +
+                      `for ${modelId} (shape=${shape.shapeKey}) to ${subagentType || "task"} prompt sid=${sid}`,
+                  )
+                } else {
+                  console.log(
+                    `[turn-guard] failure-patch injection: no patches for ${modelId} shape=${shape.shapeKey} — prompt unchanged sid=${sid}`,
+                  )
+                }
+              }
+            }
+          } catch (err) {
+            console.log(`[turn-guard] failure-patch injection: failed, prompt unchanged: ${String(err)}`)
+          }
+        }
+
         taskWindow.push(taskSignature)
         while (taskWindow.length > loopWindowSize) taskWindow.shift()
         taskWindowBySession.set(sid, taskWindow)
@@ -3202,11 +3543,22 @@ export const TurnGuard = async ({ client, directory }: any) => {
         // so "saw bash, therefore progress" was never a safe assumption.
         if (loopMutationTools.has(key) && count === 1) {
           toolWindowBySession.set(sid, [signature])
-          return
+        } else {
+          window.push(signature)
+          while (window.length > loopWindowSize) window.shift()
+          toolWindowBySession.set(sid, window)
         }
-        window.push(signature)
-        while (window.length > loopWindowSize) window.shift()
-        toolWindowBySession.set(sid, window)
+        // Phase 15 CREATE (success signal): the model's next tool call after a
+        // blocked loop is a DIFFERENT signature than the one that was blocked —
+        // deterministic evidence the nudge broke the loop. Persist the pending
+        // loop-block patch; expire any other pending patches for this session.
+        // Best-effort, never blocks or throws into the turn.
+        void confirmPendingInterventions({
+          sid,
+          confirmedKey: signature,
+          model: activeRoutingBySession.get(sid)?.model ?? null,
+          taskText: `${toolName} ${JSON.stringify(args)}`,
+        })
         return
       }
 
@@ -3277,6 +3629,23 @@ export const TurnGuard = async ({ client, directory }: any) => {
         // still blocks the tool call. Log so the gap is diagnosable.
         console.error(`[turn-guard] loop guard: nudge prompt failed sid=${sid}:`, promptErr)
       }
+
+      // Phase 15 CREATE: attribute the repeated-tool loop to (model, shape) at
+      // nudge time. Task text = tool name + args (the shape function tolerates any
+      // text; for non-task tools this is a coarse but deterministic shape). The
+      // intervention text is only QUEUED — it becomes durable knowledge only if
+      // the model's NEXT tool call has a different signature (see the
+      // confirmPendingInterventions call below), which is deterministic proof the
+      // loop was broken. Fire-and-forget — best-effort, never blocks.
+      void maybeRecordModelFailure({
+        sid,
+        model: routing.model ?? null,
+        taskText: `${toolName} ${JSON.stringify(args)}`,
+        event: "loop",
+        interventionLabel: "loop-block",
+        interventionText: nudgeText,
+      })
+      queuePendingIntervention(sid, signature, "loop-block", nudgeText)
 
       throw new Error(nudgeText)
     },
