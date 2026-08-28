@@ -953,7 +953,21 @@ function parseCadenceOptions(argv: string[], consolidation: SynthesisConsolidati
     runNightlyBackstop: hasFlag(argv, "--nightly-backstop"),
     applyWrites: hasFlag(argv, "--apply"),
     applyMerges: hasFlag(argv, "--apply-merges"),
+    // Phase 16: calibration summary in the cadence envelope. --calibration-models a,b,c
+    // (comma-separated canonical model ids) + optional --calibration-shapes s1,s2.
+    ...(parseCalibrationOptions(argv) ? { calibration: parseCalibrationOptions(argv)! } : {}),
   };
+}
+
+function parseCalibrationOptions(argv: string[]): CadenceOrchestratorOptions["calibration"] | undefined {
+  const modelsRaw = getArg(argv, "--calibration-models") || "";
+  const models = modelsRaw.split(",").map((m) => m.trim()).filter(Boolean);
+  if (models.length === 0) return undefined;
+  const shapesRaw = getArg(argv, "--calibration-shapes") || "";
+  const shapeKeys = shapesRaw.split(",").map((s) => s.trim()).filter(Boolean);
+  const minSampleRaw = getArg(argv, "--calibration-min-sample") || "";
+  const minSample = minSampleRaw ? Number(minSampleRaw) : undefined;
+  return { models, ...(shapeKeys.length > 0 ? { shapeKeys } : {}), ...(minSample && Number.isFinite(minSample) ? { minSample } : {}) };
 }
 
 function parseMemcoreApply(argv: string[]): MemcoreApplyOptions {
@@ -1999,6 +2013,9 @@ async function main(): Promise<void> {
     mode: includeBasePipeline ? "full-pipeline" : "cadence-only",
     worklistMode: worklistOptions.mode,
     worklist: worklistOutput,
+    // Phase 16: confidence-calibration tables (per model) — surfaced when the cadence
+    // run was asked for them via --calibration-models. Absent otherwise (backward-compat).
+    ...(cadence?.calibration ? { calibration: cadence.calibration } : {}),
   };
 
   // P2-1: write trace envelope to stdout

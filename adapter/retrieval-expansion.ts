@@ -974,6 +974,40 @@ export function buildFailurePatchId(modelId: string, shapeKey: string, label: In
 /** Phase 15: bound intervention text stored as a KG fact (kg object field). */
 export const FAILURE_PATCH_TEXT_MAX_CHARS = 500;
 
+/** Phase 16: closed self-reported-confidence vocabulary (dream-mapper, drawer-digest, build end-of-loop line). */
+export const CONFIDENCE_VALUES = ["high", "medium", "low"] as const;
+
+export type SelfReportedConfidence = (typeof CONFIDENCE_VALUES)[number];
+
+/**
+ * Phase 16 CREATE: parse a self-reported confidence label out of an agent's final
+ * output text. Agents are instructed to end with `CONFIDENCE: high|medium|low`
+ * (agents/dream-mapper.md, agents/drawer-digest.md, build's end-of-loop line).
+ * Returns null when no such line is present — the caller then skips calibration
+ * recording rather than guessing a level. Only the LAST occurrence counts (the
+ * terminal self-report), matching how the label is produced.
+ */
+export function parseSelfReportedConfidence(outputText: string): SelfReportedConfidence | null {
+  const text = String(outputText || "");
+  const matches = [...text.matchAll(/\**CONFIDENCE\**:\s*(high|medium|low)\b/gi)];
+  if (matches.length === 0) return null;
+  const value = String(matches[matches.length - 1][1]).toLowerCase();
+  return (CONFIDENCE_VALUES as readonly string[]).includes(value) ? (value as SelfReportedConfidence) : null;
+}
+
+/**
+ * Phase 16: deterministic calibration bucket id for a (model, shapeKey, confidence)
+ * triple. Mirrors buildCapabilityBucketId / buildFailureBucketId naming under a
+ * distinct `calibration::` namespace — never colliding with capability buckets,
+ * failure buckets, or reserved predicates. The per-model node from Phase 15 is the
+ * `<model>` segment: tuples accumulate on it across sessions so the curve builds up.
+ */
+export function buildCalibrationBucketId(modelId: string, shapeKey: string, confidence: SelfReportedConfidence): string {
+  return `calibration::${modelId}::${shapeKey}::${confidence}`;
+}
+
+
+
 
 /**
  * Phase 13: build a compact worked-example entry for filing to the palace.

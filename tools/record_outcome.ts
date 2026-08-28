@@ -42,6 +42,15 @@ const OUTCOME_PREDICATE = "es-outcome";
 export const OUTCOME_VALUES = ["accept", "revise", "failed", "unused"] as const;
 export type OutcomeValue = (typeof OUTCOME_VALUES)[number];
 
+// Phase 16 (unified memory): confidence-calibration tuple. When the operator records an
+// es-outcome for a unit that carried a self-reported confidence, the SAME judgment is
+// paired with (model, task shape, reported level) and persisted as an
+// `es-calibration-outcome` edge on the per-model calibration bucket — so the curve
+// accumulates against Phase 7's ground truth. No proxy outcome labels: the object of
+// the calibration edge is always this tool's validated es-outcome value.
+const CALIBRATION_OUTCOME_PREDICATE = "es-calibration-outcome";
+export const CALIBRATION_CONFIDENCE_VALUES = ["high", "medium", "low"] as const;
+
 export type CallTool = (name: string, payload: Record<string, unknown>) => Promise<unknown>;
 
 export type OutcomeEdgeStatus = "proposed" | "added" | "add-failed";
@@ -53,6 +62,13 @@ export type OutcomeRecordItem = {
   error?: string;
 };
 
+/** Phase 16: optional calibration tuple attached to an outcome recording. */
+export type CalibrationCapture = {
+  model_id: string;
+  task_shape: string;
+  confidence: string;
+};
+
 export type OutcomeRecordReport = {
   ok: boolean;
   dry_run: boolean;
@@ -60,6 +76,15 @@ export type OutcomeRecordReport = {
   cycle_ref?: string;
   edges: OutcomeRecordItem[];
   counts: { proposed: number; added: number; add_failed: number };
+  /** Phase 16: the calibration tuple edge (present only when a valid capture was supplied). */
+  calibration?: {
+    bucket_id: string;
+    status: OutcomeEdgeStatus;
+    proposed_edge?: { subject: string; predicate: string; object: string; valid_from: string };
+    error?: string;
+  };
+  /** Phase 16: set when a capture was supplied but rejected (invalid level / missing fields). */
+  calibration_skipped_reason?: string;
   error?: string;
   next_step?: string;
 };
@@ -76,6 +101,11 @@ export async function runOutcomeRecord(args: {
   cycleRef?: string;
   dryRun?: boolean;
   now?: () => Date;
+  /** Phase 16: optional calibration tuple for the unit this outcome closes. When all
+   *  three fields are present and valid, the SAME es-outcome value is also persisted as
+   *  an `es-calibration-outcome` edge on the (model, shape, confidence) bucket — the
+   *  only path that creates calibration tuples. */
+  calibration?: CalibrationCapture;
 }): Promise<OutcomeRecordReport> {
   const outcome = String(args.outcome || "").trim().toLowerCase();
   if (!(OUTCOME_VALUES as readonly string[]).includes(outcome)) {
@@ -107,6 +137,11 @@ export async function runOutcomeRecord(args: {
 
   const counts = { proposed: edges.length, added: 0, add_failed: 0 };
 
+  // Phase 16: validate the optional calibration tuple. Rejected captures are reported
+  // (calibration_skipped_reason) but NEVER abort the es-outcome write — the outcome is
+  // the primary record; calibration is an attached signal, not a precondition.
+  const calibration = resolveCalibrationCapture(args.calibration);
+
   if (dryRun) {
     return {
       ok: true,
@@ -115,6 +150,8 @@ export async function runOutcomeRecord(args: {
       cycle_ref: cycleRef,
       edges,
       counts,
+      ...(calibration && !calibration.skipped_reason ? { calibration: { bucket_id: calibration.bucket_id, status: "proposed" as OutcomeEdgeStatus, proposed_edge: { ...calibration.proposed_edge, object: outcome, valid_from: validFrom } } } : {}),
+      ...(calibration?.skipped_reason ? { calibration_skipped_reason: calibration.skipped_reason } : {}),
       next_step: "Show this preview to the operator; re-run with dry_run:false only after their explicit confirmation. Automation (test/reviewer signals) must never trigger this write.",
     };
   }
@@ -142,10 +179,68 @@ export async function runOutcomeRecord(args: {
   }
 
   const report: OutcomeRecordReport = { ok: true, dry_run: false, outcome: outcome as OutcomeValue, cycle_ref: cycleRef, edges, counts };
-  if (counts.add_failed > 0) {
-    report.next_step = `Re-run with the same args to retry ${counts.add_failed} failed edge(s).`;
+
+  // Phase 16 APPLY: persist the calibration tuple edge (same validated es-outcome value)
+  // on the per-model bucket. Independent of the es-outcome writes above — a failure here
+  // is reported but never reverts or blocks the outcome record.
+  if (calibration) {
+    if (calibration.skipped_reason) {
+      report.calibration_skipped_reason = calibration.skipped_reason;
+    } else {
+      try {
+        await args.call("kg_add", {
+          subject: calibration.bucket_id,
+          predicate: CALIBRATION_OUTCOME_PREDICATE,
+          object: outcome,
+          valid_from: validFrom,
+          source_closet: calibration.bucket_id,
+          ...(cycleRef ? { source_run_id: cycleRef } : {}),
+        });
+        report.calibration = { bucket_id: calibration.bucket_id, status: "added", proposed_edge: calibration.proposed_edge };
+      } catch (err) {
+        report.calibration = { bucket_id: calibration.bucket_id, status: "add-failed", proposed_edge: calibration.proposed_edge, error: String(err) };
+      }
+    }
+  }
+
+  if (counts.add_failed > 0 || report.calibration?.status === "add-failed") {
+    report.next_step = `Re-run with the same args to retry failed edge(s) (${counts.add_failed} es-outcome, ${report.calibration?.status === "add-failed" ? 1 : 0} calibration).`;
   }
   return report;
+}
+
+/** Phase 16: validate and normalize an optional calibration capture. Returns the bucket
+ *  id + proposed edge when valid, or a skipped_reason when any field is missing/invalid. */
+function resolveCalibrationCapture(capture?: CalibrationCapture): {
+  bucket_id: string;
+  proposed_edge: { subject: string; predicate: string; object: string; valid_from: string };
+  skipped_reason?: string;
+} | null {
+  if (!capture) return null;
+  const modelId = asText(capture.model_id).trim();
+  const shapeKey = asText(capture.task_shape).trim();
+  const confidence = asText(capture.confidence).trim().toLowerCase();
+  if (!modelId || !shapeKey) {
+    return {
+      bucket_id: "",
+      proposed_edge: { subject: "", predicate: CALIBRATION_OUTCOME_PREDICATE, object: "", valid_from: "" },
+      skipped_reason: "calibration capture requires model_id and task_shape",
+    };
+  }
+  if (!(CALIBRATION_CONFIDENCE_VALUES as readonly string[]).includes(confidence)) {
+    return {
+      bucket_id: "",
+      proposed_edge: { subject: "", predicate: CALIBRATION_OUTCOME_PREDICATE, object: "", valid_from: "" },
+      skipped_reason: `invalid confidence "${capture.confidence}" — must be one of ${CALIBRATION_CONFIDENCE_VALUES.join(" | ")}`,
+    };
+  }
+  const bucketId = `calibration::${modelId}::${shapeKey}::${confidence}`;
+  return {
+    bucket_id: bucketId,
+    // The object/valid_from are filled by the caller (outcome value + shared timestamp);
+    // this is a preview stub for the dry-run report.
+    proposed_edge: { subject: bucketId, predicate: CALIBRATION_OUTCOME_PREDICATE, object: "", valid_from: "" },
+  };
 }
 
 export default tool({
@@ -163,6 +258,24 @@ export default tool({
       .optional()
       .describe("Optional identifier for the closed work unit (session/run/cycle id) — recorded as source_run_id provenance on each edge."),
     dry_run: tool.schema.boolean().optional().describe("Preview without writing (default true). Pass false only after explicit operator confirmation."),
+    model_id: tool.schema
+      .string()
+      .optional()
+      .describe(
+        "Phase 16 calibration: canonical model id of the unit this outcome closes (e.g. from Phase 15's canonicalModelId). Required WITH task_shape + confidence to record a calibration tuple.",
+      ),
+    task_shape: tool.schema
+      .string()
+      .optional()
+      .describe(
+        "Phase 16 calibration: the unit's canonical task shape key (from extractWorkedExampleShape/buildCapabilityCanonicalShape — the SAME Phase 14/13 shape system). Required WITH model_id + confidence.",
+      ),
+    confidence: tool.schema
+      .string()
+      .optional()
+      .describe(
+        "Phase 16 calibration: the unit's self-reported confidence level (high | medium | low), parsed from its terminal CONFIDENCE line. Required WITH model_id + task_shape. When all three are present, this es-outcome value is ALSO persisted as an es-calibration-outcome edge on the (model, shape, confidence) bucket.",
+      ),
     tool_prefix: tool.schema.string().optional().describe("MCP tool prefix override."),
   },
   async execute(args, context) {
@@ -188,6 +301,11 @@ export default tool({
       outcome: String(args.outcome || ""),
       cycleRef: args.cycle_ref,
       dryRun: args.dry_run,
+      // Phase 16: only attach a calibration capture when ALL THREE fields are present —
+      // a partial capture is rejected (reported), never guessed.
+      ...(args.model_id && args.task_shape && args.confidence
+        ? { calibration: { model_id: String(args.model_id), task_shape: String(args.task_shape), confidence: String(args.confidence) } }
+        : {}),
     });
 
     return JSON.stringify(report, null, 2);

@@ -53,7 +53,7 @@ import type { AutoConsolidationTrigger, MemcoreInjectionRecord } from "../adapte
 import { loadPackagedAssets, mergeWithoutOverride, loadInstructionPaths, dedupeAppendInstructions } from "../adapter/asset-loader.ts"
 import { loadRuntimeConfig, getRuntimeConfigEnvMap, DEFAULT_MCP_URL, DEFAULT_MCP_TOOL_PREFIX } from "../adapter/runtime-config.ts"
 import { MCPHttpClient, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-client.ts"
-import { retrieveSimilarWorkedExamples, formatWorkedExampleDemonstration, WORKED_EXAMPLE_MAX_INJECT, WORKED_EXAMPLE_RELEVANCE_FLOOR, extractWorkedExampleShape, buildWorkedExampleEntry, WORKED_EXAMPLE_FILE_AGENT_TYPES, WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS, CAPABILITY_TIER_BY_SUBAGENT, mapTaskStatusToCapabilityOutcome, buildCapabilityCanonicalShape, buildCapabilityBucketId, canonicalModelId, buildFailureBucketId, buildFailurePatchId, FAILURE_PATCH_TEXT_MAX_CHARS } from "../adapter/retrieval-expansion.ts"
+import { retrieveSimilarWorkedExamples, formatWorkedExampleDemonstration, WORKED_EXAMPLE_MAX_INJECT, WORKED_EXAMPLE_RELEVANCE_FLOOR, extractWorkedExampleShape, buildWorkedExampleEntry, WORKED_EXAMPLE_FILE_AGENT_TYPES, WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS, CAPABILITY_TIER_BY_SUBAGENT, mapTaskStatusToCapabilityOutcome, buildCapabilityCanonicalShape, buildCapabilityBucketId, canonicalModelId, buildFailureBucketId, buildFailurePatchId, FAILURE_PATCH_TEXT_MAX_CHARS, parseSelfReportedConfidence, buildCalibrationBucketId } from "../adapter/retrieval-expansion.ts"
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts"
 import deleteDrawersTool from "../tools/delete_drawers.ts"
 import moveDrawersTool from "../tools/move_drawers.ts"
@@ -180,6 +180,12 @@ const DEFAULT_FAILURE_RECORDING_ENABLED = true
 // intervention patches for (model, shape) — only on an exact (model, shapeKey)
 // match, so absent data yields no injection and no prompt bloat.
 const DEFAULT_FAILURE_PATCH_INJECTION_ENABLED = true
+// Phase 16 CREATE: capture the self-reported confidence label from a subagent's
+// terminal output at completion time. The PENDING tuple (model, shape, confidence)
+// is stored session-locally; it becomes a durable calibration edge ONLY when the
+// operator later records an es-outcome for that unit via record_outcome (the
+// human-authoritative path). No proxy outcome labels are ever written here.
+const DEFAULT_CALIBRATION_CAPTURE_ENABLED = true
   // looking like a loop, without needing to exempt the verify tools themselves.
 const DEFAULT_LOOP_MUTATION_TOOLS = [
   "write",
@@ -1298,6 +1304,11 @@ export const TurnGuard = async ({ client, directory }: any) => {
     "taskWatchdog.failureRecording.enabled",
     DEFAULT_FAILURE_RECORDING_ENABLED,
   )
+  // Phase 16 CREATE: config for capturing self-reported confidence at subagent completion.
+  const calibrationCaptureEnabled = cfgBool(
+    "taskWatchdog.calibrationCapture.enabled",
+    DEFAULT_CALIBRATION_CAPTURE_ENABLED,
+  )
   // Phase 15 CONSUME: config for injecting (model, shape) intervention patches.
   const failurePatchInjectionEnabled = cfgBool(
     "taskWatchdog.failurePatchInjection.enabled",
@@ -1306,6 +1317,14 @@ export const TurnGuard = async ({ client, directory }: any) => {
   // Session-local dedup for capability recording — prevents double-recording the
   // same (message, part) on repeated idle events. Keyed by subagentType:shapeKey.
   const capabilityRecordedBySession = new Map<string, Set<string>>()
+  // Phase 16 CREATE: pending calibration captures keyed by session. Each entry holds
+  // the (modelId, shapeKey, confidence) triple parsed from a completed subagent's
+  // terminal CONFIDENCE line. These are PENDING — they become durable es-calibration-
+  // outcome edges only when the operator records an es-outcome for that unit via
+  // record_outcome with matching model_id/task_shape/confidence args. The map is
+  // session-scoped and pruned like other per-session state; nothing here writes to
+  // the palace directly (no proxy outcome labels).
+  const pendingCalibrationBySession = new Map<string, Array<{ modelId: string; shapeKey: string; confidence: string }>>()
   // Phase 15 CREATE: session-local dedup for failure-event recording. Turn-guard
   // events can fire repeatedly in one session (repeated loop nudges on the same
   // model/shape); identical (bucketId, event) pairs are recorded once per session.
@@ -1536,6 +1555,49 @@ export const TurnGuard = async ({ client, directory }: any) => {
       // Recording failure must never break the turn.
       console.log(`[turn-guard] capability recording: failed, continuing: ${String(err)}`)
     }
+  }
+
+  // Phase 16 CREATE: capture the self-reported confidence label from a completed
+  // subagent's terminal output and queue it as a PENDING calibration tuple for this
+  // session. The tuple (modelId, shapeKey, confidence) is stored session-locally;
+  // it becomes a durable es-calibration-outcome edge ONLY when the operator later
+  // records an es-outcome for that unit via record_outcome with matching args.
+  // No proxy outcome labels are written here — this is capture only.
+  async function maybeCaptureCalibrationTuple(args: {
+    sid: string
+    model?: { providerID: string; modelID: string } | null
+    description: string
+    prompt: string
+    outputText: string
+  }): Promise<void> {
+    if (!calibrationCaptureEnabled) return
+    const { sid, model, description, prompt, outputText } = args
+
+    // Gate 1: deterministic model identity — unknown model => skip (no guessing).
+    const modelId = canonicalModelId(model?.providerID, model?.modelID)
+    if (!modelId) return
+
+    // Gate 2: shape from the SAME Phase 14/13 shape function.
+    const shape = extractWorkedExampleShape(`${description}\n${prompt}`)
+
+    // Gate 3: parse the self-reported confidence from the terminal output.
+    // Returns null when no CONFIDENCE line is present — skip, don't guess.
+    const confidence = parseSelfReportedConfidence(outputText)
+    if (!confidence) return
+
+    // Queue the pending tuple for this session. Dedup: same (modelId, shapeKey, confidence)
+    // is recorded once per session (repeated idle events on the same completion).
+    const pending = pendingCalibrationBySession.get(sid) ?? []
+    const dedupKey = `${modelId}:${shape.shapeKey}:${confidence}`
+    if (pending.some((p) => `${p.modelId}:${p.shapeKey}:${p.confidence}` === dedupKey)) return
+
+    pending.push({ modelId, shapeKey: shape.shapeKey, confidence })
+    pendingCalibrationBySession.set(sid, pending)
+
+    console.log(
+      `[turn-guard] calibration capture: queued ${modelId} / ${shape.shapeKey} / ${confidence} ` +
+        `(bucket=${buildCalibrationBucketId(modelId, shape.shapeKey, confidence)}) sid=${sid}`,
+    )
   }
 
   // Phase 15 CREATE (worked-intervention persistence): stamp the prompt patch that
@@ -2893,6 +2955,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
     pruneToMax(workedExampleFiledByShape, autoConsolidationMaxTrackedSessions)
     pruneToMax(capabilityRecordedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(failureRecordedBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(pendingCalibrationBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(pendingInterventionBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralNudgedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralInspectedBySession, autoConsolidationMaxTrackedSessions)
@@ -2945,6 +3008,16 @@ export const TurnGuard = async ({ client, directory }: any) => {
       // Runs regardless of the worked-example filing gate — capability recording
       // is its own concern (it covers local/cloud/deep tiers, not just cloud).
       await maybeRecordCapabilityTuple({ sid, subagentType, description, prompt, status })
+
+      // Phase 16 CREATE: capture the self-reported confidence label from the
+      // subagent's terminal output. Runs for ANY task tool part with substantive
+      // output (not gated on routing tier — calibration covers all delegated units).
+      // The tuple is PENDING; it becomes durable only via record_outcome.
+      const outputText = String(state?.output ?? part?.output ?? state?.text ?? "").trim()
+      if (outputText.length >= WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS) {
+        const activeModel = getActiveModel(msg)
+        await maybeCaptureCalibrationTuple({ sid, model: activeModel, description, prompt, outputText })
+      }
     }
   }
 
@@ -3013,6 +3086,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
     pruneToMax(workedExampleFiledByShape, autoConsolidationMaxTrackedSessions)
     pruneToMax(capabilityRecordedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(failureRecordedBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(pendingCalibrationBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(pendingInterventionBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralNudgedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralInspectedBySession, autoConsolidationMaxTrackedSessions)
@@ -3142,6 +3216,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
     pruneToMax(workedExampleFiledByShape, autoConsolidationMaxTrackedSessions)
     pruneToMax(capabilityRecordedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(failureRecordedBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(pendingCalibrationBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(pendingInterventionBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralNudgedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralInspectedBySession, autoConsolidationMaxTrackedSessions)

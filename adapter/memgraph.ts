@@ -1746,6 +1746,284 @@ export class MemgraphClient {
   }
 
 
+
+  // ── Phase 16: confidence calibration axes ─────────────────────────────────
+  // `es-calibration-outcome` edges record one completed unit's tuple: the
+  // self-reported confidence level (high | medium | low) paired with the ACTUAL
+  // outcome — Phase 7's es-outcome value (accept | revise | failed | unused),
+  // written ONLY by the human-authoritative record_outcome path. The subject is
+  // the deterministic calibration bucket id (`calibration::<model>::<shapeKey>::<confidence>`,
+  // model from Phase 15's canonicalModelId, shapeKey from the SAME Phase 14/13 shape
+  // function — no second shape system). Edges ACCUMULATE like es-capability-outcome:
+  // multiple edges per bucket are expected and meaningful; nothing here ever
+  // invalidates or collapses them.
+  //
+  // MINIMUM SAMPLE GATE (spec's most dangerous failure mode): a calibration figure
+  // is only reported/used once its (model, confidence-level) cell holds >= 20 pairs.
+  // Below that, every consumer must report "insufficient data" and fall back to
+  // default behaviour — an undersampled curve looks quantitative and gets believed.
+  //
+  // NOTE: `es-calibration-outcome` is NEW and deliberately distinct from the reserved
+  // set (synthesized-from, consolidated-into, merged-into, in-hall, es-status,
+  // es-source-type, es-outcome, concerns, triggers-on, rules-out, es-staleness) and
+  // from Phase 14's `es-capability-*` / Phase 15's `es-failure-*` /
+  // `es-intervention-*`. It must never count toward height or feed lineage traversal.
+
+  static readonly CALIBRATION_OUTCOME_PREDICATE = "es-calibration-outcome";
+  /** Minimum pairs per (model, confidence-level) cell before any figure is reported/used. */
+  static readonly MIN_CALIBRATION_SAMPLE = 20;
+  /** Closed confidence vocabulary for calibration cells (self-reported levels). */
+  static readonly CALIBRATION_CONFIDENCE_VALUES: readonly string[] = ["high", "medium", "low"];
+
+  /**
+   * Phase 16 CREATE: record ONE calibration tuple edge on a (model, shape, confidence)
+   * bucket. Accumulation — never invalidates or overwrites existing edges. `validFrom`
+   * timestamps the edge so consumers can window recent history. Throws on an invalid
+   * outcome value: the axis is closed to exactly accept | revise | failed | unused
+   * (the same set as es-outcome — the ground truth, not a proxy).
+   */
+  async recordCalibrationTuple(bucketId: string, outcome: string, validFrom?: string): Promise<void> {
+    const id = this.asString(bucketId).trim();
+    if (!id) throw new Error("recordCalibrationTuple: bucketId is required");
+    if (!(MemgraphClient.OUTCOME_VALUES as readonly string[]).includes(outcome)) {
+      throw new Error(
+        `recordCalibrationTuple: invalid outcome "${outcome}" — must be one of ${MemgraphClient.OUTCOME_VALUES.join(" | ")}`,
+      );
+    }
+    await this.kgAdd({
+      subject: id,
+      predicate: MemgraphClient.CALIBRATION_OUTCOME_PREDICATE,
+      object: outcome,
+      valid_from: validFrom,
+      source_closet: id,
+    });
+  }
+
+  /**
+   * Phase 16 CONSUME: read one calibration cell — the (model, shapeKey, confidence)
+   * bucket's outcome counts plus hit rate. One one-hop outgoing kg_query on
+   * es-calibration-outcome. Read failures degrade to zero counts (neutral): a failed
+   * read must look like "no data", never like "this model is miscalibrated".
+   *
+   * Hit rate = accept / total over the cell's tuples (the only positive outcome in
+   * Phase 7's closed set). `sufficient` enforces the 20-pair minimum: below it,
+   * `hitRate` is still computed for reporting transparency but consumers MUST treat
+   * the cell as unusable and fall back to default behaviour.
+   */
+  async getCalibrationCell(
+    modelId: string,
+    shapeKey: string,
+    confidence: string,
+    options?: { minSample?: number },
+  ): Promise<{
+    bucketId: string;
+    accept: number;
+    revise: number;
+    failed: number;
+    unused: number;
+    total: number;
+    hitRate: number | null;
+    sufficient: boolean;
+    threshold: number;
+  }> {
+    const model = this.asString(modelId).trim();
+    const shape = this.asString(shapeKey).trim();
+    const level = this.asString(confidence).trim().toLowerCase();
+    const minSample = Math.max(1, Number(options?.minSample ?? MemgraphClient.MIN_CALIBRATION_SAMPLE));
+    if (!model || !shape || !(MemgraphClient.CALIBRATION_CONFIDENCE_VALUES as readonly string[]).includes(level)) {
+      return { bucketId: "", accept: 0, revise: 0, failed: 0, unused: 0, total: 0, hitRate: null, sufficient: false, threshold: minSample };
+    }
+
+    const bucketId = `calibration::${model}::${shape}::${level}`;
+    let accept = 0;
+    let revise = 0;
+    let failed = 0;
+    let unused = 0;
+    try {
+      const result = await this.kgQuery({
+        entity: bucketId,
+        direction: "outgoing",
+        predicate: MemgraphClient.CALIBRATION_OUTCOME_PREDICATE,
+        recurse: false,
+        max_depth: 1,
+      });
+      for (const fact of this.parseKgFacts(result)) {
+        if (!this.asBoolean(fact.current, true)) continue;
+        const value = this.asString(fact.object).trim();
+        if (value === "accept") accept += 1;
+        else if (value === "revise") revise += 1;
+        else if (value === "failed") failed += 1;
+        else if (value === "unused") unused += 1;
+        // unknown values are ignored — the axis is closed by construction
+      }
+    } catch {
+      // non-fatal: a failed read reads as "no history" (neutral)
+    }
+    const total = accept + revise + failed + unused;
+    return {
+      bucketId,
+      accept,
+      revise,
+      failed,
+      unused,
+      total,
+      hitRate: total > 0 ? accept / total : null,
+      sufficient: total >= minSample,
+      threshold: minSample,
+    };
+  }
+
+  /**
+   * Phase 16 CONSUME (reporting): the calibration table for one model across a
+   * BOUNDED set of shape keys — rows of (shapeKey x confidence-level) with counts,
+   * hit rate, and the 20-pair sufficiency flag. maxShapes caps the query fan-out
+   * (default 8); concurrency is capped at 8 (the only validated level in this repo).
+   * No shape keys => empty table with a note — there is deliberately no unbounded
+   * enumeration of shapes (a room-paging-to-exhaustion analogue for graph nodes).
+   */
+  async getCalibrationTable(
+    modelId: string,
+    shapeKeys: string[],
+    options?: { minSample?: number; maxShapes?: number; concurrency?: number },
+  ): Promise<{
+    model: string;
+    threshold: number;
+    rows: Array<{
+      shapeKey: string;
+      confidence: string;
+      accept: number;
+      revise: number;
+      failed: number;
+      unused: number;
+      total: number;
+      hitRate: number | null;
+      sufficient: boolean;
+    }>;
+  }> {
+    const model = this.asString(modelId).trim();
+    const minSample = Math.max(1, Number(options?.minSample ?? MemgraphClient.MIN_CALIBRATION_SAMPLE));
+    const maxShapes = Math.max(1, Math.min(16, Number(options?.maxShapes ?? 8)));
+    const concurrency = Math.max(1, Math.min(8, Number(options?.concurrency ?? 8)));
+    if (!model) {
+      return { model: "", threshold: minSample, rows: [] };
+    }
+
+    const shapes = this.uniq(shapeKeys).slice(0, maxShapes);
+    const confidences = [...MemgraphClient.CALIBRATION_CONFIDENCE_VALUES];
+    const cells: Array<{ shapeKey: string; confidence: string }> = [];
+    for (const shape of shapes) {
+      for (const level of confidences) {
+        cells.push({ shapeKey: shape, confidence: level });
+      }
+    }
+
+    const rows: Array<{
+      shapeKey: string;
+      confidence: string;
+      accept: number;
+      revise: number;
+      failed: number;
+      unused: number;
+      total: number;
+      hitRate: number | null;
+      sufficient: boolean;
+    }> = [];
+    let cursor = 0;
+    const run = async () => {
+      while (cursor < cells.length) {
+        const index = cursor;
+        cursor += 1;
+        const cell = cells[index];
+        const result = await this.getCalibrationCell(model, cell.shapeKey, cell.confidence, { minSample });
+        rows.push({
+          shapeKey: cell.shapeKey,
+          confidence: cell.confidence,
+          accept: result.accept,
+          revise: result.revise,
+          failed: result.failed,
+          unused: result.unused,
+          total: result.total,
+          hitRate: result.hitRate,
+          sufficient: result.sufficient,
+        });
+      }
+    };
+    const slots = Math.max(1, Math.min(concurrency, cells.length || 1));
+    if (cells.length > 0) {
+      await Promise.all(Array.from({ length: slots }, () => run()));
+    }
+
+    // Deterministic row order: shapeKey ascending, then confidence high/medium/low.
+    const levelRank = new Map(confidences.map((level, i) => [level, i]));
+    rows.sort((a, b) => (a.shapeKey === b.shapeKey ? levelRank.get(a.confidence)! - levelRank.get(b.confidence)! : a.shapeKey.localeCompare(b.shapeKey)));
+    return { model, threshold: minSample, rows };
+  }
+
+  /**
+   * Phase 16 CONSUME (escalation triggers): the composed API for orchestrate-cloud.
+   * This repo has no in-repo tier SELECTOR — the orchestrator that delegates units
+   * lives outside this codebase — so the calibration decision is exposed as a
+   * deterministic composed call: an external consumer invokes it once with the
+   * unit's model, shape, and the self-reported confidence, and reads `action` +
+   * `reason`. TODO(external-consumer): wire into orchestrate-cloud's escalation logic.
+   *
+   * Decision rule (deterministic, no LLM):
+   *   - Cell insufficient (< 20 pairs) or unreadable => action = defaultAction,
+   *     reason "insufficient-data" — fall back to current behaviour. A calibration
+   *     curve built on five points is confidently wrong about confidence.
+   *   - Cell sufficient: hitRate >= minHitRate (default 0.6) => "trust" the reported
+   *     confidence (no escalation forced by calibration); hitRate < minHitRate =>
+   *     "escalate" — the model's self-report at this level on this shape is measured
+   *     unreliable, so a "high" report is weak evidence, not a green light.
+   */
+  async decideCalibratedEscalation(args: {
+    modelId: string;
+    shapeKey: string;
+    reportedConfidence: string;
+    defaultAction?: "trust" | "escalate";
+    minHitRate?: number;
+    minSample?: number;
+  }): Promise<{
+    action: "trust" | "escalate";
+    reason: string;
+    hitRate: number | null;
+    total: number;
+    threshold: number;
+  }> {
+    const defaultAction = args.defaultAction === "escalate" ? "escalate" : "trust";
+    const minHitRate = Math.max(0, Math.min(1, Number(args.minHitRate ?? 0.6)));
+    const cell = await this.getCalibrationCell(args.modelId, args.shapeKey, args.reportedConfidence, {
+      minSample: args.minSample,
+    });
+
+    if (!cell.sufficient || cell.hitRate === null) {
+      return {
+        action: defaultAction,
+        reason: `insufficient-data (${cell.total}/${cell.threshold} pairs on ${args.modelId || "unknown-model"} / ${this.asString(args.reportedConfidence).trim().toLowerCase() || "unknown-level"})`,
+        hitRate: cell.hitRate,
+        total: cell.total,
+        threshold: cell.threshold,
+      };
+    }
+
+    if (cell.hitRate >= minHitRate) {
+      return {
+        action: "trust",
+        reason: `measured-reliable (${(cell.hitRate * 100).toFixed(0)}% hit rate >= ${Math.round(minHitRate * 100)}% floor across ${cell.total} pairs on this shape)`,
+        hitRate: cell.hitRate,
+        total: cell.total,
+        threshold: cell.threshold,
+      };
+    }
+    return {
+      action: "escalate",
+      reason: `measured-unreliable (${(cell.hitRate * 100).toFixed(0)}% hit rate < ${Math.round(minHitRate * 100)}% floor on this shape)`,
+      hitRate: cell.hitRate,
+      total: cell.total,
+      threshold: cell.threshold,
+    };
+  }
+
   /**
    * Phase 8 (unified memory): prospective-memory read side. One bounded page of
    * the reminders room + per-drawer one-hop kg_query for the reminder axes

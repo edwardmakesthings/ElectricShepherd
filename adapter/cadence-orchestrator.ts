@@ -46,6 +46,14 @@ export type CadenceOrchestratorOptions = {
   applyMerges?: boolean;
   consolidationDefaults?: Partial<Omit<SynthesisConsolidationOptions, "query" | "targetWing" | "targetRoom">>;
   validationDefaults?: Partial<Omit<ValidationMergeReviewOptions, "scopeRoom">>;
+  /** Phase 16: optional calibration summary request — per-model tables computed via
+   *  MemgraphClient.getCalibrationTable. Bounded by maxModels (default 4). */
+  calibration?: {
+    models: string[];
+    shapeKeys?: string[];
+    minSample?: number;
+    maxModels?: number;
+  };
 };
 
 export type CadenceTrigger = "volume-threshold" | "idle-window" | "nightly-backstop";
@@ -68,11 +76,36 @@ export type CadenceExecutionResult = {
   validation: ValidationMergeReviewResult;
 };
 
+/** Phase 16: per-model calibration summary row (from MemgraphClient.getCalibrationTable). */
+export type CalibrationSummaryModel = {
+  model: string;
+  threshold: number;
+  rows: Array<{
+    shapeKey: string;
+    confidence: string;
+    accept: number;
+    revise: number;
+    failed: number;
+    unused: number;
+    total: number;
+    hitRate: number | null;
+    sufficient: boolean;
+  }>;
+};
+
 export type CadenceOrchestratorResult = {
   phase: "cadence-orchestrator";
   executionMode: CadenceExecutionMode;
   plan: AreaCadencePlan[];
   executed: CadenceExecutionResult[];
+  /** Phase 16: confidence-calibration tables per requested model. Present only when
+   *  `calibration` options were supplied; absent (undefined) otherwise — the cadence
+   *  envelope is backward-compatible for consumers that don't ask. */
+  calibration?: {
+    threshold: number;
+    models: CalibrationSummaryModel[];
+    note?: string;
+  };
 };
 
 type GenericObject = Record<string, unknown>;
@@ -189,10 +222,40 @@ export async function runCadenceOrchestrator(
     });
   }
 
+  // Phase 16: calibration summary — per-model tables with the 20-pair sufficiency gate.
+  // Computed best-effort: a failure here degrades to `note`, never aborts cadence.
+  let calibration: CadenceOrchestratorResult["calibration"];
+  if (options.calibration && options.calibration.models.length > 0) {
+    const maxModels = Math.max(1, Math.min(8, Number(options.calibration.maxModels ?? 4)));
+    const models = [...new Set(options.calibration.models.map((m) => asString(m).trim()).filter(Boolean))].slice(0, maxModels);
+    const shapeKeys = (options.calibration.shapeKeys || []).map((s) => asString(s).trim()).filter(Boolean);
+    try {
+      const tables: CalibrationSummaryModel[] = [];
+      for (const model of models) {
+        const table = await client.getCalibrationTable(model, shapeKeys, {
+          minSample: options.calibration.minSample,
+        });
+        tables.push(table);
+      }
+      calibration = {
+        threshold: tables[0]?.threshold ?? 20,
+        models: tables,
+        ...(shapeKeys.length === 0 ? { note: "no shape keys supplied — empty tables; pass --calibration-shapes to populate" } : {}),
+      };
+    } catch (err) {
+      calibration = {
+        threshold: Number(options.calibration.minSample ?? 20),
+        models: [],
+        note: `calibration read failed: ${asString(err)}`,
+      };
+    }
+  }
+
   return {
     phase: "cadence-orchestrator",
     executionMode,
     plan,
     executed,
+    ...(calibration ? { calibration } : {}),
   };
 }
