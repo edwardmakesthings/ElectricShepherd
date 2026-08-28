@@ -210,7 +210,7 @@ export async function runRemind(args: {
   // update / close — explicit drawer id only. No broad write mode exists.
   const drawerId = asText(args.drawerId).trim();
   if (!drawerId) {
-    throw new Error(`remind: ${action} requires an explicit `drawer_id` — there is no wing/room/scope write mode; pick the reminder from /reminders first`);
+    throw new Error(`remind: ${action} requires an explicit drawer_id — there is no wing/room/scope write mode; pick the reminder from /reminders first`);
   }
 
   if (action === "update") {

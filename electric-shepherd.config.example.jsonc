@@ -4,6 +4,12 @@
   // Full option surface and defaults are defined in:
   //   adapter/runtime-config.ts (RUNTIME_CONFIG_SPECS)
 
+  "env": {
+    // Optional explicit .env path (absolute or relative to project root).
+    // When set, runtime loaders use ONLY this file.
+    "envFile": ""
+  },
+
   "mcp": {
     "url": "http://localhost:8093/mcp",
     "autoDiscover": true,

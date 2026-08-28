@@ -3,6 +3,16 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
+consumer_root="${ESHEPHERD_PROJECT_ROOT:-$PWD}"
+
+resolve_env_path() {
+  local raw_path="$1"
+  if [[ "$raw_path" = /* ]]; then
+    printf '%s\n' "$raw_path"
+    return 0
+  fi
+  printf '%s\n' "$consumer_root/$raw_path"
+}
 
 load_env_file() {
   local file_path="$1"
@@ -31,7 +41,7 @@ load_env_file() {
 }
 
 if [[ -n "${ESHEPHERD_ENV_FILE:-}" ]]; then
-  load_env_file "$ESHEPHERD_ENV_FILE" || true
+  load_env_file "$(resolve_env_path "$ESHEPHERD_ENV_FILE")" || true
 else
   loaded_repo_env=false
   if load_env_file "$repo_root/.env"; then

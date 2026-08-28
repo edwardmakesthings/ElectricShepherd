@@ -51,7 +51,10 @@ import {
 } from "../adapter/turn-guard-helpers.ts"
 import type { AutoConsolidationTrigger, MemcoreInjectionRecord } from "../adapter/turn-guard-helpers.ts"
 import { loadPackagedAssets, mergeWithoutOverride, loadInstructionPaths, dedupeAppendInstructions } from "../adapter/asset-loader.ts"
-import { loadRuntimeConfig } from "../adapter/runtime-config.ts"
+import { loadRuntimeConfig, getRuntimeConfigEnvMap, DEFAULT_MCP_URL, DEFAULT_MCP_TOOL_PREFIX } from "../adapter/runtime-config.ts"
+import { MCPHttpClient, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-client.ts"
+import { retrieveSimilarWorkedExamples, formatWorkedExampleDemonstration, WORKED_EXAMPLE_MAX_INJECT, WORKED_EXAMPLE_RELEVANCE_FLOOR, extractWorkedExampleShape, buildWorkedExampleEntry, WORKED_EXAMPLE_FILE_AGENT_TYPES, WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS } from "../adapter/retrieval-expansion.ts"
+import { loadRuntimeEnv } from "../scripts/runtime-env.ts"
 import deleteDrawersTool from "../tools/delete_drawers.ts"
 import moveDrawersTool from "../tools/move_drawers.ts"
 import captureTranscriptTool from "../tools/capture_transcript.ts"
@@ -139,8 +142,23 @@ const DEFAULT_TASK_SWAP_QWEN_MATCH = "qwen"
 const DEFAULT_TASK_SWAP_QWEN_TO_MODEL = "litellm/implementer-gemma4-31b"
 const DEFAULT_TASK_SWAP_GEMMA_MATCH = "gemma"
 const DEFAULT_TASK_SWAP_GEMMA_TO_MODEL = "litellm/implementer-qwen3.8-27b"
-// Any mutating tool is progress, and clears the repeat window. This is what
-// keeps a legitimate verify cycle (typecheck -> edit -> typecheck) from ever
+// Phase 13 (worked-example injection): when delegating to @implement-local via the
+// task tool, append up to WORKED_EXAMPLE_MAX_INJECT relevant apprenticeship worked
+// examples as demonstrations. Below WORKED_EXAMPLE_RELEVANCE_FLOOR, inject nothing.
+// The cap and floor are defined in adapter/retrieval-expansion.ts (single source of
+// truth); they are re-exported here for the config echo and testability.
+const DEFAULT_WORKED_EXAMPLE_INJECTION_ENABLED = true
+const DEFAULT_WORKED_EXAMPLE_SEARCH_TIMEOUT_MS = 4000
+// Phase 13 CREATE: when a cloud implementation subagent (implement-cloud,
+// build-cloud) completes successfully with substantive output, file a compact
+// worked example to the apprenticeship room and stamp it es-source-type:
+// worked-example. Worked examples are a distinct knowledge class from procedural
+// skills, so they get their own source type; the CONSUME side admits both
+// "worked-example" (new filings) and "skill" (pre-existing drawers) via
+// WORKED_EXAMPLE_SOURCE_TYPES in adapter/retrieval-expansion.ts. The apprentice
+// flows (implement-local, build) deliberately do NOT file — see
+// WORKED_EXAMPLE_FILE_AGENT_TYPES for the rationale.
+const DEFAULT_WORKED_EXAMPLE_FILING_ENABLED = true
 // looking like a loop, without needing to exempt the verify tools themselves.
 const DEFAULT_LOOP_MUTATION_TOOLS = [
   "write",
@@ -616,15 +634,21 @@ async function loadMemcoreMarkdown(
 
   const execFileAsync = promisify(execFile)
   try {
-    const output = await execFileAsync("node", args, {
+    const output: any = await execFileAsync("node", args, {
       cwd: projectRoot,
       encoding: "utf8",
       maxBuffer: 2 * 1024 * 1024,
       timeout: options.timeoutMs,
       killSignal: "SIGKILL",
     })
+    const stdout =
+      typeof output === "string"
+        ? output
+        : typeof output?.stdout === "string"
+          ? output.stdout
+          : ""
     return {
-      markdown: String(output || "").trim(),
+      markdown: stdout.trim(),
       loaderInfo: { ok: true, scopeDir, maxScopes: Number(maxScopes), directFileName, storeRoots },
     }
   } catch (err) {
@@ -1047,6 +1071,16 @@ export const TurnGuard = async ({ client, directory }: any) => {
     cwd: projectRoot,
     env: process.env,
   })
+  const runtimeConfigEnv = getRuntimeConfigEnvMap(runtimeConfig)
+  const runtimeEnv = {
+    ...process.env,
+    ...runtimeConfigEnv,
+  }
+  loadRuntimeEnv({
+    scriptUrl: import.meta.url,
+    env: runtimeEnv,
+    cwd: projectRoot,
+  })
   const cfgRaw = (path: string): string => {
     const parts = path.split(".").filter(Boolean)
     let node: any = runtimeConfig.valuesByPath
@@ -1171,6 +1205,9 @@ export const TurnGuard = async ({ client, directory }: any) => {
   const taskWindowBySession = new Map<string, string[]>()
   const taskEscalationsBySession = new Map<string, number>()
   const taskRecentLaunchBySession = new Map<string, Map<string, number>>()
+  // Phase 13 CREATE: in-session dedup — shapeKey → timestamp of last filed example.
+  // Prevents filing near-duplicate worked examples for the same problem shape.
+  const workedExampleFiledByShape = new Map<string, Map<string, number>>()
   const loopGuardEnabled = cfgBool("loopGuard.enabled", DEFAULT_LOOP_GUARD_ENABLED)
   const loopRepeatThreshold = cfgNum("loopGuard.repeatThreshold", DEFAULT_LOOP_REPEAT_THRESHOLD)
   const loopWindowSize = cfgNum("loopGuard.windowSize", DEFAULT_LOOP_WINDOW_SIZE)
@@ -1212,6 +1249,138 @@ export const TurnGuard = async ({ client, directory }: any) => {
   ).trim()
   const taskFallbackProvider = String(cfgRaw("taskWatchdog.fallback.provider") || "").trim()
   const taskFallbackModel = String(cfgRaw("taskWatchdog.fallback.model") || "").trim()
+
+  // Phase 13 (worked-example injection): config + lazy palace client.
+  const workedExampleInjectionEnabled = cfgBool(
+    "taskWatchdog.workedExampleInjection.enabled",
+    DEFAULT_WORKED_EXAMPLE_INJECTION_ENABLED,
+  )
+  const workedExampleSearchTimeoutMs = cfgNum(
+    "taskWatchdog.workedExampleInjection.searchTimeoutMs",
+    DEFAULT_WORKED_EXAMPLE_SEARCH_TIMEOUT_MS,
+  )
+  // Phase 13 CREATE: config for filing worked examples on successful subagent completion.
+  const workedExampleFilingEnabled = cfgBool(
+    "taskWatchdog.workedExampleFiling.enabled",
+    DEFAULT_WORKED_EXAMPLE_FILING_ENABLED,
+  )
+  let workedExampleClientPromise: Promise<any> | null = null
+  function getWorkedExampleClient(): Promise<any> {
+    if (!workedExampleClientPromise) {
+      workedExampleClientPromise = (async () => {
+        const mcpURL = String(cfgRaw("mcp.url") || "").trim() || DEFAULT_MCP_URL
+        const toolPrefix = String(cfgRaw("mcp.toolPrefix") || "").trim() || DEFAULT_MCP_TOOL_PREFIX
+        const headers = resolveMCPHeadersFromEnv(runtimeEnv)
+        const mcp = new MCPHttpClient(mcpURL, headers, {
+          clientName: "electric-shepherd-turn-guard",
+          requestTimeoutMs: workedExampleSearchTimeoutMs,
+          maxRetries: 0,
+        })
+        await mcp.initialize()
+        return {
+          search: (q: string, limit?: number, wing?: string, room?: string) =>
+            mcp.callTool(`${toolPrefix}search`, { query: q, limit, wing, room }),
+          getDrawer: (args: { drawer_id: string }) =>
+            mcp.callTool(`${toolPrefix}get_drawer`, args),
+          // Phase 13 CREATE: write path for filing worked examples + stamping.
+          diaryWrite: (args: Record<string, unknown>) =>
+            mcp.callTool(`${toolPrefix}diary_write`, args),
+          kgAdd: (args: Record<string, unknown>) =>
+            mcp.callTool(`${toolPrefix}kg_add`, args),
+        }
+      })().catch((err) => {
+        console.log(`[turn-guard] worked-example injection: palace client init failed: ${String(err)}`)
+        return null
+      })
+    }
+    return workedExampleClientPromise
+  }
+
+  // Phase 13 CREATE: file a compact worked example to the apprenticeship room when a
+  // cloud implementation subagent (implement-cloud, build-cloud) completes
+  // successfully with substantive output. Best-effort: any failure (MCP down, stamp
+  // rejected, dedup hit) degrades to a log line and NEVER throws into the turn. The
+  // entry is stamped es-source-type: worked-example via kg_add after filing — a
+  // distinct knowledge class from procedural skills; the CONSUME side admits both
+  // "worked-example" and (for backward compatibility) "skill" via
+  // WORKED_EXAMPLE_SOURCE_TYPES in adapter/retrieval-expansion.ts.
+  async function maybeFileWorkedExample(args: {
+    sid: string
+    subagentType: string
+    description: string
+    prompt: string
+    output: string
+  }): Promise<void> {
+    if (!workedExampleFilingEnabled) return
+    const { sid, subagentType, description, prompt, output } = args
+
+    // Gate 1: only target subagent types.
+    if (!WORKED_EXAMPLE_FILE_AGENT_TYPES.has(subagentType)) return
+
+    // Gate 2: success-only — the caller passes output only on successful completion.
+    const trimmedOutput = String(output || "").trim()
+    if (trimmedOutput.length < WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS) return
+
+    // Gate 3: in-session near-duplicate suppression by shape key.
+    const shape = extractWorkedExampleShape(`${description}\n${prompt}`)
+    const filedBySession = workedExampleFiledByShape.get(sid) ?? new Map<string, number>()
+    const lastFiledAt = Number(filedBySession.get(shape.shapeKey) ?? 0)
+    if (lastFiledAt > 0 && Date.now() - lastFiledAt < 30 * 60 * 1000) {
+      console.log(
+        `[turn-guard] worked-example filing: skipping near-duplicate shape ${shape.shapeKey} ` +
+          `(filed ${Math.round((Date.now() - lastFiledAt) / 1000)}s ago) sid=${sid}`,
+      )
+      return
+    }
+
+    const entry = buildWorkedExampleEntry({ subagentType, description, output: trimmedOutput, shape })
+    const wing = String(cfgRaw("memory.projectWing") || "").trim() || "opencode"
+    const room = "apprenticeship"
+
+    try {
+      const palaceClient = await getWorkedExampleClient()
+      if (!palaceClient || typeof palaceClient.diaryWrite !== "function") return
+
+      // File the worked example.
+      const result: any = await palaceClient.diaryWrite({
+        wing,
+        room,
+        entry,
+        agent_name: "turn-guard",
+        topic: `worked-example-${subagentType}`,
+      })
+
+      // Stamp es-source-type: worked-example via kg_add (best-effort — a stamp
+      // failure does not invalidate the filed example; absence of stamp is not a
+      // rejection on the CONSUME side).
+      const drawerId = String(result?.drawer_id ?? result?.id ?? "").trim()
+      if (drawerId && typeof palaceClient.kgAdd === "function") {
+        try {
+          await palaceClient.kgAdd({
+            subject: drawerId,
+            predicate: "es-source-type",
+            object: "worked-example",
+            source_closet: drawerId,
+          })
+        } catch (stampErr) {
+          console.log(`[turn-guard] worked-example filing: stamp failed (non-fatal): ${String(stampErr)}`)
+        }
+      }
+
+      // Record the filing for in-session dedup.
+      filedBySession.set(shape.shapeKey, Date.now())
+      workedExampleFiledByShape.set(sid, filedBySession)
+
+      console.log(
+        `[turn-guard] worked-example filing: filed ${subagentType} example ` +
+          `(shape=${shape.workClass}/${shape.shapeKey}, drawer=${drawerId || "?"}) sid=${sid}`,
+      )
+    } catch (err) {
+      // Filing failure must never break the turn.
+      console.log(`[turn-guard] worked-example filing: failed, continuing: ${String(err)}`)
+    }
+  }
+
   // Loop-guard status banner. Emitted HERE, after the consts above are
   // initialized — emitting it earlier is a temporal-dead-zone ReferenceError
   // that throws before the hooks object returns, silently disabling the plugin.
@@ -1271,7 +1440,9 @@ export const TurnGuard = async ({ client, directory }: any) => {
       taskWatchdogMaxEscalations,
       taskSerializeTypes: [...taskSerializeTypes],
       taskSerializeCooldownMs,
-      spiralGuardEnabled,
+      workedExampleInjectionEnabled,
+      workedExampleSearchTimeoutMs,
+      workedExampleFilingEnabled,
       spiralInvestigateThreshold,
       spiralReversalThreshold,
       spiralMaxInterventions,
@@ -2319,6 +2490,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
     pruneToMax(taskWindowBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(taskEscalationsBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(taskRecentLaunchBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(workedExampleFiledByShape, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralNudgedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralInspectedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(checkpointedSessions, autoConsolidationMaxTrackedSessions)
@@ -2328,6 +2500,45 @@ export const TurnGuard = async ({ client, directory }: any) => {
     pruneToMax(sourceCaptureBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(compactionPathBySession, autoConsolidationMaxTrackedSessions)
   }
+
+  // Phase 13 CREATE: scan a message for successful task tool completions and file
+  // worked examples. The task tool part carries the subagent_type in its input args
+  // and the output (the subagent's final text) in its state/output field. We only
+  // file when the part indicates success (no error status) and the output is
+  // substantive. This runs on session.idle — by then the task has completed and
+  // the message parts are finalized.
+  async function maybeFileWorkedExamplesFromMessage(sid: string, msg: MessageWithParts): Promise<void> {
+    if (!workedExampleFilingEnabled) return
+    const parts = msg?.parts ?? []
+    for (const part of parts) {
+      if (part?.type !== "tool") continue
+      const toolName = String(part?.tool ?? part?.name ?? "").trim().toLowerCase()
+      if (toolName !== "task") continue
+
+      // Extract subagent_type and prompt from the task call's input args.
+      const inputArgs: any = part?.state?.input ?? part?.args ?? {}
+      const subagentType = String(inputArgs?.subagent_type ?? "").trim().toLowerCase()
+      if (!WORKED_EXAMPLE_FILE_AGENT_TYPES.has(subagentType)) continue
+
+      // Extract the output (the subagent's final response text).
+      const state = part?.state ?? {}
+      const status = String(state?.status ?? "").trim().toLowerCase()
+      // Success-only: skip if the task errored or was aborted.
+      if (status === "error" || status === "aborted" || status === "failed") continue
+
+      const outputText = String(
+        state?.output ?? part?.output ?? state?.text ?? "",
+      ).trim()
+      if (outputText.length < WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS) continue
+
+      const description = String(inputArgs?.description ?? "").trim()
+      const prompt = String(inputArgs?.prompt ?? "").trim()
+
+      await maybeFileWorkedExample({ sid, subagentType, description, prompt, output: outputText })
+    }
+  }
+
+
 
   async function onSessionIdle(event: any): Promise<void> {
     const sid = String(event?.properties?.sessionID ?? findSessionID(event))
@@ -2367,6 +2578,11 @@ export const TurnGuard = async ({ client, directory }: any) => {
         anchor: last,
       })
 
+      // Phase 13 CREATE: file worked examples for successful implementation subagents.
+      // Scans the last message for task tool parts with completed status and a target
+      // subagent_type, then files a compact example if the output is substantive.
+      await maybeFileWorkedExamplesFromMessage(sid, last)
+
       // Arm the overridable idle-delay timer: consolidation fires only if the
       // session stays quiet for the full delay (a new message cancels it).
       armAutoConsolidationIdleTimer(sid)
@@ -2384,6 +2600,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
     pruneToMax(taskWindowBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(taskEscalationsBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(taskRecentLaunchBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(workedExampleFiledByShape, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralNudgedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralInspectedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(checkpointedSessions, autoConsolidationMaxTrackedSessions)
@@ -2509,6 +2726,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
     pruneToMax(taskWindowBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(taskEscalationsBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(taskRecentLaunchBySession, autoConsolidationMaxTrackedSessions)
+    pruneToMax(workedExampleFiledByShape, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralNudgedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralInspectedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(checkpointedSessions, autoConsolidationMaxTrackedSessions)
@@ -2752,6 +2970,59 @@ export const TurnGuard = async ({ client, directory }: any) => {
                 `(repeat ${taskDecision.count}x, escalation ${taskEscalationsUsed + 1}/${taskWatchdogMaxEscalations}) ` +
                 `sid=${sid} -> ${swapTarget.providerID}/${swapTarget.modelID} (${swapTarget.reason})`,
             )
+          }
+        }
+
+        // Phase 13 (worked-example injection): for @implement-local delegations,
+        // append up to WORKED_EXAMPLE_MAX_INJECT relevant apprenticeship worked
+        // examples as demonstrations. Runs AFTER the watchdog signature is computed
+        // from the ORIGINAL prompt (the loop guard must see the pre-injection call),
+        // and mutates args.prompt in place so both output.args and input.args carry
+        // the augmented prompt. Any failure degrades to no injection — a retrieval
+        // hiccup must never block or alter a delegation.
+        const demonstrationHeading =
+          "## Demonstrations: how this class of problem was solved in this codebase before"
+        const hasPrompt = Boolean(prompt)
+        const promptAlreadyAugmented = hasPrompt && prompt.includes(demonstrationHeading)
+        const shouldInjectWorkedExamples =
+          workedExampleInjectionEnabled &&
+          subagentType === "implement-local" &&
+          hasPrompt &&
+          !promptAlreadyAugmented
+        if (!shouldInjectWorkedExamples) {
+          console.log(
+            `[turn-guard] worked-example injection: skipped sid=${sid} ` +
+              `(enabled=${workedExampleInjectionEnabled}, subagentType=${subagentType || ""}, ` +
+              `hasPrompt=${hasPrompt}, promptAlreadyAugmented=${promptAlreadyAugmented})`,
+          )
+        }
+
+        if (shouldInjectWorkedExamples) {
+          try {
+            const palaceClient = await getWorkedExampleClient()
+            if (palaceClient) {
+              const examples = await retrieveSimilarWorkedExamples(palaceClient, {
+                query: prompt,
+                limit: WORKED_EXAMPLE_MAX_INJECT,
+                relevanceFloor: WORKED_EXAMPLE_RELEVANCE_FLOOR,
+              })
+              const demonstration = formatWorkedExampleDemonstration(examples)
+              if (demonstration) {
+                args.prompt = `${prompt}${demonstration}`
+                if (output?.args) output.args = args
+                if (input?.args) input.args = args
+                console.log(
+                  `[turn-guard] worked-example injection: appended ${examples.length} example(s) ` +
+                    `(top relevance ${examples[0].relevance.toFixed(2)}) to implement-local prompt sid=${sid}`,
+                )
+              } else {
+                console.log(
+                  `[turn-guard] worked-example injection: no examples above floor (${WORKED_EXAMPLE_RELEVANCE_FLOOR}) — prompt unchanged sid=${sid}`,
+                )
+              }
+            }
+          } catch (err) {
+            console.log(`[turn-guard] worked-example injection: failed, prompt unchanged: ${String(err)}`)
           }
         }
 

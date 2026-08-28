@@ -58,6 +58,7 @@ const DEFAULT_SPIRAL_EXEMPT_MODEL_PREFIXES = ["copilot-"]
 // Non-secret configuration surface. Secrets stay in env only.
 // Command-related options are intentionally grouped under commands.* paths.
 export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
+  { envKey: "ESHEPHERD_ENV_FILE", path: "env.envFile", kind: "string", defaultValue: "" },
   { envKey: "MEMPALACE_MCP_URL", path: "mcp.url", kind: "string", defaultValue: DEFAULT_MCP_URL },
   { envKey: "ESHEPHERD_MCP_AUTO_DISCOVER", path: "mcp.autoDiscover", kind: "boolean", defaultValue: true },
   { envKey: "ESHEPHERD_MCP_REQUEST_TIMEOUT_MS", path: "mcp.requestTimeoutMs", kind: "number", defaultValue: 60000, min: 1 },
@@ -141,6 +142,9 @@ export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
   { envKey: "ESHEPHERD_TASK_SWAP_GEMMA_TO_MODEL", path: "taskWatchdog.swap.gemma.toModel", kind: "string", defaultValue: "litellm/implementer-qwen3.8-27b" },
   { envKey: "ESHEPHERD_TASK_WATCHDOG_FALLBACK_PROVIDER", path: "taskWatchdog.fallback.provider", kind: "string", defaultValue: "" },
   { envKey: "ESHEPHERD_TASK_WATCHDOG_FALLBACK_MODEL", path: "taskWatchdog.fallback.model", kind: "string", defaultValue: "" },
+  { envKey: "ESHEPHERD_TASK_WATCHDOG_WORKED_EXAMPLE_INJECTION_ENABLED", path: "taskWatchdog.workedExampleInjection.enabled", kind: "boolean", defaultValue: true },
+  { envKey: "ESHEPHERD_TASK_WATCHDOG_WORKED_EXAMPLE_SEARCH_TIMEOUT_MS", path: "taskWatchdog.workedExampleInjection.searchTimeoutMs", kind: "number", defaultValue: 4000, min: 1 },
+  { envKey: "ESHEPHERD_TASK_WATCHDOG_WORKED_EXAMPLE_FILING_ENABLED", path: "taskWatchdog.workedExampleFiling.enabled", kind: "boolean", defaultValue: true },
 
   { envKey: "ESHEPHERD_SPIRALGUARD_ENABLED", path: "spiralGuard.enabled", kind: "boolean", defaultValue: true },
   { envKey: "ESHEPHERD_SPIRALGUARD_INVESTIGATE_THRESHOLD", path: "spiralGuard.investigateThreshold", kind: "number", defaultValue: 3, min: 1 },

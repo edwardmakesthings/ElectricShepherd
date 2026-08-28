@@ -18,6 +18,9 @@ test("runtime config reads .electric-shepherd/config.jsonc and exposes values by
     join(root, ".electric-shepherd", "config.jsonc"),
     `{
       // JSONC comment support
+      "env": {
+        "envFile": "../docker/.env"
+      },
       "mcp": {
         "url": "http://example.local/mcp",
         "authHeader": "x-litellm-api-key",
@@ -34,7 +37,17 @@ test("runtime config reads .electric-shepherd/config.jsonc and exposes values by
       },
       "loopGuard": {
         "exemptTools": ["compress", "my-tool"]
+      },
+      "taskWatchdog": {
+        "workedExampleInjection": {
+          "enabled": false,
+          "searchTimeoutMs": 1234
+        },
+        "workedExampleFiling": {
+          "enabled": false
+        }
       }
+
     }`,
     "utf8",
   );
@@ -47,6 +60,7 @@ test("runtime config reads .electric-shepherd/config.jsonc and exposes values by
   const envMap = getRuntimeConfigEnvMap(loaded);
 
   assert.equal(getRuntimeConfigValueByPath(loaded, "mcp.url"), "http://example.local/mcp");
+  assert.equal(getRuntimeConfigValueByPath(loaded, "env.envFile"), "../docker/.env");
   assert.equal(getRuntimeConfigValueByPath(loaded, "mcp.authHeader"), "x-litellm-api-key");
   assert.equal(getRuntimeConfigValueByPath(loaded, "mcp.authScheme"), "Bearer");
   // Non-secret runtime config is config-first (with defaults), not env-driven.
@@ -54,7 +68,12 @@ test("runtime config reads .electric-shepherd/config.jsonc and exposes values by
   assert.equal(getRuntimeConfigValueByPath(loaded, "sourceCapture.dedupEnabled"), "false");
   assert.equal(getRuntimeConfigValueByPath(loaded, "commands.sourceCapture.timeoutMs"), "25000");
   assert.equal(getRuntimeConfigValueByPath(loaded, "loopGuard.exemptTools"), "compress,my-tool");
+  assert.equal(getRuntimeConfigValueByPath(loaded, "taskWatchdog.workedExampleInjection.enabled"), "false");
+  assert.equal(getRuntimeConfigValueByPath(loaded, "taskWatchdog.workedExampleInjection.searchTimeoutMs"), "1234");
+  assert.equal(getRuntimeConfigValueByPath(loaded, "taskWatchdog.workedExampleFiling.enabled"), "false");
+
   assert.equal(envMap.MEMPALACE_MCP_URL, "http://example.local/mcp");
+  assert.equal(envMap.ESHEPHERD_ENV_FILE, "../docker/.env");
   assert.equal(envMap.MEMPALACE_MCP_AUTH_HEADER, "x-litellm-api-key");
   assert.equal(envMap.MEMPALACE_MCP_AUTH_SCHEME, "Bearer");
 

@@ -431,6 +431,440 @@ function mergeWeights(overrides: Partial<RetrievalWeights> | undefined): Retriev
   return { ...DEFAULT_WEIGHTS, ...(overrides || {}) };
 }
 
+
+// ---------------------------------------------------------------------------
+// Phase 13 (unified memory): worked-example injection.
+//
+// The `apprenticeship` room holds worked examples filed after hard problems were
+// solved. This is the CONSUME side: given a delegation prompt, find the most
+// similar examples and return them as demonstrations for in-context injection.
+//
+// Relevance is computed with a deterministic token-overlap score so the floor is
+// stable across runs (no embedding dependency). The hard cap of 2 examples bounds
+// prompt growth; below the relevance floor, nothing is returned rather than
+// padding the delegation prompt.
+// ---------------------------------------------------------------------------
+
+/** Phase 13: hard cap on worked examples injected into a delegation prompt. */
+export const WORKED_EXAMPLE_MAX_INJECT = 2;
+
+/**
+ * Phase 13: minimum relevance score for a worked example to be injected.
+ * Score is in [0, 1] (token-overlap / query-token-count). A floor of 0.25 means
+ * at least a quarter of the prompt's informative tokens must appear in the
+ * example — below that, the match is too weak to be useful as a demonstration.
+ */
+export const WORKED_EXAMPLE_RELEVANCE_FLOOR = 0.25;
+
+/** Phase 13: max chars per injected example (bounds prompt growth). */
+export const WORKED_EXAMPLE_MAX_CHARS = 800;
+
+/**
+ * Phase 13 CONSUME: source types admitted as worked examples by retrieval.
+ * `worked-example` is the stamp this phase writes (a distinct knowledge class —
+ * solved task demonstrations, not procedural skills). `skill` stays admitted for
+ * backward compatibility with any pre-existing apprenticeship drawers that were
+ * stamped `skill`; new filings must never use `skill`.
+ */
+const WORKED_EXAMPLE_SOURCE_TYPES: ReadonlySet<string> = new Set(["worked-example", "skill"]);
+
+export type WorkedExampleMatch = {
+  drawer_id: string;
+  wing: string;
+  room: string;
+  content: string;
+  relevance: number;
+};
+
+export type RetrieveWorkedExamplesOptions = {
+  query: string;
+  limit?: number;
+  relevanceFloor?: number;
+  maxChars?: number;
+};
+
+/**
+ * Tokenize text into lowercase alphanumeric tokens, dropping common stopwords
+ * so the overlap score reflects task-specific vocabulary. Deterministic — no
+ * randomness, no network calls.
+ */
+function tokenizeWorkedExampleText(text: string): Set<string> {
+  const STOPWORDS = new Set([
+    "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of",
+    "with", "by", "from", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "need", "must", "it", "its",
+    "this", "that", "these", "those", "as", "if", "then", "else", "when",
+    "where", "how", "what", "which", "who", "whom", "why", "not", "no", "yes",
+    "so", "such", "than", "too", "very", "just", "also", "into", "out",
+    "up", "down", "over", "under", "between", "during", "before", "after",
+  ]);
+  const tokens = new Set<string>();
+  for (const raw of text.toLowerCase().split(/[^a-z0-9_]+/)) {
+    if (raw.length < 3) continue;
+    if (STOPWORDS.has(raw)) continue;
+    tokens.add(raw);
+  }
+  return tokens;
+}
+
+/**
+ * Deterministic relevance score: |queryTokens ∩ exampleTokens| / |queryTokens|.
+ * Returns 0 when queryTokens is empty. Bounded in [0, 1].
+ */
+function computeWorkedExampleRelevance(queryTokens: Set<string>, exampleTokens: Set<string>): number {
+  if (queryTokens.size === 0) return 0;
+  let overlap = 0;
+  for (const token of queryTokens) {
+    if (exampleTokens.has(token)) overlap += 1;
+  }
+  return overlap / queryTokens.size;
+}
+
+/**
+ * Phase 13 CONSUME: retrieve the most relevant worked examples from the
+ * `apprenticeship` room for a given delegation prompt.
+ *
+ * Returns at most `limit` (default WORKED_EXAMPLE_MAX_INJECT = 2) examples,
+ * each with relevance >= `relevanceFloor` (default WORKED_EXAMPLE_RELEVANCE_FLOOR).
+ * If no examples meet the floor, returns an empty array — the caller injects nothing.
+ *
+ * The search is capability-gated: clients without `search` degrade to "no
+ * examples" with zero extra calls.
+ */
+export async function retrieveSimilarWorkedExamples(
+  client: {
+    search?: (query: string, limit?: number, wing?: string, room?: string) => Promise<unknown>;
+    getDrawer?: (args: { drawer_id: string }) => Promise<unknown>;
+    getClosetSourceType?: (nodeId: string) => Promise<string | null>;
+  },
+  options: RetrieveWorkedExamplesOptions,
+): Promise<WorkedExampleMatch[]> {
+  const query = String(options.query || "").trim();
+  if (!query) return [];
+
+  const limit = Math.max(1, Number(options.limit ?? WORKED_EXAMPLE_MAX_INJECT));
+  const floor = Number(options.relevanceFloor ?? WORKED_EXAMPLE_RELEVANCE_FLOOR);
+  const maxChars = Math.max(100, Number(options.maxChars ?? WORKED_EXAMPLE_MAX_CHARS));
+
+  if (typeof client.search !== "function") return [];
+
+  // Search the apprenticeship room for candidate examples.
+  let searchResult: unknown;
+  try {
+    searchResult = await client.search(query, Math.min(10, limit * 3), undefined, "apprenticeship");
+  } catch {
+    return [];
+  }
+
+  const queryTokens = tokenizeWorkedExampleText(query);
+  if (queryTokens.size === 0) return [];
+
+  // Extract candidate drawer IDs from the search result.
+  const obj = asObject(searchResult);
+  const rows = [
+    ...asArray(obj.results),
+    ...asArray(obj.drawers),
+    ...asArray(obj.matches),
+    ...asArray(obj.items),
+    ...asArray(obj.nodes),
+  ];
+
+  const seen = new Set<string>();
+  const candidates: { id: string; text: string }[] = [];
+  for (const raw of rows) {
+    const row = asObject(raw);
+    const id = asString(row.drawer_id || row.node_id || row.id || row.canonical_node_id).trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const text = [
+      asString(row.content),
+      asString(row.text),
+      ...[...asArray(row.lines)].map(asString),
+      asString(row.snippet),
+      asString(row.preview),
+      asString(row.desc),
+    ].filter(Boolean).join("\n").trim();
+    if (!text) continue;
+    candidates.push({ id, text });
+  }
+
+  // Score each candidate.
+  const scored: WorkedExampleMatch[] = [];
+  for (const { id, text } of candidates) {
+    const exampleTokens = tokenizeWorkedExampleText(text);
+    const relevance = computeWorkedExampleRelevance(queryTokens, exampleTokens);
+    if (relevance < floor) continue;
+
+    // Fetch full content via getDrawer for richer demonstration text.
+    let content = text.slice(0, maxChars);
+    let wing = "";
+    let room = "apprenticeship";
+    if (typeof client.getDrawer === "function") {
+      try {
+        const drawerRaw = await client.getDrawer({ drawer_id: id });
+        const drawer = asObject(drawerRaw);
+        const fullContent = asString(
+          drawer.content || drawer.text || drawer.desc || drawer.title,
+        ).trim();
+        if (fullContent) content = fullContent.slice(0, maxChars);
+        wing = asString(drawer.wing || asObject(drawer.metadata).wing);
+        room = asString(drawer.room || asObject(drawer.metadata).room) || "apprenticeship";
+      } catch {
+        // keep search-result text
+      }
+    }
+
+    // Optional source-type filter: only admit worked-example/skill stamped drawers
+    // (skill kept for backward compatibility — see WORKED_EXAMPLE_SOURCE_TYPES).
+    if (typeof client.getClosetSourceType === "function") {
+      try {
+        const srcType = await client.getClosetSourceType(id);
+        if (srcType && !WORKED_EXAMPLE_SOURCE_TYPES.has(srcType)) continue;
+      } catch {
+        // unreadable source type: admit (absence of stamp is not a rejection)
+      }
+    }
+
+    scored.push({ drawer_id: id, wing, room, content, relevance });
+  }
+
+  // Sort by relevance descending, then by drawer_id for deterministic tie-breaking.
+  scored.sort((a, b) => {
+    if (b.relevance !== a.relevance) return b.relevance - a.relevance;
+    return a.drawer_id.localeCompare(b.drawer_id);
+  });
+
+  return scored.slice(0, limit);
+}
+
+/**
+ * Phase 13: format retrieved worked examples as a delimited demonstration section
+ * for injection into a delegation prompt. Returns "" when no examples are provided.
+ */
+export function formatWorkedExampleDemonstration(examples: WorkedExampleMatch[]): string {
+  if (examples.length === 0) return "";
+  const parts = [
+    "\n\n---\n",
+    "## Demonstrations: how this class of problem was solved in this codebase before\n",
+    "",
+    "The following worked examples are directly relevant to your task. Use them as demonstrations — match their approach, style, and structure.\n",
+  ];
+  for (let i = 0; i < examples.length; i += 1) {
+    const ex = examples[i];
+    parts.push(`### Example ${i + 1} (relevance: ${ex.relevance.toFixed(2)})\n`);
+    parts.push(ex.content.trim());
+    if (i < examples.length - 1) parts.push("\n");
+  }
+  parts.push("\n---\n");
+  return parts.join("");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 13 CREATE: deterministic problem-shape extraction (shared with phases 14/15/16).
+//
+// The shape is WHAT MADE THE TASK HARD / what class of task it was — not the
+// answer. Retrieval matches on the problem, not the solution. Phases 14/15/16
+// will reuse this exact helper for capability-memory tuples (task shape → tier
+// → outcome), so it must stay cheap and deterministic: no embeddings, no LLM
+// calls, stable across phrasings of the same task class.
+// ---------------------------------------------------------------------------
+
+/** Phase 13: work-class vocabulary — deliberately small and closed. */
+export const WORKED_EXAMPLE_WORK_CLASSES = [
+  "bug-fix",
+  "new-feature",
+  "refactor",
+  "test",
+  "config",
+  "migration",
+  "performance",
+  "type-system",
+] as const;
+
+export type WorkedExampleWorkClass = (typeof WORKED_EXAMPLE_WORK_CLASSES)[number];
+
+/** Phase 13: known-hard area vocabulary — deliberately small and closed. */
+export const WORKED_EXAMPLE_HARD_AREAS = [
+  "concurrency",
+  "async",
+  "type-system",
+  "migration",
+  "network",
+  "state-machine",
+  "performance",
+] as const;
+
+export type WorkedExampleHardArea = (typeof WORKED_EXAMPLE_HARD_AREAS)[number];
+
+/** Phase 13: deterministic problem shape for a task description/prompt. */
+export type WorkedExampleShape = {
+  /** Coarse work class inferred from the prompt text. */
+  workClass: WorkedExampleWorkClass;
+  /** File extensions mentioned in the prompt (e.g. [".ts", ".py"]). */
+  fileTypes: string[];
+  /** Known-hard areas detected in the prompt text. */
+  hardAreas: WorkedExampleHardArea[];
+  /** Top informative tokens from the prompt (stopwords removed, capped). */
+  keyTokens: string[];
+  /** Stable hash of the shape fields — used for near-duplicate suppression. */
+  shapeKey: string;
+};
+
+/** Phase 13: max chars for a compact worked-example entry filed to the palace. */
+export const WORKED_EXAMPLE_ENTRY_MAX_CHARS = 800;
+
+/** Phase 13: minimum chars of substantive output before filing is worthwhile. */
+export const WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS = 200;
+
+/**
+ * Phase 13 CREATE: subagent types whose successful completion warrants a worked
+ * example. Cloud flows only (implement-cloud, build-cloud): the examples are filed
+ * so that later cloud delegations can be injected with them as demonstrations.
+ * The apprentice/local flows (implement-local, build) deliberately do NOT file —
+ * they are the consumers of these demonstrations, not producers, and filing from
+ * them would let a small model's own output back into its own prompt on the next
+ * run.
+ */
+export const WORKED_EXAMPLE_FILE_AGENT_TYPES = new Set([
+  "implement-cloud",
+  "build-cloud",
+]);
+
+const SHAPE_TOKEN_STOPWORDS = new Set([
+  "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of",
+  "with", "by", "from", "is", "are", "was", "were", "be", "been", "being",
+  "have", "has", "had", "do", "does", "did", "will", "would", "could",
+  "should", "may", "might", "shall", "can", "need", "must", "it", "its",
+  "this", "that", "these", "those", "as", "if", "then", "else", "when",
+  "where", "how", "what", "which", "who", "whom", "why", "not", "no", "yes",
+  "so", "such", "than", "too", "very", "just", "also", "into", "out",
+  "up", "down", "over", "under", "between", "during", "before", "after",
+  "add", "added", "adding", "make", "made", "making", "fix", "fixed",
+  "implement", "implemented", "implementing", "create", "created",
+  "update", "updated", "change", "changed", "ensure", "ensures",
+  "please", "task", "work", "file", "files", "code", "function",
+]);
+
+const WORK_CLASS_PATTERNS: Array<[WorkedExampleWorkClass, RegExp]> = [
+  ["bug-fix", /\b(bug|fix|broken|error|fail|failing|failure|regression|crash|incorrect|wrong)\b/i],
+  ["migration", /\b(migrat\w+|upgrade|convert\w*|migrate\w*)\b/i],
+  ["performance", /\b(performance|slow|optimize\w*|latency|throughput|speed|benchmark)\b/i],
+  ["type-system", /\b(type.?system|typescript|typing|generics?|union type|narrowing)\b/i],
+  ["refactor", /\b(refactor\w+|restructure|reorganize|cleanup|clean up|simplif\w+)\b/i],
+  ["test", /\b(test\w*|spec\w*|coverage|assertion)\b/i],
+  ["config", /\b(config\w*|setting\w*|option\w*|flag\w*|env var|environment variable)\b/i],
+  ["new-feature", /\b(feature|add|implement|create|build|support|enable|allow)\b/i],
+];
+
+const HARD_AREA_PATTERNS: Array<[WorkedExampleHardArea, RegExp]> = [
+  ["concurrency", /\b(concurren\w+|race condition|deadlock|parallel|thread\w*|worker)\b/i],
+  ["async", /\b(async|await|promise|callback|event loop|non.?blocking)\b/i],
+  ["type-system", /\b(type.?system|typescript|typing|generics?|union type|narrowing)\b/i],
+  ["migration", /\b(migrat\w+|upgrade|schema change|data migration)\b/i],
+  ["network", /\b(network|http|websocket|socket|api call|fetch|request|response)\b/i],
+  ["state-machine", /\b(state.?machine|finite state|transitions?|lifecycle)\b/i],
+  ["performance", /\b(performance|slow|optimize\w*|latency|throughput|speed)\b/i],
+];
+
+/**
+ * Phase 13: extract a deterministic problem shape from a task description/prompt.
+ *
+ * Cheap and stable — no embeddings, no LLM. Returns a compact object whose
+ * `shapeKey` is a stable hash usable for near-duplicate suppression in-session.
+ */
+export function extractWorkedExampleShape(promptOrDescription: string): WorkedExampleShape {
+  const text = String(promptOrDescription || "").trim();
+
+  // Work class: first matching pattern wins (order matters — bug-fix before new-feature).
+  let workClass: WorkedExampleWorkClass = "new-feature";
+  for (const [cls, re] of WORK_CLASS_PATTERNS) {
+    if (re.test(text)) {
+      workClass = cls;
+      break;
+    }
+  }
+
+  // File types: extract extensions from the text.
+  const fileTypes = new Set<string>();
+  for (const match of text.matchAll(/\.\b([a-z0-9]{1,8})\b/gi)) {
+    const ext = "." + match[1].toLowerCase();
+    // Filter out common non-file tokens (e.g. "e.g", "i.e", version numbers).
+    if (!/^\.(e|g|i|v|ts\.js|js\.ts)$/.test(ext) && !/^\.\d+$/.test(ext)) {
+      fileTypes.add(ext);
+    }
+  }
+
+  // Hard areas: all matching patterns.
+  const hardAreas: WorkedExampleHardArea[] = [];
+  for (const [area, re] of HARD_AREA_PATTERNS) {
+    if (re.test(text) && !hardAreas.includes(area)) {
+      hardAreas.push(area);
+    }
+  }
+
+  // Key tokens: informative words from the prompt (stopwords removed, capped at 12).
+  const keyTokens: string[] = [];
+  for (const raw of text.toLowerCase().split(/[^a-z0-9_]+/)) {
+    if (raw.length < 3) continue;
+    if (SHAPE_TOKEN_STOPWORDS.has(raw)) continue;
+    if (!keyTokens.includes(raw)) keyTokens.push(raw);
+    if (keyTokens.length >= 12) break;
+  }
+
+  // Shape key: stable hash of the shape fields (not the raw text).
+  const shapeKey = computeShapeKey({ workClass, fileTypes: [...fileTypes].sort(), hardAreas, keyTokens });
+
+  return { workClass, fileTypes: [...fileTypes].sort(), hardAreas, keyTokens, shapeKey };
+}
+
+/** Phase 13: deterministic hash of shape fields (simple FNV-1a over a canonical string). */
+function computeShapeKey(shape: { workClass: string; fileTypes: string[]; hardAreas: string[]; keyTokens: string[] }): string {
+  const canonical = [shape.workClass, shape.fileTypes.join(","), shape.hardAreas.join(","), shape.keyTokens.slice(0, 6).join(",")].join("|");
+  let hash = 0x811c9dc5; // FNV offset basis
+  for (let i = 0; i < canonical.length; i++) {
+    hash ^= canonical.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193); // FNV prime
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+/**
+ * Phase 13: build a compact worked-example entry for filing to the palace.
+ *
+ * The entry is bounded to WORKED_EXAMPLE_ENTRY_MAX_CHARS and leads with a DESC
+ * line (repo convention) so it's discoverable without loading the body. The
+ * problem shape is embedded as metadata lines so retrieval can match on the
+ * problem, not just the solution.
+ */
+export function buildWorkedExampleEntry(params: {
+  subagentType: string;
+  description: string;
+  output: string;
+  shape: WorkedExampleShape;
+}): string {
+  const { subagentType, description, output, shape } = params;
+  const desc = String(description || "").trim().slice(0, 120);
+  const body = String(output || "").trim();
+
+  // Truncate the body to fit within the max chars, leaving room for headers.
+  const headerLen = 300; // approximate size of DESC + shape metadata lines
+  const maxBody = Math.max(100, WORKED_EXAMPLE_ENTRY_MAX_CHARS - headerLen);
+  const clippedBody = body.length > maxBody ? body.slice(0, maxBody) + "…" : body;
+
+  const parts: string[] = [
+    `DESC: Worked example — ${desc || subagentType} task solved by ${subagentType}. Relevant when delegating a similar ${shape.workClass} problem.`,
+    "",
+    `SHAPE: work-class=${shape.workClass}; file-types=${shape.fileTypes.join(",") || "n/a"}; hard-areas=${shape.hardAreas.join(",") || "none"}; key-tokens=${shape.keyTokens.slice(0, 6).join(", ")}`,
+    "",
+    clippedBody,
+  ];
+
+  return parts.join("\n").slice(0, WORKED_EXAMPLE_ENTRY_MAX_CHARS);
+}
+
+
+
 // Tolerant list_drawers wrapper for the Phase 3 doc scan: a failed page probe or
 // fetch degrades to an empty result instead of aborting retrieval. (The `as` cast
 // cannot sit inside a .catch() arrow — Node's type-stripping rejects it — so the
