@@ -76,6 +76,13 @@
     "disabledModes": ""
   },
 
+  "checkpoint": {
+    // Agents that never receive the end-of-session memory-checkpoint prompt
+    // (utility subagents do no durable work of their own). CSV; when empty,
+    // falls back to the built-in default list.
+    "disabledAgents": "explore,review-diff,run-tests,check-diff"
+  },
+
   "memcore": {
     "reinject": {
       "enabled": false,

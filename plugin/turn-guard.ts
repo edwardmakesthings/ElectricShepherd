@@ -295,6 +295,9 @@ const DEFAULT_AUTOCONSOLIDATION_MAX_TRACKED_SESSIONS = 512
 // Checkpoint gating: only after real work, only in agents that learn durable facts.
 const MIN_TERMINAL_MESSAGES_BEFORE_CHECKPOINT = 4
 const CHECKPOINT_MODES = new Set(["build", "plan"])
+// Utility subagents do no durable work of their own (read-only exploration,
+// diff review, mechanical test runs) — never prompt them for a memory checkpoint.
+const DEFAULT_CHECKPOINT_DISABLED_AGENTS = ["explore", "review-diff", "run-tests", "check-diff"]
 
 // ── LEGACY OPT-IN: Ollama finish_reason compensation ─────────────────────────
 // The retry apparatus (issueRetry, endsMidIntent, hasFinalReviewSignal, etc.)
@@ -1461,6 +1464,12 @@ export const TurnGuard = async ({ client, directory }: any) => {
   )
 
   // --- checkpoint state ---
+  // Agents exempt from the end-of-session memory-checkpoint prompt. Config CSV
+  // (checkpoint.disabledAgents) overrides; empty falls back to the built-in
+  // utility-subagent list above.
+  const checkpointDisabledAgents = toLowerSet(
+    cfgCSV("checkpoint.disabledAgents").length > 0 ? cfgCSV("checkpoint.disabledAgents") : DEFAULT_CHECKPOINT_DISABLED_AGENTS,
+  )
   const checkpointedSessions = new Set<string>()
   // Count only TERMINAL assistant messages, not streaming updates — otherwise a
   // single reply satisfies the "real work" gate within the first turn.
@@ -1498,6 +1507,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
       retryEnabled,
       retryDisabledAgents: [...retryDisabledAgents],
       retryDisabledModes: [...retryDisabledModes],
+      checkpointDisabledAgents: [...checkpointDisabledAgents],
       consolidationWriteGuardEnabled,
       sourceCaptureVerifyEnabled,
       autoConsolidationEnabled,
@@ -2329,11 +2339,19 @@ export const TurnGuard = async ({ client, directory }: any) => {
     if (endsMidIntent(last)) return false
     if (!hasUsefulPayload(last)) return false
 
+    // Utility subagents never checkpoint: they do no durable work of their own,
+    // and a checkpoint prompt would only burn a turn on them.
+    const routing = getPromptRouting(last)
+    const currentAgent = String(routing.agent ?? "").trim().toLowerCase()
+    if (currentAgent && checkpointDisabledAgents.has(currentAgent)) {
+      console.log(`[turn-guard] checkpoint skipped for sid=${sid}: agent=${currentAgent} is in checkpoint.disabledAgents`)
+      return false
+    }
+
     checkpointedSessions.add(sid)
     console.log(`[turn-guard] prompting memory checkpoint for sid=${sid} (mode=${mode})`)
 
     try {
-      const routing = getPromptRouting(last)
       const body: any = {
         parts: [
           {

@@ -161,6 +161,32 @@ test("at most WORKED_EXAMPLE_MAX_INJECT (=2) examples are injected", async () =>
   assert.equal(examples.length, 2, "hard cap of 2 enforced");
 });
 
+test("checkpoint gate skips disabled utility agents (default set covers explore/review-diff/run-tests/check-diff)", () => {
+  assert.ok(
+    TURN_GUARD_SOURCE.includes('const DEFAULT_CHECKPOINT_DISABLED_AGENTS = ["explore", "review-diff", "run-tests", "check-diff"]'),
+    "built-in checkpoint disabled-agent default must include the utility subagents",
+  );
+  assert.ok(
+    TURN_GUARD_SOURCE.includes('cfgCSV("checkpoint.disabledAgents")'),
+    "checkpoint gate must parse the checkpoint.disabledAgents config CSV",
+  );
+  assert.ok(
+    TURN_GUARD_SOURCE.includes("checkpointDisabledAgents.has(currentAgent)"),
+    "maybeCheckpoint must skip when the resolved routing agent is in the disabled set",
+  );
+});
+
+test("checkpoint gate logs the skip and exposes the active policy in statusSnapshot", () => {
+  assert.ok(
+    TURN_GUARD_SOURCE.includes("checkpoint skipped for sid=${sid}: agent=${currentAgent} is in checkpoint.disabledAgents"),
+    "skipped checkpoints must emit a clear log line naming the disabled agent",
+  );
+  assert.ok(
+    TURN_GUARD_SOURCE.includes("checkpointDisabledAgents: [...checkpointDisabledAgents]"),
+    "statusSnapshot must expose checkpointDisabledAgents so operators can inspect the active policy",
+  );
+});
+
 test("injection is idempotent: an already-augmented prompt is not augmented again", async () => {
   const client = makeSearchClient([
     { drawer_id: "ex-a", content: EXAMPLE_A_TEXT },
