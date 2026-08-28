@@ -53,7 +53,7 @@ import type { AutoConsolidationTrigger, MemcoreInjectionRecord } from "../adapte
 import { loadPackagedAssets, mergeWithoutOverride, loadInstructionPaths, dedupeAppendInstructions } from "../adapter/asset-loader.ts"
 import { loadRuntimeConfig, getRuntimeConfigEnvMap, DEFAULT_MCP_URL, DEFAULT_MCP_TOOL_PREFIX } from "../adapter/runtime-config.ts"
 import { MCPHttpClient, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-client.ts"
-import { retrieveSimilarWorkedExamples, formatWorkedExampleDemonstration, WORKED_EXAMPLE_MAX_INJECT, WORKED_EXAMPLE_RELEVANCE_FLOOR, extractWorkedExampleShape, buildWorkedExampleEntry, WORKED_EXAMPLE_FILE_AGENT_TYPES, WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS } from "../adapter/retrieval-expansion.ts"
+import { retrieveSimilarWorkedExamples, formatWorkedExampleDemonstration, WORKED_EXAMPLE_MAX_INJECT, WORKED_EXAMPLE_RELEVANCE_FLOOR, extractWorkedExampleShape, buildWorkedExampleEntry, WORKED_EXAMPLE_FILE_AGENT_TYPES, WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS, CAPABILITY_TIER_BY_SUBAGENT, mapTaskStatusToCapabilityOutcome, buildCapabilityCanonicalShape, buildCapabilityBucketId } from "../adapter/retrieval-expansion.ts"
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts"
 import deleteDrawersTool from "../tools/delete_drawers.ts"
 import moveDrawersTool from "../tools/move_drawers.ts"
@@ -159,6 +159,14 @@ const DEFAULT_WORKED_EXAMPLE_SEARCH_TIMEOUT_MS = 4000
 // flows (implement-local, build) deliberately do NOT file — see
 // WORKED_EXAMPLE_FILE_AGENT_TYPES for the rationale.
 const DEFAULT_WORKED_EXAMPLE_FILING_ENABLED = true
+// Phase 14 CREATE: when a routing-tier subagent (implement-local, implement-cloud,
+// implement-deep-cloud, solve-deep-cloud) completes, record a capability tuple
+// (task shape, tier, outcome) to the palace so the CONSUME side can aggregate
+// evidence per (shape, tier) and recommend a tier with a min-sample gate. The
+// outcome is derived from the task tool part status (success/failed/aborted), NOT
+// from Phase 7's es-outcome axis (human-authoritative). Best-effort: any failure
+// degrades to a log line and never throws into the turn.
+const DEFAULT_CAPABILITY_RECORDING_ENABLED = true
 // looking like a loop, without needing to exempt the verify tools themselves.
 const DEFAULT_LOOP_MUTATION_TOOLS = [
   "write",
@@ -1267,6 +1275,14 @@ export const TurnGuard = async ({ client, directory }: any) => {
     "taskWatchdog.workedExampleFiling.enabled",
     DEFAULT_WORKED_EXAMPLE_FILING_ENABLED,
   )
+  // Phase 14 CREATE: config for recording capability tuples on routing-tier subagent completion.
+  const capabilityRecordingEnabled = cfgBool(
+    "taskWatchdog.capabilityRecording.enabled",
+    DEFAULT_CAPABILITY_RECORDING_ENABLED,
+  )
+  // Session-local dedup for capability recording — prevents double-recording the
+  // same (message, part) on repeated idle events. Keyed by subagentType:shapeKey.
+  const capabilityRecordedBySession = new Map<string, Set<string>>()
   let workedExampleClientPromise: Promise<any> | null = null
   function getWorkedExampleClient(): Promise<any> {
     if (!workedExampleClientPromise) {
@@ -1384,6 +1400,97 @@ export const TurnGuard = async ({ client, directory }: any) => {
     }
   }
 
+  // Phase 14 CREATE: record a capability tuple (task shape, tier, outcome) when a
+  // routing-tier subagent completes. Best-effort: any failure (MCP down, stamp
+  // rejected, dedup hit) degrades to a log line and NEVER throws into the turn.
+  // The outcome is derived from the task tool part status — NOT from Phase 7's
+  // es-outcome axis (which is human-authoritative and attached to consulted memory
+  // nodes, not to units/tiers). This keeps Phase 7's policy intact while giving
+  // Phase 14 the unit-level evidence it needs for learned routing.
+  async function maybeRecordCapabilityTuple(args: {
+    sid: string
+    subagentType: string
+    description: string
+    prompt: string
+    status: string
+  }): Promise<void> {
+    if (!capabilityRecordingEnabled) return
+    const { sid, subagentType, description, prompt, status } = args
+
+    // Gate 1: only routing tiers are recorded (utility/analysis subagents skipped).
+    const tier = CAPABILITY_TIER_BY_SUBAGENT[subagentType]
+    if (!tier) return
+
+    // Gate 2: closed outcome set — unknown statuses are skipped, not guessed.
+    const outcome = mapTaskStatusToCapabilityOutcome(status)
+    if (!outcome) return
+
+    // Gate 3: session-local dedup — same (message, part) must not double-record on
+    // repeated idle events. Keyed by subagentType + shapeKey (the part's identity
+    // within the message is stable across idle passes for the same completion).
+    const shape = extractWorkedExampleShape(`${description}\n${prompt}`)
+    const dedupKey = `${subagentType}:${shape.shapeKey}`
+    const recordedBySession = capabilityRecordedBySession.get(sid) ?? new Set<string>()
+    if (recordedBySession.has(dedupKey)) {
+      console.log(
+        `[turn-guard] capability recording: skipping duplicate ${dedupKey} sid=${sid}`,
+      )
+      return
+    }
+
+    const bucketId = buildCapabilityBucketId(shape.shapeKey, tier)
+    const canonicalShape = buildCapabilityCanonicalShape(shape)
+
+    try {
+      const palaceClient = await getWorkedExampleClient()
+      if (!palaceClient || typeof palaceClient.kgAdd !== "function") return
+
+      // Record the outcome edge (the core of the capability tuple).
+      await palaceClient.kgAdd({
+        subject: bucketId,
+        predicate: "es-capability-outcome",
+        object: outcome,
+        valid_from: new Date().toISOString(),
+        source_closet: bucketId,
+      })
+
+      // Best-effort shape metadata for explainability (one-time per bucket; a
+      // duplicate stamp is harmless and idempotent on the read side).
+      try {
+        await palaceClient.kgAdd({
+          subject: bucketId,
+          predicate: "es-capability-shape",
+          object: canonicalShape.slice(0, 200),
+          source_closet: bucketId,
+        })
+      } catch (shapeErr) {
+        console.log(`[turn-guard] capability recording: shape stamp failed (non-fatal): ${String(shapeErr)}`)
+      }
+      try {
+        await palaceClient.kgAdd({
+          subject: bucketId,
+          predicate: "es-capability-tier",
+          object: tier,
+          source_closet: bucketId,
+        })
+      } catch (tierErr) {
+        console.log(`[turn-guard] capability recording: tier stamp failed (non-fatal): ${String(tierErr)}`)
+      }
+
+      // Record the dedup key for this session.
+      recordedBySession.add(dedupKey)
+      capabilityRecordedBySession.set(sid, recordedBySession)
+
+      console.log(
+        `[turn-guard] capability recording: recorded ${subagentType} -> ${tier} (${outcome}) ` +
+          `(shape=${shape.workClass}/${shape.sizeBucket}/${shape.shapeKey}, bucket=${bucketId}) sid=${sid}`,
+      )
+    } catch (err) {
+      // Recording failure must never break the turn.
+      console.log(`[turn-guard] capability recording: failed, continuing: ${String(err)}`)
+    }
+  }
+
   // Loop-guard status banner. Emitted HERE, after the consts above are
   // initialized — emitting it earlier is a temporal-dead-zone ReferenceError
   // that throws before the hooks object returns, silently disabling the plugin.
@@ -1446,6 +1553,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
       workedExampleInjectionEnabled,
       workedExampleSearchTimeoutMs,
       workedExampleFilingEnabled,
+      capabilityRecordingEnabled,
       spiralInvestigateThreshold,
       spiralReversalThreshold,
       spiralMaxInterventions,
@@ -2509,6 +2617,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
     pruneToMax(taskEscalationsBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(taskRecentLaunchBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(workedExampleFiledByShape, autoConsolidationMaxTrackedSessions)
+    pruneToMax(capabilityRecordedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralNudgedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralInspectedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(checkpointedSessions, autoConsolidationMaxTrackedSessions)
@@ -2526,7 +2635,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
   // substantive. This runs on session.idle — by then the task has completed and
   // the message parts are finalized.
   async function maybeFileWorkedExamplesFromMessage(sid: string, msg: MessageWithParts): Promise<void> {
-    if (!workedExampleFilingEnabled) return
     const parts = msg?.parts ?? []
     for (const part of parts) {
       if (part?.type !== "tool") continue
@@ -2536,23 +2644,31 @@ export const TurnGuard = async ({ client, directory }: any) => {
       // Extract subagent_type and prompt from the task call's input args.
       const inputArgs: any = part?.state?.input ?? part?.args ?? {}
       const subagentType = String(inputArgs?.subagent_type ?? "").trim().toLowerCase()
-      if (!WORKED_EXAMPLE_FILE_AGENT_TYPES.has(subagentType)) continue
 
       // Extract the output (the subagent's final response text).
       const state = part?.state ?? {}
       const status = String(state?.status ?? "").trim().toLowerCase()
-      // Success-only: skip if the task errored or was aborted.
-      if (status === "error" || status === "aborted" || status === "failed") continue
-
-      const outputText = String(
-        state?.output ?? part?.output ?? state?.text ?? "",
-      ).trim()
-      if (outputText.length < WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS) continue
 
       const description = String(inputArgs?.description ?? "").trim()
       const prompt = String(inputArgs?.prompt ?? "").trim()
 
-      await maybeFileWorkedExample({ sid, subagentType, description, prompt, output: outputText })
+      // Phase 13 CREATE: file worked examples for cloud target subagent types with
+      // substantive successful output. Success-only: skip if the task errored or was aborted.
+      if (workedExampleFilingEnabled && WORKED_EXAMPLE_FILE_AGENT_TYPES.has(subagentType)) {
+        if (status === "error" || status === "aborted" || status === "failed") continue
+
+        const outputText = String(
+          state?.output ?? part?.output ?? state?.text ?? "",
+        ).trim()
+        if (outputText.length < WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS) continue
+
+        await maybeFileWorkedExample({ sid, subagentType, description, prompt, output: outputText })
+      }
+
+      // Phase 14 CREATE: record a capability tuple for routing-tier subagents.
+      // Runs regardless of the worked-example filing gate — capability recording
+      // is its own concern (it covers local/cloud/deep tiers, not just cloud).
+      await maybeRecordCapabilityTuple({ sid, subagentType, description, prompt, status })
     }
   }
 
@@ -2619,6 +2735,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
     pruneToMax(taskEscalationsBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(taskRecentLaunchBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(workedExampleFiledByShape, autoConsolidationMaxTrackedSessions)
+    pruneToMax(capabilityRecordedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralNudgedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralInspectedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(checkpointedSessions, autoConsolidationMaxTrackedSessions)
@@ -2745,6 +2862,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
     pruneToMax(taskEscalationsBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(taskRecentLaunchBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(workedExampleFiledByShape, autoConsolidationMaxTrackedSessions)
+    pruneToMax(capabilityRecordedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralNudgedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(spiralInspectedBySession, autoConsolidationMaxTrackedSessions)
     pruneToMax(checkpointedSessions, autoConsolidationMaxTrackedSessions)

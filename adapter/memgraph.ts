@@ -1299,6 +1299,202 @@ export class MemgraphClient {
     });
   }
 
+  // ── Phase 14: capability memory (learned routing) axes ───────────────────────
+  // `es-capability-outcome` edges record the outcome of one unit of work run at a
+  // given tier for a given task shape. The subject is the deterministic capability
+  // bucket id (`capability::<shapeKey>::<tier>`); the object is one of accept |
+  // revise | failed | unused (the same closed set as es-outcome). Edges ACCUMULATE —
+  // multiple edges per bucket are expected and meaningful, so nothing here ever
+  // invalidates or collapses them.
+  //
+  // `es-capability-shape` / `es-capability-tier` carry the explainable metadata
+  // (canonical shape summary string, tier value) on the same bucket node so a
+  // human can read WHY a tier was chosen without re-deriving the shape. These are
+  // best-effort: a failed stamp leaves the axis "unknown" but does not invalidate
+  // the recorded outcome.
+  //
+  // NOTE: `es-capability-*` predicates are NEW and deliberately distinct from the
+  // reserved set (synthesized-from, consolidated-into, merged-into, in-hall,
+  // es-status, es-source-type, es-outcome, concerns, triggers-on, rules-out,
+  // es-staleness). They must never count toward height or feed lineage traversal.
+
+  static readonly CAPABILITY_OUTCOME_PREDICATE = "es-capability-outcome";
+  static readonly CAPABILITY_SHAPE_PREDICATE = "es-capability-shape";
+  static readonly CAPABILITY_TIER_PREDICATE = "es-capability-tier";
+
+  /**
+   * Record ONE capability outcome edge for a (shape, tier) bucket. Accumulation —
+   * never invalidates or overwrites existing edges. `validFrom` timestamps the edge
+   * so consumers can window recent history. Throws on an invalid outcome value:
+   * the axis is closed to exactly accept | revise | failed | unused.
+   */
+  async recordCapabilityOutcome(bucketId: string, outcome: string, validFrom?: string): Promise<void> {
+    const id = this.asString(bucketId).trim();
+    if (!id) throw new Error("recordCapabilityOutcome: bucketId is required");
+    if (!(MemgraphClient.OUTCOME_VALUES as readonly string[]).includes(outcome)) {
+      throw new Error(
+        `recordCapabilityOutcome: invalid outcome "${outcome}" — must be one of ${MemgraphClient.OUTCOME_VALUES.join(" | ")}`,
+      );
+    }
+    await this.kgAdd({
+      subject: id,
+      predicate: MemgraphClient.CAPABILITY_OUTCOME_PREDICATE,
+      object: outcome,
+      valid_from: validFrom,
+      source_closet: id,
+    });
+  }
+
+  /**
+   * Best-effort stamp of the canonical shape summary on a capability bucket.
+   * Returns true on success, false on failure — never throws in the normal flow.
+   */
+  async setCapabilityShape(bucketId: string, canonicalShape: string): Promise<boolean> {
+    const id = this.asString(bucketId).trim();
+    const shape = this.asString(canonicalShape).trim();
+    if (!id || !shape) return false;
+    try {
+      await this.kgAdd({
+        subject: id,
+        predicate: MemgraphClient.CAPABILITY_SHAPE_PREDICATE,
+        object: shape,
+        source_closet: id,
+      });
+      return true;
+    } catch {
+      // non-fatal: leave the axis "unknown" rather than fail the caller
+      return false;
+    }
+  }
+
+  /**
+   * Best-effort stamp of the tier value on a capability bucket. Returns true on
+   * success, false on failure — never throws in the normal flow.
+   */
+  async setCapabilityTier(bucketId: string, tier: string): Promise<boolean> {
+    const id = this.asString(bucketId).trim();
+    const value = this.asString(tier).trim();
+    if (!id || !value) return false;
+    try {
+      await this.kgAdd({
+        subject: id,
+        predicate: MemgraphClient.CAPABILITY_TIER_PREDICATE,
+        object: value,
+        source_closet: id,
+      });
+      return true;
+    } catch {
+      // non-fatal: leave the axis "unknown" rather than fail the caller
+      return false;
+    }
+  }
+
+  /**
+   * Phase 14 CONSUME: aggregate capability evidence per tier for a shape bucket.
+   * One one-hop outgoing kg_query per tier bucket (local, cloud, deep), run with
+   * bounded concurrency (8 — the only validated level in this repo). Read failures
+   * degrade to zero counts (neutral) per tier, matching getOutcomeCounts' discipline.
+   *
+   * Returns per-tier counts plus a recommendation:
+   *   - Only tiers with total >= minSample (default 5) are eligible.
+   *   - Pick the highest accept_rate (accept/total); deterministic tie-break order:
+   *     local, cloud, deep.
+   *   - If none eligible => recommendation "no-data", fallback true.
+   */
+  async getCapabilityRoutingEvidence(
+    shapeKeyOrCanonical: string,
+    options?: { minSample?: number; concurrency?: number },
+  ): Promise<{
+    tiers: Record<string, { accept: number; revise: number; failed: number; unused: number; total: number; sufficient_sample: boolean }>;
+    recommendation: string;
+    fallback: boolean;
+    threshold: number;
+  }> {
+    const shapeKey = this.asString(shapeKeyOrCanonical).trim();
+    if (!shapeKey) {
+      return {
+        tiers: {},
+        recommendation: "no-data",
+        fallback: true,
+        threshold: Math.max(1, Number(options?.minSample ?? 5)),
+      };
+    }
+
+    const minSample = Math.max(1, Number(options?.minSample ?? 5));
+    const concurrency = Math.max(1, Math.min(8, Number(options?.concurrency ?? 8)));
+    const tiers: Array<{ tier: string; bucketId: string }> = [
+      { tier: "local", bucketId: `capability::${shapeKey}::local` },
+      { tier: "cloud", bucketId: `capability::${shapeKey}::cloud` },
+      { tier: "deep", bucketId: `capability::${shapeKey}::deep` },
+    ];
+
+    const empty = () => ({ accept: 0, revise: 0, failed: 0, unused: 0, total: 0 });
+    const countsByTier = new Map<string, ReturnType<typeof empty>>();
+    let cursor = 0;
+    const run = async () => {
+      while (cursor < tiers.length) {
+        const index = cursor;
+        cursor += 1;
+        const { tier, bucketId } = tiers[index];
+        const counts = empty();
+        try {
+          const result = await this.kgQuery({
+            entity: bucketId,
+            direction: "outgoing",
+            predicate: MemgraphClient.CAPABILITY_OUTCOME_PREDICATE,
+            recurse: false,
+            max_depth: 1,
+          });
+          for (const fact of this.parseKgFacts(result)) {
+            if (!this.asBoolean(fact.current, true)) continue;
+            const value = this.asString(fact.object).trim();
+            if (value === "accept") counts.accept += 1;
+            else if (value === "revise") counts.revise += 1;
+            else if (value === "failed") counts.failed += 1;
+            else if (value === "unused") counts.unused += 1;
+            // unknown values are ignored — the axis is closed by construction
+          }
+        } catch {
+          // non-fatal: a failed read reads as "no history" (neutral) for this tier
+        }
+        counts.total = counts.accept + counts.revise + counts.failed + counts.unused;
+        countsByTier.set(tier, counts);
+      }
+    };
+    const slots = Math.max(1, Math.min(concurrency, tiers.length));
+    await Promise.all(Array.from({ length: slots }, () => run()));
+
+    const tierCounts: Record<string, { accept: number; revise: number; failed: number; unused: number; total: number; sufficient_sample: boolean }> = {};
+    for (const { tier } of tiers) {
+      const counts = countsByTier.get(tier) || empty();
+      tierCounts[tier] = {
+        accept: counts.accept,
+        revise: counts.revise,
+        failed: counts.failed,
+        unused: counts.unused,
+        total: counts.total,
+        sufficient_sample: counts.total >= minSample,
+      };
+    }
+
+    // Recommendation: highest accept_rate among eligible tiers; deterministic tie-break.
+    let recommendation = "no-data";
+    let fallback = true;
+    let bestRate = -1;
+    for (const { tier } of tiers) {
+      const counts = tierCounts[tier];
+      if (!counts.sufficient_sample || counts.total === 0) continue;
+      const rate = counts.accept / counts.total;
+      if (rate > bestRate) {
+        bestRate = rate;
+        recommendation = tier;
+        fallback = false;
+      }
+    }
+
+    return { tiers: tierCounts, recommendation, fallback, threshold: minSample };
+  }
+
   /**
    * Phase 8 (unified memory): prospective-memory read side. One bounded page of
    * the reminders room + per-drawer one-hop kg_query for the reminder axes

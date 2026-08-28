@@ -1,0 +1,363 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+/**
+ * Unit coverage for Phase 14 (capability memory / learned routing).
+ *
+ * CREATE (write path): turn-guard records a capability tuple (task shape, tier,
+ * outcome) when a routing-tier subagent completes. The plugin module cannot be
+ * imported directly (pre-existing backtick-in-template-literal issues in sibling
+ * tools/ modules), so the CREATE path is exercised against the SAME source text
+ * the hook uses, plus the real shape/tier/outcome helpers from
+ * adapter/retrieval-expansion.ts.
+ *
+ * CONSUME (read path): MemgraphClient.getCapabilityRoutingEvidence aggregates
+ * capability evidence per (shape, tier) and produces a recommendation with a
+ * min-sample gate (default 5). This is exercised against the real client with a
+ * fake kg_query backend — at least one behavior test executes the aggregation
+ * logic end-to-end (not just string contains).
+ */
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const TURN_GUARD_SOURCE = readFileSync(join(HERE, "..", "..", "plugin", "turn-guard.ts"), "utf8");
+
+// The real Phase 14 helpers (single source of truth for shape/tier/outcome).
+const {
+  extractWorkedExampleShape,
+  classifyUnitSize,
+  CAPABILITY_TIER_BY_SUBAGENT,
+  mapTaskStatusToCapabilityOutcome,
+  buildCapabilityCanonicalShape,
+  buildCapabilityBucketId,
+} = await import("../../adapter/retrieval-expansion.ts");
+
+// The real CONSUME client.
+const { createMemgraphClient } = await import("../../adapter/memgraph.ts");
+
+// ── (a) Tier mapping: deterministic subagent_type -> tier ────────────────────
+
+test("CAPABILITY_TIER_BY_SUBAGENT maps the four routing subagents to tiers", () => {
+  assert.equal(CAPABILITY_TIER_BY_SUBAGENT["implement-local"], "local");
+  assert.equal(CAPABILITY_TIER_BY_SUBAGENT["implement-cloud"], "cloud");
+  assert.equal(CAPABILITY_TIER_BY_SUBAGENT["implement-deep-cloud"], "deep");
+  assert.equal(CAPABILITY_TIER_BY_SUBAGENT["solve-deep-cloud"], "deep");
+});
+
+test("CAPABILITY_TIER_BY_SUBAGENT skips non-routing subagents (explore, review-diff, run-tests, build)", () => {
+  for (const type of ["explore", "review-diff", "run-tests", "check-diff", "build", "solve-local"]) {
+    assert.equal(CAPABILITY_TIER_BY_SUBAGENT[type], undefined, `${type} must not be a routing tier`);
+  }
+});
+
+// ── (b) Outcome mapping: task tool part status -> closed outcome set ─────────
+
+test("mapTaskStatusToCapabilityOutcome maps success statuses to accept", () => {
+  for (const status of ["success", "completed", "ok"]) {
+    assert.equal(mapTaskStatusToCapabilityOutcome(status), "accept", `${status} must map to accept`);
+  }
+});
+
+test("mapTaskStatusToCapabilityOutcome maps failure statuses to failed", () => {
+  for (const status of ["failed", "error"]) {
+    assert.equal(mapTaskStatusToCapabilityOutcome(status), "failed", `${status} must map to failed`);
+  }
+});
+
+test("mapTaskStatusToCapabilityOutcome maps abort statuses to unused", () => {
+  for (const status of ["aborted", "cancelled", "canceled"]) {
+    assert.equal(mapTaskStatusToCapabilityOutcome(status), "unused", `${status} must map to unused`);
+  }
+});
+
+test("mapTaskStatusToCapabilityOutcome returns null for unknown statuses (skip, not guess)", () => {
+  for (const status of ["", "pending", "running", "weird-status"]) {
+    assert.equal(mapTaskStatusToCapabilityOutcome(status), null, `${status} must map to null`);
+  }
+});
+
+// ── (c) Shape derivation: size bucket + canonical shape string ───────────────
+
+test("classifyUnitSize detects single-file language", () => {
+  assert.equal(classifyUnitSize("Fix the bug in this single file"), "single-file");
+  assert.equal(classifyUnitSize("Update one file with the new config"), "single-file");
+});
+
+test("classifyUnitSize detects few-file language", () => {
+  assert.equal(classifyUnitSize("Update two files: a.ts and b.ts"), "few-file");
+  assert.equal(classifyUnitSize("Refactor three files in the adapter layer"), "few-file");
+});
+
+test("classifyUnitSize detects cross-cutting language", () => {
+  assert.equal(classifyUnitSize("Refactor across the codebase to use the new helper"), "cross-cutting");
+  assert.equal(classifyUnitSize("Update multiple files: a.ts, b.py, c.scss"), "cross-cutting");
+});
+
+test("classifyUnitSize defaults to few-file when scope is unspecified", () => {
+  assert.equal(classifyUnitSize("Fix the retry logic in the gateway adapter"), "few-file");
+});
+
+test("extractWorkedExampleShape includes sizeBucket and it feeds shapeKey", () => {
+  const a = extractWorkedExampleShape("Fix the bug in this single file: gateway.ts");
+  const b = extractWorkedExampleShape("Fix the bug across the codebase: gateway.ts, adapter.py, styles.scss");
+  assert.equal(a.sizeBucket, "single-file", "single-file prompt must classify as single-file");
+  assert.equal(b.sizeBucket, "cross-cutting", "cross-cutting prompt must classify as cross-cutting");
+  assert.notEqual(a.shapeKey, b.shapeKey, "different size buckets must produce different shape keys");
+});
+
+test("buildCapabilityCanonicalShape is deterministic and includes the size bucket", () => {
+  const shape = extractWorkedExampleShape("Fix the websocket reconnect bug in gateway.ts");
+  const s1 = buildCapabilityCanonicalShape(shape);
+  const s2 = buildCapabilityCanonicalShape(extractWorkedExampleShape("Fix the websocket reconnect bug in gateway.ts"));
+  assert.equal(s1, s2, "same input must produce byte-identical canonical shape strings");
+  assert.ok(s1.includes(`size=${shape.sizeBucket}`), "canonical shape must include the size bucket");
+});
+
+test("buildCapabilityBucketId produces a stable capability::<shapeKey>::<tier> id", () => {
+  const id = buildCapabilityBucketId("abc12345", "local");
+  assert.equal(id, "capability::abc12345::local");
+});
+
+// ── (d) CREATE hook source: turn-guard records the tuple ─────────────────────
+
+test("hook source has a capability recording gate and helper", () => {
+  assert.ok(
+    TURN_GUARD_SOURCE.includes("capabilityRecordingEnabled"),
+    "capability recording must be gated by a config flag",
+  );
+  assert.ok(
+    TURN_GUARD_SOURCE.includes("async function maybeRecordCapabilityTuple("),
+    "turn-guard must define maybeRecordCapabilityTuple",
+  );
+});
+
+test("hook source records capability tuples on session.idle (via maybeFileWorkedExamplesFromMessage)", () => {
+  assert.ok(
+    TURN_GUARD_SOURCE.includes("await maybeRecordCapabilityTuple({ sid, subagentType, description, prompt, status })"),
+    "idle scanner must call maybeRecordCapabilityTuple for every task part",
+  );
+});
+
+test("hook source gates capability recording on CAPABILITY_TIER_BY_SUBAGENT (routing tiers only)", () => {
+  assert.ok(
+    TURN_GUARD_SOURCE.includes("const tier = CAPABILITY_TIER_BY_SUBAGENT[subagentType]"),
+    "capability recording must look up the tier from the subagent type",
+  );
+  assert.ok(
+    TURN_GUARD_SOURCE.includes("if (!tier) return"),
+    "non-routing subagents must be skipped (no tier)",
+  );
+});
+
+test("hook source gates capability recording on a closed outcome set (unknown statuses skipped)", () => {
+  assert.ok(
+    TURN_GUARD_SOURCE.includes("const outcome = mapTaskStatusToCapabilityOutcome(status)"),
+    "capability recording must map status to a closed outcome",
+  );
+  assert.ok(
+    TURN_GUARD_SOURCE.includes("if (!outcome) return"),
+    "unknown statuses must be skipped (not guessed)",
+  );
+});
+
+test("hook source uses session-local dedup to avoid double-recording on repeated idle events", () => {
+  assert.ok(
+    TURN_GUARD_SOURCE.includes("capabilityRecordedBySession"),
+    "must track recorded capability keys per session",
+  );
+  assert.ok(
+    TURN_GUARD_SOURCE.includes("skipping duplicate"),
+    "must log when skipping a duplicate recording",
+  );
+});
+
+test("hook source writes es-capability-outcome via kg_add (not es-outcome — Phase 7 is human-authoritative)", () => {
+  const block = TURN_GUARD_SOURCE.split("async function maybeRecordCapabilityTuple(")[1]?.split("\n  }\n")[0] ?? "";
+  assert.ok(
+    block.includes('predicate: "es-capability-outcome"'),
+    "capability outcome must use the NEW es-capability-outcome predicate",
+  );
+  assert.ok(
+    !block.includes('predicate: "es-outcome"'),
+    "capability recording must NOT write es-outcome (Phase 7 is human-authoritative)",
+  );
+});
+
+test("hook source stamps es-capability-shape and es-capability-tier for explainability", () => {
+  const block = TURN_GUARD_SOURCE.split("async function maybeRecordCapabilityTuple(")[1]?.split("\n  }\n")[0] ?? "";
+  assert.ok(
+    block.includes('predicate: "es-capability-shape"'),
+    "must stamp es-capability-shape (canonical summary string)",
+  );
+  assert.ok(
+    block.includes('predicate: "es-capability-tier"'),
+    "must stamp es-capability-tier (tier value)",
+  );
+});
+
+test("hook source wraps capability recording in try/catch (never throws into the turn)", () => {
+  const block = TURN_GUARD_SOURCE.split("async function maybeRecordCapabilityTuple(")[1]?.split("\n  }\n")[0] ?? "";
+  assert.ok(
+    block.includes("catch (err) {"),
+    "capability recording must be wrapped in try/catch",
+  );
+  assert.ok(
+    block.includes("Recording failure must never break the turn"),
+    "failure path must log and continue",
+  );
+});
+
+// ── (e) CONSUME: aggregation + recommendation with min-sample gate ───────────
+
+function makeCapabilityClient(factsByBucket) {
+  const calls = [];
+  return {
+    client: createMemgraphClient({
+      callTool: async (name, args) => {
+        if (name.endsWith("kg_query")) {
+          calls.push(args || {});
+          const entity = String(args?.entity ?? "");
+          const facts = factsByBucket[entity] || [];
+          return { facts };
+        }
+        return {};
+      },
+    }),
+    calls,
+  };
+}
+
+function outcomeFacts(bucketId, outcomes) {
+  return outcomes.map((o) => ({ current: true, subject: bucketId, predicate: "es-capability-outcome", object: o }));
+}
+
+test("CONSUME: recommendation differs for two shapes with different counts (behavior test)", async () => {
+  // Shape A: local is strong (5 accepts), cloud is weak (1 accept, 4 failed).
+  const shapeA = "aaaa0001";
+  // Shape B: deep is strong (6 accepts), local is weak (2 accepts, 3 failed).
+  const shapeB = "bbbb0002";
+
+  const factsByBucket = {
+    [`capability::${shapeA}::local`]: outcomeFacts(`capability::${shapeA}::local`, ["accept", "accept", "accept", "accept", "accept"]),
+    [`capability::${shapeA}::cloud`]: outcomeFacts(`capability::${shapeA}::cloud`, ["accept", "failed", "failed", "failed", "failed"]),
+    [`capability::${shapeB}::local`]: outcomeFacts(`capability::${shapeB}::local`, ["accept", "accept", "failed", "failed", "failed"]),
+    [`capability::${shapeB}::deep`]: outcomeFacts(`capability::${shapeB}::deep`, ["accept", "accept", "accept", "accept", "accept", "accept"]),
+  };
+
+  const { client } = makeCapabilityClient(factsByBucket);
+
+  const resA = await client.getCapabilityRoutingEvidence(shapeA);
+  const resB = await client.getCapabilityRoutingEvidence(shapeB);
+
+  // Shape A: local (5/5) beats cloud (1/5).
+  assert.equal(resA.recommendation, "local", `shape A should recommend local, got ${resA.recommendation}`);
+  assert.equal(resA.fallback, false);
+  assert.equal(resA.tiers.local.accept, 5);
+  assert.equal(resA.tiers.local.total, 5);
+  assert.equal(resA.tiers.cloud.accept, 1);
+  assert.equal(resA.tiers.cloud.failed, 4);
+
+  // Shape B: deep (6/6) beats local (2/5).
+  assert.equal(resB.recommendation, "deep", `shape B should recommend deep, got ${resB.recommendation}`);
+  assert.equal(resB.fallback, false);
+  assert.equal(resB.tiers.deep.accept, 6);
+  assert.equal(resB.tiers.local.accept, 2);
+  assert.equal(resB.tiers.local.failed, 3);
+
+  // The two shapes must produce DIFFERENT recommendations.
+  assert.notEqual(resA.recommendation, resB.recommendation, "two shapes with different counts must recommend different tiers");
+});
+
+test("CONSUME: returns no-data/fallback when sample < 5 (min-sample gate)", async () => {
+  const shape = "cccc0003";
+  // Only 3 samples on local — below the min-sample threshold of 5.
+  const factsByBucket = {
+    [`capability::${shape}::local`]: outcomeFacts(`capability::${shape}::local`, ["accept", "accept", "accept"]),
+  };
+
+  const { client } = makeCapabilityClient(factsByBucket);
+  const res = await client.getCapabilityRoutingEvidence(shape);
+
+  assert.equal(res.recommendation, "no-data", "below min-sample must recommend no-data");
+  assert.equal(res.fallback, true, "below min-sample must set fallback=true");
+  assert.equal(res.threshold, 5, "default threshold must be 5");
+  assert.equal(res.tiers.local.total, 3);
+  assert.equal(res.tiers.local.sufficient_sample, false, "3 samples must NOT be sufficient");
+});
+
+test("CONSUME: deterministic tie-break order is local > cloud > deep", async () => {
+  const shape = "dddd0004";
+  // All three tiers have identical accept rates (1/5) — tie-break by order.
+  const factsByBucket = {
+    [`capability::${shape}::local`]: outcomeFacts(`capability::${shape}::local`, ["accept", "failed", "failed", "failed", "failed"]),
+    [`capability::${shape}::cloud`]: outcomeFacts(`capability::${shape}::cloud`, ["accept", "failed", "failed", "failed", "failed"]),
+    [`capability::${shape}::deep`]: outcomeFacts(`capability::${shape}::deep`, ["accept", "failed", "failed", "failed", "failed"]),
+  };
+
+  const { client } = makeCapabilityClient(factsByBucket);
+  const res = await client.getCapabilityRoutingEvidence(shape);
+
+  assert.equal(res.recommendation, "local", "tie must break to local (first in deterministic order)");
+  assert.equal(res.fallback, false);
+});
+
+test("CONSUME: degrades gracefully on kg_query failure (neutral counts, no-data)", async () => {
+  const client = createMemgraphClient({
+    callTool: async () => {
+      throw new Error("server down");
+    },
+  });
+
+  const res = await client.getCapabilityRoutingEvidence("eeee0005");
+
+  assert.equal(res.recommendation, "no-data", "failed reads must degrade to no-data");
+  assert.equal(res.fallback, true);
+  for (const tier of ["local", "cloud", "deep"]) {
+    assert.equal(res.tiers[tier].total, 0, `${tier} must read as zero counts on failure`);
+    assert.equal(res.tiers[tier].sufficient_sample, false);
+  }
+});
+
+test("CONSUME: issues one-hop kg_query per tier bucket with the es-capability-outcome predicate", async () => {
+  const shape = "ffff0006";
+  const factsByBucket = {
+    [`capability::${shape}::local`]: outcomeFacts(`capability::${shape}::local`, ["accept"]),
+  };
+
+  const { client, calls } = makeCapabilityClient(factsByBucket);
+  await client.getCapabilityRoutingEvidence(shape);
+
+  // One query per tier (3 total), each one-hop on the capability predicate.
+  assert.equal(calls.length, 3, "must issue exactly one kg_query per tier bucket");
+  for (const call of calls) {
+    assert.equal(call.direction, "outgoing");
+    assert.equal(call.predicate, "es-capability-outcome");
+    // One-hop: max_depth is set to 1; recurse is intentionally omitted (undefined = no recursion).
+    assert.equal(call.max_depth, 1);
+    assert.ok(!("recurse" in call), `recurse must not be set for one-hop queries: ${JSON.stringify(call)}`);
+  }
+});
+
+// ── (f) Predicate collision check: es-capability-* is NOT in the reserved set ─
+
+test("es-capability-* predicates do not collide with the reserved predicate set", () => {
+  const RESERVED = [
+    "synthesized-from",
+    "consolidated-into",
+    "merged-into",
+    "in-hall",
+    "es-status",
+    "es-source-type",
+    "es-outcome",
+    "concerns",
+    "triggers-on",
+    "rules-out",
+    "es-staleness",
+  ];
+  const NEW = ["es-capability-outcome", "es-capability-shape", "es-capability-tier"];
+  for (const p of NEW) {
+    assert.ok(!RESERVED.includes(p), `${p} must not be in the reserved set`);
+  }
+});

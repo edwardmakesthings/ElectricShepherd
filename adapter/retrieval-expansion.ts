@@ -713,6 +713,8 @@ export type WorkedExampleShape = {
   hardAreas: WorkedExampleHardArea[];
   /** Top informative tokens from the prompt (stopwords removed, capped). */
   keyTokens: string[];
+  /** Phase 14: unit-size bucket (single-file / few-file / cross-cutting). */
+  sizeBucket: UnitSizeBucket;
   /** Stable hash of the shape fields — used for near-duplicate suppression. */
   shapeKey: string;
 };
@@ -818,21 +820,113 @@ export function extractWorkedExampleShape(promptOrDescription: string): WorkedEx
     if (keyTokens.length >= 12) break;
   }
 
-  // Shape key: stable hash of the shape fields (not the raw text).
-  const shapeKey = computeShapeKey({ workClass, fileTypes: [...fileTypes].sort(), hardAreas, keyTokens });
+  // Phase 14: unit-size bucket — a required shape component for capability routing.
+  const sizeBucket = classifyUnitSize(text, fileTypes.size);
 
-  return { workClass, fileTypes: [...fileTypes].sort(), hardAreas, keyTokens, shapeKey };
+  // Shape key: stable hash of the shape fields (not the raw text).
+  const shapeKey = computeShapeKey({ workClass, fileTypes: [...fileTypes].sort(), hardAreas, keyTokens, sizeBucket });
+
+  return { workClass, fileTypes: [...fileTypes].sort(), hardAreas, keyTokens, sizeBucket, shapeKey };
 }
 
 /** Phase 13: deterministic hash of shape fields (simple FNV-1a over a canonical string). */
-function computeShapeKey(shape: { workClass: string; fileTypes: string[]; hardAreas: string[]; keyTokens: string[] }): string {
-  const canonical = [shape.workClass, shape.fileTypes.join(","), shape.hardAreas.join(","), shape.keyTokens.slice(0, 6).join(",")].join("|");
+function computeShapeKey(shape: { workClass: string; fileTypes: string[]; hardAreas: string[]; keyTokens: string[]; sizeBucket?: string }): string {
+  const canonical = [shape.workClass, shape.fileTypes.join(","), shape.hardAreas.join(","), shape.keyTokens.slice(0, 6).join(","), shape.sizeBucket || ""].join("|");
   let hash = 0x811c9dc5; // FNV offset basis
   for (let i = 0; i < canonical.length; i++) {
     hash ^= canonical.charCodeAt(i);
     hash = Math.imul(hash, 0x01000193); // FNV prime
   }
   return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+/** Phase 14: unit-size bucket vocabulary — deliberately small and closed. */
+export const UNIT_SIZE_BUCKETS = ["single-file", "few-file", "cross-cutting"] as const;
+
+export type UnitSizeBucket = (typeof UNIT_SIZE_BUCKETS)[number];
+
+/**
+ * Phase 14: classify a task prompt into a unit-size bucket (single-file / few-file /
+ * cross-cutting). Cheap and deterministic — no embeddings, no LLM. Used by the
+ * capability-memory CREATE path so routing evidence can be keyed on scope as well
+ * as work class; the bucket is part of the canonical shape string.
+ */
+export function classifyUnitSize(promptOrDescription: string, fileTypeCount = 0): UnitSizeBucket {
+  const text = String(promptOrDescription || "").toLowerCase();
+
+  // Cross-cutting signals: explicit multi-file/multi-module language or many file types.
+  if (fileTypeCount >= 3) return "cross-cutting";
+  if (/\b(cross.?cutting|multi.?file|multiple files?|across the codebase|across modules?|several files?)\b/.test(text)) {
+    return "cross-cutting";
+  }
+
+  // Few-file signals: explicit 2-3 file language.
+  if (/\b(two files?|three files?|a few files?|2 files?|3 files?)\b/.test(text)) {
+    return "few-file";
+  }
+
+  // Single-file signals: explicit single-file language or exactly one file type mentioned.
+  if (/\b(single.?file|one file|the file)\b/.test(text) || fileTypeCount === 1) {
+    return "single-file";
+  }
+
+  // Default: treat an unspecified scope as few-file (the middle bucket).
+  return "few-file";
+}
+
+/** Phase 14: routing tier vocabulary for capability memory (learned routing). */
+export const CAPABILITY_TIERS = ["local", "cloud", "deep"] as const;
+
+export type CapabilityTier = (typeof CAPABILITY_TIERS)[number];
+
+/**
+ * Phase 14 CREATE: subagent types that map to a routing tier. Only the three
+ * implementation tiers are recorded — utility/analysis subagents (explore,
+ * review-diff, run-tests, build, etc.) do not run units of work and are skipped.
+ */
+export const CAPABILITY_TIER_BY_SUBAGENT: Readonly<Record<string, CapabilityTier>> = {
+  "implement-local": "local",
+  "implement-cloud": "cloud",
+  "implement-deep-cloud": "deep",
+  "solve-deep-cloud": "deep",
+};
+
+/** Phase 14: closed outcome vocabulary for capability tuples (matches es-outcome). */
+export const CAPABILITY_OUTCOME_VALUES = ["accept", "revise", "failed", "unused"] as const;
+
+export type CapabilityOutcome = (typeof CAPABILITY_OUTCOME_VALUES)[number];
+
+/**
+ * Phase 14 CREATE: map a task tool part status to a capability outcome.
+ * Returns null for unknown statuses — the caller skips recording rather than
+ * guessing, keeping the closed set honest.
+ */
+export function mapTaskStatusToCapabilityOutcome(status: string): CapabilityOutcome | null {
+  const s = String(status || "").trim().toLowerCase();
+  if (s === "success" || s === "completed" || s === "ok") return "accept";
+  if (s === "failed" || s === "error") return "failed";
+  if (s === "aborted" || s === "cancelled" || s === "canceled") return "unused";
+  return null;
+}
+
+/**
+ * Phase 14: canonical shape summary string for a capability bucket. Deterministic
+ * and cheap — the same fields that feed computeShapeKey, joined in a fixed order
+ * so two runs over the same prompt produce byte-identical strings (and ids).
+ */
+export function buildCapabilityCanonicalShape(shape: WorkedExampleShape): string {
+  return [
+    shape.workClass,
+    `files=${shape.fileTypes.join(",") || "n/a"}`,
+    `hard=${shape.hardAreas.join(",") || "none"}`,
+    `size=${shape.sizeBucket}`,
+    `tokens=${shape.keyTokens.slice(0, 6).join(",")}`,
+  ].join("|");
+}
+
+/** Phase 14: deterministic capability bucket id for a (shape, tier) pair. */
+export function buildCapabilityBucketId(shapeKey: string, tier: CapabilityTier): string {
+  return `capability::${shapeKey}::${tier}`;
 }
 
 /**
@@ -861,7 +955,7 @@ export function buildWorkedExampleEntry(params: {
   const parts: string[] = [
     `DESC: Worked example — ${desc || subagentType} task solved by ${subagentType}. Relevant when delegating a similar ${shape.workClass} problem.`,
     "",
-    `SHAPE: work-class=${shape.workClass}; file-types=${shape.fileTypes.join(",") || "n/a"}; hard-areas=${shape.hardAreas.join(",") || "none"}; key-tokens=${shape.keyTokens.slice(0, 6).join(", ")}`,
+    `SHAPE: work-class=${shape.workClass}; file-types=${shape.fileTypes.join(",") || "n/a"}; hard-areas=${shape.hardAreas.join(",") || "none"}; size-bucket=${shape.sizeBucket}; key-tokens=${shape.keyTokens.slice(0, 6).join(", ")}`,
     "",
     clippedBody,
   ];
