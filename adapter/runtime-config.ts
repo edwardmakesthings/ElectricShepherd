@@ -77,6 +77,13 @@ export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
   // live so procedural-intent retrieval from ANY project wing can reach them.
   // A location, not a kind: promoted drawers keep es-source-type: skill.
   { envKey: "ESHEPHERD_SHARED_SKILLS_WING", path: "memory.sharedSkillsWing", kind: "string", defaultValue: "shared-skills" },
+  // Phase 12 (unified memory): the requesting project's es-domain — used by
+  // procedural-intent retrieval to hard-filter shared-skill admission (a `code`
+  // skill is never surfaced to a `writing` project). Empty default = unclassified
+  // requester, which admits only null/`general` skills; omitted configs keep the
+  // pre-Phase-12 behavior. Closed vocabulary — out-of-vocabulary values are
+  // dropped (read as unclassified), matching the read side's tolerance.
+  { envKey: "ESHEPHERD_PROJECT_DOMAIN", path: "memory.projectDomain", kind: "enum", defaultValue: "", allowedValues: ["code", "writing", "infra", "research", "general"] },
   { envKey: "ESHEPHERD_SOURCE_CAPTURE_WING", path: "sourceCapture.wing", kind: "string", defaultValue: "opencode" },
   { envKey: "ESHEPHERD_SOURCE_CAPTURE_ROOM", path: "sourceCapture.room", kind: "string", defaultValue: "source-transcripts" },
   { envKey: "ESHEPHERD_SOURCE_CAPTURE_ADDED_BY", path: "sourceCapture.addedBy", kind: "string", defaultValue: "electric-shepherd-capture" },

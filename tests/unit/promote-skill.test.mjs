@@ -23,6 +23,9 @@ import {
  *   3. idempotency: an exact-duplicate guard skips filing on re-apply, and an
  *      existing promoted-from edge short-circuits before any write;
  *   4. a non-skill source (wrong / missing es-source-type) is refused;
+ *   4b. Phase 12: an explicit source domain propagates to the shared copy; a source
+ *      with no (or out-of-vocabulary) domain is refused in dry-run AND apply, writing
+ *      nothing — promotion REQUIRES an explicit es-domain;
  *   5. add_drawer failure stops the pass before stamp/edge; stamp and edge failures
  *      are counted independently with retry next_steps;
  *   6. candidate rule: >= 2 distinct wings = candidate, 1 wing = not (pure function);
@@ -36,7 +39,8 @@ const ORIGIN_ID = `drawer_proj_skills_${"a".repeat(8)}`;
 
 /**
  * Fake palace for promotion tests. `sourceTypeFor` maps drawer id -> es-source-type
- * (the kg_query answer); `promotedFrom` maps origin id -> shared id (existing edge).
+ * (the kg_query answer); `domainFor` maps drawer id -> es-domain (Phase 12, absent =
+ * unstamped); `promotedFrom` maps origin id -> shared id (existing edge).
  * `duplicateOf` simulates the check_duplicate guard. `rooms` pre-seeds list_drawers.
  */
 function makeFakePalace({
@@ -44,6 +48,7 @@ function makeFakePalace({
   rooms = {},
   drawers = {},
   sourceTypeFor = {},
+  domainFor = {},
   promotedFrom = {},
   duplicateOf = null,
   failAddDrawer = false,
@@ -73,6 +78,11 @@ function makeFakePalace({
       const st = sourceTypeFor[payload.entity];
       if (payload.predicate === "es-source-type") {
         return st ? { facts: [{ subject: payload.entity, predicate: "es-source-type", object: st, current: true }] } : { facts: [] };
+      }
+      // Phase 12: es-domain lookup for a node (absent id = unstamped).
+      if (payload.predicate === "es-domain") {
+        const d = domainFor[payload.entity];
+        return d ? { facts: [{ subject: payload.entity, predicate: "es-domain", object: d, current: true }] } : { facts: [] };
       }
       // promoted-from lookup for an origin. The canonical edge is written shared ->
       // origin (shared as subject), so from the ORIGIN's view it is INCOMING. Answer
@@ -131,6 +141,7 @@ test("dry-run makes zero add_drawer / kg_add calls and returns a plan", async ()
     taxonomy: { proj: { skills: 2 } },
     drawers: { [ORIGIN_ID]: originDrawer() },
     sourceTypeFor: { [ORIGIN_ID]: "skill" },
+    domainFor: { [ORIGIN_ID]: "code" },
   });
   const report = await runSkillPromotion({ call: fake.call, skillId: ORIGIN_ID, sharedWing: SHARED_WING, dryRun: true });
 
@@ -146,11 +157,12 @@ test("dry-run makes zero add_drawer / kg_add calls and returns a plan", async ()
   assert.match(report.next_step, /dry_run:false/);
 });
 
-test("apply is a COPY: files verbatim into the shared wing, stamps skill, writes one promoted-from edge; source untouched", async () => {
+test("apply is a COPY: files verbatim into the shared wing, stamps skill + domain, writes one promoted-from edge; source untouched", async () => {
   const fake = makeFakePalace({
     taxonomy: { proj: { skills: 2 } },
     drawers: { [ORIGIN_ID]: originDrawer() },
     sourceTypeFor: { [ORIGIN_ID]: "skill" },
+    domainFor: { [ORIGIN_ID]: "code" },
   });
   const report = await runSkillPromotion({ call: fake.call, skillId: ORIGIN_ID, sharedWing: SHARED_WING, dryRun: false });
 
@@ -175,6 +187,13 @@ test("apply is a COPY: files verbatim into the shared wing, stamps skill, writes
   assert.equal(edge.args.subject, report.drawer_id, "edge subject is the shared copy");
   assert.equal(edge.args.object, ORIGIN_ID, "edge object is the origin");
 
+  // Phase 12: the origin's es-domain is propagated to the shared copy.
+  const domainStamp = kgAdds.find((c) => c.args.predicate === "es-domain");
+  assert.ok(domainStamp, "must stamp es-domain on the shared copy");
+  assert.equal(domainStamp.args.object, "code", "domain propagates from origin to shared copy");
+  assert.equal(domainStamp.args.subject, report.drawer_id);
+  assert.equal(report.domain, "code", "report carries the propagated domain");
+
   // es-status must never be touched — orthogonal axes.
   assert.ok(!kgAdds.some((c) => c.args.predicate === "es-status"), "es-status must never be touched");
 
@@ -187,6 +206,7 @@ test("idempotency: existing promoted-from edge short-circuits before any write",
     taxonomy: { proj: { skills: 2 } },
     drawers: { [ORIGIN_ID]: originDrawer() },
     sourceTypeFor: { [ORIGIN_ID]: "skill" },
+    domainFor: { [ORIGIN_ID]: "code" },
     promotedFrom: { [ORIGIN_ID]: `drawer_${SHARED_WING}_skills_existing` },
   });
   const report = await runSkillPromotion({ call: fake.call, skillId: ORIGIN_ID, sharedWing: SHARED_WING, dryRun: false });
@@ -205,6 +225,7 @@ test("idempotency: exact-duplicate guard skips filing on re-apply", async () => 
     taxonomy: { proj: { skills: 2 } },
     drawers: { [ORIGIN_ID]: originDrawer() },
     sourceTypeFor: { [ORIGIN_ID]: "skill" },
+    domainFor: { [ORIGIN_ID]: "code" },
     duplicateOf: `drawer_${SHARED_WING}_skills_dup`,
   });
   const report = await runSkillPromotion({ call: fake.call, skillId: ORIGIN_ID, sharedWing: SHARED_WING, dryRun: false });
@@ -239,11 +260,96 @@ test("an unstamped source is refused (missing es-source-type)", async () => {
   assert.match(report.error, /unknown/);
 });
 
+// ── Phase 12: promotion REQUIRES an explicit es-domain on the source ────────────
+
+test("Phase 12: a source with an explicit domain propagates that domain to the shared copy", async () => {
+  const fake = makeFakePalace({
+    taxonomy: { proj: { skills: 2 } },
+    drawers: { [ORIGIN_ID]: originDrawer() },
+    sourceTypeFor: { [ORIGIN_ID]: "skill" },
+    domainFor: { [ORIGIN_ID]: "code" },
+  });
+
+  // Dry-run reports the propagated domain (and makes no writes).
+  const preview = await runSkillPromotion({ call: fake.call, skillId: ORIGIN_ID, sharedWing: SHARED_WING, dryRun: true });
+  assert.equal(preview.ok, true);
+  assert.equal(preview.domain, "code", "dry-run report carries the propagated domain");
+  assert.match(preview.next_step, /es-domain: code/);
+  assert.match(preview.next_step, /requires an explicit domain/i);
+  assert.deepEqual(
+    fake.calls.filter((c) => c.name === "add_drawer" || c.name === "kg_add"),
+    [],
+    "dry-run must make no mutating calls"
+  );
+
+  // Apply stamps the same domain on the shared copy.
+  const report = await runSkillPromotion({ call: fake.call, skillId: ORIGIN_ID, sharedWing: SHARED_WING, dryRun: false });
+  assert.equal(report.ok, true);
+  assert.equal(report.domain, "code", "apply report carries the propagated domain");
+  const domainStamp = fake.calls.find((c) => c.name === "kg_add" && c.args.predicate === "es-domain");
+  assert.ok(domainStamp, "shared copy must be stamped es-domain");
+  assert.equal(domainStamp.args.object, "code", "the origin's domain propagates verbatim");
+  assert.equal(domainStamp.args.subject, report.drawer_id);
+});
+
+test("Phase 12: a source without a domain is refused (dry-run and apply write nothing)", async () => {
+  // Dry-run refusal.
+  const dryFake = makeFakePalace({
+    taxonomy: { proj: { skills: 2 } },
+    drawers: { [ORIGIN_ID]: originDrawer() },
+    sourceTypeFor: { [ORIGIN_ID]: "skill" }, // a real skill — but no es-domain stamp
+  });
+  const preview = await runSkillPromotion({ call: dryFake.call, skillId: ORIGIN_ID, sharedWing: SHARED_WING, dryRun: true });
+  assert.equal(preview.ok, false);
+  assert.match(preview.error, /es-domain/);
+  assert.match(preview.error, /REQUIRES an explicit domain/);
+  assert.equal(preview.domain, undefined, "no domain is reported when the source has none");
+  assert.deepEqual(
+    dryFake.calls.filter((c) => c.name === "add_drawer" || c.name === "kg_add"),
+    [],
+    "refused dry-run must make no mutating calls"
+  );
+
+  // Apply refusal: zero writes.
+  const applyFake = makeFakePalace({
+    taxonomy: { proj: { skills: 2 } },
+    drawers: { [ORIGIN_ID]: originDrawer() },
+    sourceTypeFor: { [ORIGIN_ID]: "skill" },
+  });
+  const report = await runSkillPromotion({ call: applyFake.call, skillId: ORIGIN_ID, sharedWing: SHARED_WING, dryRun: false });
+  assert.equal(report.ok, false);
+  assert.match(report.error, /es-domain/);
+  assert.deepEqual(
+    applyFake.calls.filter((c) => c.name === "add_drawer" || c.name === "kg_add"),
+    [],
+    "refused apply must write nothing — no shared copy, no stamp, no edge"
+  );
+});
+
+test("Phase 12: an out-of-vocabulary domain on the source is refused (no writes)", async () => {
+  const fake = makeFakePalace({
+    taxonomy: { proj: { skills: 2 } },
+    drawers: { [ORIGIN_ID]: originDrawer() },
+    sourceTypeFor: { [ORIGIN_ID]: "skill" },
+    domainFor: { [ORIGIN_ID]: "coding" }, // drift value — not in the closed vocabulary
+  });
+  const report = await runSkillPromotion({ call: fake.call, skillId: ORIGIN_ID, sharedWing: SHARED_WING, dryRun: false });
+
+  assert.equal(report.ok, false);
+  assert.match(report.error, /es-domain/);
+  assert.deepEqual(
+    fake.calls.filter((c) => c.name === "add_drawer" || c.name === "kg_add"),
+    [],
+    "an out-of-vocabulary domain must be treated as unstamped: refuse, write nothing"
+  );
+});
+
 test("add_drawer failure stops the pass before stamp/edge", async () => {
   const fake = makeFakePalace({
     taxonomy: { proj: { skills: 2 } },
     drawers: { [ORIGIN_ID]: originDrawer() },
     sourceTypeFor: { [ORIGIN_ID]: "skill" },
+    domainFor: { [ORIGIN_ID]: "code" },
     failAddDrawer: true,
   });
   const report = await runSkillPromotion({ call: fake.call, skillId: ORIGIN_ID, sharedWing: SHARED_WING, dryRun: false });
@@ -259,6 +365,7 @@ test("stamp and edge failures are counted independently with retry next_steps", 
     taxonomy: { proj: { skills: 2 } },
     drawers: { [ORIGIN_ID]: originDrawer() },
     sourceTypeFor: { [ORIGIN_ID]: "skill" },
+    domainFor: { [ORIGIN_ID]: "code" },
     failKgAddFor: new Set([`drawer_${SHARED_WING}_skills_new`]),
   });
   const bothReport = await runSkillPromotion({ call: both.call, skillId: ORIGIN_ID, sharedWing: SHARED_WING, dryRun: false });
@@ -272,14 +379,16 @@ test("stamp and edge failures are counted independently with retry next_steps", 
     taxonomy: { proj: { skills: 2 } },
     drawers: { [ORIGIN_ID]: originDrawer() },
     sourceTypeFor: { [ORIGIN_ID]: "skill" },
+    domainFor: { [ORIGIN_ID]: "code" },
     failKgAddFor: new Set([`drawer_${SHARED_WING}_skills_new`]),
   });
-  // Same fixture as both (both kg_adds hit the same subject) — to isolate the edge,
+  // Same fixture as both (all kg_adds hit the same subject) — to isolate the edge,
   // we instead assert the happy path has no failure counters.
   const clean = makeFakePalace({
     taxonomy: { proj: { skills: 2 } },
     drawers: { [ORIGIN_ID]: originDrawer() },
     sourceTypeFor: { [ORIGIN_ID]: "skill" },
+    domainFor: { [ORIGIN_ID]: "code" },
   });
   const cleanReport = await runSkillPromotion({ call: clean.call, skillId: ORIGIN_ID, sharedWing: SHARED_WING, dryRun: false });
   assert.equal(cleanReport.stamp_failed, undefined);

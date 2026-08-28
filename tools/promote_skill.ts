@@ -45,6 +45,7 @@ import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-c
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
 import { SKILLS_ROOM, SKILL_LIKE_STEMS } from "./file_skill.ts";
 import { pickPurposeRoom } from "./ingest_docs.ts";
+import { SKILL_DOMAINS, type SkillDomain } from "../adapter/memgraph.ts";
 
 declare const process: {
   env: Record<string, string | undefined>;
@@ -69,6 +70,8 @@ export type SkillPromotionReport = {
   from?: { wing: string; room: string };
   to?: { wing: string; room: string };
   reused_room?: boolean;
+  /** Phase 12: the es-domain propagated from the origin to the shared copy. */
+  domain?: SkillDomain;
   duplicate_drawer_id?: string;
   already_promoted_to?: string;
   pre_snapshot?: { total: number; covered: number };
@@ -109,6 +112,20 @@ async function closetSourceType(call: CallTool, id: string): Promise<string | nu
         if (value === "transcript" || value === "doc" || value === "synthesis" || value === "skill") return value;
       }
       return null; // unstamped or read failure — never a default type
+    })
+    .catch(() => null);
+}
+
+/** es-domain value of one node, or null when unstamped / out-of-vocabulary / unreadable (Phase 12). */
+async function closetDomain(call: CallTool, id: string): Promise<SkillDomain | null> {
+  return call("kg_query", { entity: id, direction: "outgoing", predicate: "es-domain", recurse: false, max_depth: 1 })
+    .then((raw) => {
+      for (const fact of parseFacts(raw)) {
+        if (fact.current === false) continue;
+        const value = asText(fact.object).trim();
+        if ((SKILL_DOMAINS as readonly string[]).includes(value)) return value as SkillDomain;
+      }
+      return null; // unstamped, out-of-vocabulary, or read failure — never a default domain
     })
     .catch(() => null);
 }
@@ -213,6 +230,25 @@ export async function runSkillPromotion(args: {
     };
   }
 
+  // Phase 12 hard check (spec: "Promotion to the shared wing REQUIRES an explicit
+  // domain. A skill with no domain cannot be promoted."): read the origin's es-domain
+  // and refuse when it is unstamped or out-of-vocabulary — in BOTH dry-run and apply,
+  // before any write. An unclassified shared copy would surface in every project's
+  // procedural retrieval (null reads as "admitted everywhere"), which is exactly the
+  // cross-project relevance degradation Phase 12 exists to prevent.
+  const sourceDomain = await closetDomain(args.call, skillId);
+  if (sourceDomain === null) {
+    return {
+      ok: false,
+      dry_run: dryRun,
+      skill_id: skillId,
+      from,
+      to: { wing: sharedWing, room: SHARED_SKILLS_ROOM },
+      error: `source es-domain is unstamped or out-of-vocabulary — promotion REQUIRES an explicit domain (code | writing | infra | research | general). Nothing was written.`,
+      next_step: `Re-file the skill via file_skill with a domain argument (or stamp es-domain directly) and re-run.`,
+    };
+  }
+
   // Idempotency layer 2: an existing promoted-from edge means this origin was
   // already promoted — report it, write nothing. The edge is written with the SHARED
   // copy as subject and the origin as object (shared -> origin), so from the ORIGIN's
@@ -284,9 +320,10 @@ export async function runSkillPromotion(args: {
       reused_room: reused,
       pre_snapshot: pre,
       duplicate_drawer_id: duplicateDrawerId,
+      domain: sourceDomain,
       next_step: duplicateDrawerId
         ? `An exact-duplicate drawer already exists (${duplicateDrawerId}) — apply will skip filing (idempotent).`
-        : `Apply will COPY the skill verbatim into ${sharedWing}/${room} (reused=${reused}), stamp es-source-type: skill, and add the ${PROMOTED_FROM_PREDICATE} edge back to ${skillId}. The source drawer is left untouched. Re-run with dry_run:false after approval.`,
+        : `Apply will COPY the skill verbatim into ${sharedWing}/${room} (reused=${reused}), stamp es-source-type: skill + es-domain: ${sourceDomain} (propagated from the origin — promotion requires an explicit domain), and add the ${PROMOTED_FROM_PREDICATE} edge back to ${skillId}. The source drawer is left untouched. Re-run with dry_run:false after approval.`,
     };
   }
 
@@ -357,6 +394,16 @@ export async function runSkillPromotion(args: {
     stampFailed = 1;
   }
 
+  // Phase 12: propagate the origin's es-domain to the shared copy. The filter is a
+  // HARD match (null/general/requesting-domain), so an unstamped shared copy would be
+  // admitted everywhere — the domain must travel with the skill or the promotion
+  // silently degrades every project's procedural retrieval.
+  try {
+    await args.call("kg_add", { subject: drawerId, predicate: "es-domain", object: sourceDomain, source_closet: drawerId });
+  } catch {
+    stampFailed = 1;
+  }
+
   // The promoted-from lineage edge: shared copy -> origin. NOT synthesized-from —
   // it must never feed height or recursive lineage traversal (see memgraph.ts).
   let edgeFailed = 0;
@@ -374,6 +421,7 @@ export async function runSkillPromotion(args: {
     to: { wing: sharedWing, room },
     reused_room: reused,
     drawer_id: drawerId,
+    domain: sourceDomain,
   };
   if (stampFailed > 0) report.stamp_failed = 1;
   if (edgeFailed > 0) report.edge_failed = 1;
@@ -522,7 +570,7 @@ export async function findPromotionCandidates(args: {
 
 export default tool({
   description:
-    "Phase 10 (unified memory): promote a project skill into the shared skills wing so procedural-intent retrieval from ANY project wing can reach it. COPY, not move — the source drawer stays untouched; the shared copy is stamped es-source-type: skill and linked back via a promoted-from edge (NOT lineage). Promotion is explicit and approval-gated only: dry-run by default, apply writes add_drawer + kg_add after operator approval of the numbered proposal. Idempotent: an exact-duplicate guard plus an existing-edge guard make re-runs no-ops. Use findPromotionCandidates (via the memory-status surface) to discover skills present in >= 2 project wings before proposing.",
+    "Phase 10 (unified memory): promote a project skill into the shared skills wing so procedural-intent retrieval from ANY project wing can reach it. COPY, not move — the source drawer stays untouched; the shared copy is stamped es-source-type: skill + es-domain (propagated from the origin) and linked back via a promoted-from edge (NOT lineage). Phase 12: promotion REQUIRES an explicit es-domain on the source — an unstamped/out-of-vocabulary domain is refused with no writes. Promotion is explicit and approval-gated only: dry-run by default, apply writes add_drawer + kg_add after operator approval of the numbered proposal. Idempotent: an exact-duplicate guard plus an existing-edge guard make re-runs no-ops. Use findPromotionCandidates (via the memory-status surface) to discover skills present in >= 2 project wings before proposing.",
   args: {
     skill_id: tool.schema.string().describe("Drawer ID of the project skill to promote (must carry es-source-type: skill)."),
     shared_wing: tool.schema

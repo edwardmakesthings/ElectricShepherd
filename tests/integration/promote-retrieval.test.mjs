@@ -16,6 +16,11 @@ import { runSkillPromotion, PROMOTED_FROM_PREDICATE } from "../../tools/promote_
  * The transport is an in-memory KG + drawer store, not a live MemPalace: it exercises
  * the exact ElectricShepherd-owned code on both sides (promotion core + retrieval
  * adapter) with real edge semantics, without requiring ESHEPHERD_TEST_INTEGRATION.
+ *
+ * Phase 12 extension: the origin carries an explicit es-domain; promotion propagates
+ * it to the shared copy, and procedural retrieval from a matching project admits the
+ * promoted skill while a non-matching (writing) project never sees it — the hard
+ * domain filter that keeps cross-project promotion from degrading relevance.
  */
 
 const ORIGIN = "drawer_projA_skills_origin";
@@ -32,6 +37,8 @@ function makeInMemoryPalace() {
   const sourceTypes = {};
   sourceTypes[ORIGIN] = "skill";
   edges.push({ subject: ORIGIN, predicate: "es-source-type", object: "skill" });
+
+  const domains = {}; // id -> es-domain value (Phase 12; absent = unstamped)
 
   const call = async (name, payload) => {
     if (name === "get_taxonomy") return { taxonomy: { projA: { skills: 1 } } };
@@ -71,6 +78,7 @@ function makeInMemoryPalace() {
     if (name === "kg_add") {
       edges.push({ ...payload });
       if (payload.predicate === "es-source-type") sourceTypes[payload.subject] = payload.object;
+      if (payload.predicate === "es-domain") domains[payload.subject] = payload.object;
       return {};
     }
     return {};
@@ -91,6 +99,8 @@ function makeInMemoryPalace() {
     }),
     getClosetStatus: async () => "active",
     getClosetSourceType: async (id) => sourceTypes[id] ?? null,
+    // Phase 12: es-domain reader — absent id = unstamped legacy skill (null).
+    getClosetDomain: async (id) => domains[id] ?? null,
     getDrawer: async ({ drawer_id }) => {
       const row = drawers[drawer_id];
       return row ? { ...row } : {};
@@ -101,13 +111,27 @@ function makeInMemoryPalace() {
     },
   };
 
-  return { call, client, edges, drawers, sourceTypes };
+  return { call, client, edges, drawers, sourceTypes, domains };
 }
 
 const RETRIEVAL_OPTIONS = { query: "how do I diagnose a caching regression", scope_room: "unit-room", top_n: 10, intent: "procedural", shared_wing: SHARED_WING };
 
+/** Pre-seed an already-promoted skill (verbatim content + stamps + edge) without going through runSkillPromotion. */
+function seedSharedSkill(kg, id, domain) {
+  kg.drawers[id] = { drawer_id: id, wing: SHARED_WING, room: "skills", content: `Goal: a distinct procedure (${id}).\n1. Step one.\n2. Step two.`, desc: "a promoted skill" };
+  kg.sourceTypes[id] = "skill";
+  if (domain) kg.domains[id] = domain;
+  kg.edges.push({ subject: id, predicate: "es-source-type", object: "skill" });
+  if (domain) kg.edges.push({ subject: id, predicate: "es-domain", object: domain });
+}
+
 test("promote -> retrieval: a promoted skill is invisible before, visible after (via: shared)", async () => {
   const kg = makeInMemoryPalace();
+
+  // Phase 12: the origin carries an explicit es-domain — promotion REQUIRES one, and
+  // this is the "code" project whose skill we are promoting.
+  kg.domains[ORIGIN] = "code";
+  kg.edges.push({ subject: ORIGIN, predicate: "es-domain", object: "code" });
 
   // 1. BEFORE promotion: the origin skill has no edges into projB and no shared copy
   //    exists — procedural retrieval from projB must NOT surface it.
@@ -138,8 +162,16 @@ test("promote -> retrieval: a promoted skill is invisible before, visible after 
   // The shared copy is stamped es-source-type: skill.
   assert.equal(kg.sourceTypes[sharedId], "skill", "shared copy must be skill-stamped");
 
-  // 3. AFTER promotion: procedural retrieval from projB now surfaces the shared copy.
-  const after = await expandScopedRetrieval(kg.client, RETRIEVAL_OPTIONS);
+  // Phase 12: the origin's es-domain propagated to the shared copy.
+  assert.equal(kg.domains[sharedId], "code", "shared copy must carry the origin's domain");
+  assert.ok(
+    kg.edges.some((e) => e.predicate === "es-domain" && e.subject === sharedId && e.object === "code"),
+    "an es-domain edge must exist on the shared copy"
+  );
+
+  // 3. AFTER promotion: procedural retrieval from a CODE project now surfaces the
+  //    shared copy (domain match).
+  const after = await expandScopedRetrieval(kg.client, { ...RETRIEVAL_OPTIONS, domain: "code" });
   const afterById = Object.fromEntries(after.ranked_nodes.map((n) => [n.node_id, n]));
 
   assert.ok(afterById[sharedId], `promoted skill must be visible after: ${JSON.stringify(Object.keys(afterById))}`);
@@ -155,10 +187,79 @@ test("promote -> retrieval: a promoted skill is invisible before, visible after 
     `[worked-example] promote->retrieval: before=${beforeIds.length} nodes (no shared), after=${after.ranked_nodes.length} nodes ` +
       `(shared ${sharedId} admitted via=shared, score=${afterById[sharedId].score.toFixed(6)})`
   );
+
+  // 4. Phase 12 hard filter: the SAME promoted skill is NOT surfaced to a WRITING
+  //    project — the domain mismatch filters it out of procedural retrieval.
+  const writingAfter = await expandScopedRetrieval(kg.client, { ...RETRIEVAL_OPTIONS, domain: "writing" });
+  const writingById = Object.fromEntries(writingAfter.ranked_nodes.map((n) => [n.node_id, n]));
+  assert.ok(!writingById[sharedId], `a code-domain skill must never surface in a writing project: ${JSON.stringify(Object.keys(writingById))}`);
+  assert.equal(writingAfter.filters.shared_skills_expansion.targets_admitted, 0);
+  const filter = writingAfter.filters.shared_skills_expansion.domain_filter;
+  assert.equal(filter.enabled, true);
+  assert.equal(filter.requesting_domain, "writing");
+  assert.equal(filter.matched, 0);
+  assert.equal(filter.filtered, 1);
+});
+
+test("Phase 12: retrieval from a code project includes general + matching skills and excludes writing-domain promoted skills", async () => {
+  const kg = makeInMemoryPalace();
+
+  // Three already-promoted skills in the shared wing: one per domain.
+  seedSharedSkill(kg, "drawer_shared-skills_skills_code", "code");
+  seedSharedSkill(kg, "drawer_shared-skills_skills_general", "general");
+  seedSharedSkill(kg, "drawer_shared-skills_skills_writing", "writing");
+
+  const result = await expandScopedRetrieval(kg.client, { ...RETRIEVAL_OPTIONS, domain: "code" });
+  const byId = Object.fromEntries(result.ranked_nodes.map((n) => [n.node_id, n]));
+
+  assert.ok(byId["drawer_shared-skills_skills_code"], `code-domain skill must be admitted to a code project: ${JSON.stringify(Object.keys(byId))}`);
+  assert.equal(byId["drawer_shared-skills_skills_code"].via, "shared");
+  assert.ok(byId["drawer_shared-skills_skills_general"], "general skills are admitted to every domain");
+  assert.ok(!byId["drawer_shared-skills_skills_writing"], "a writing-domain skill must never surface in a code project");
+
+  const filter = result.filters.shared_skills_expansion.domain_filter;
+  assert.equal(filter.enabled, true);
+  assert.equal(filter.requesting_domain, "code");
+  assert.equal(filter.matched, 2, "code + general admitted");
+  assert.equal(filter.filtered, 1, "writing filtered out");
+
+  // And the mirror: a writing project sees writing + general, not code.
+  const writingResult = await expandScopedRetrieval(kg.client, { ...RETRIEVAL_OPTIONS, domain: "writing" });
+  const writingById = Object.fromEntries(writingResult.ranked_nodes.map((n) => [n.node_id, n]));
+  assert.ok(!writingById["drawer_shared-skills_skills_code"], "code skill excluded from a writing project");
+  assert.ok(writingById["drawer_shared-skills_skills_writing"], "writing skill admitted to a writing project");
+  assert.ok(writingById["drawer_shared-skills_skills_general"], "general still admitted to a writing project");
+});
+
+test("Phase 12: promoting an unstamped skill is refused end-to-end (no shared copy, no retrieval change)", async () => {
+  const kg = makeInMemoryPalace();
+  // No es-domain stamp on the origin — only the pre-seeded es-source-type edge.
+
+  const edgesBefore = kg.edges.length;
+  const drawersBefore = Object.keys(kg.drawers).length;
+
+  const preview = await runSkillPromotion({ call: kg.call, skillId: ORIGIN, sharedWing: SHARED_WING, dryRun: true });
+  assert.equal(preview.ok, false);
+  assert.match(preview.error, /es-domain/);
+  assert.equal(kg.edges.length, edgesBefore, "refused dry-run writes nothing");
+
+  const applied = await runSkillPromotion({ call: kg.call, skillId: ORIGIN, sharedWing: SHARED_WING, dryRun: false });
+  assert.equal(applied.ok, false);
+  assert.match(applied.error, /es-domain/);
+  assert.equal(kg.edges.length, edgesBefore, "refused apply writes no edge");
+  assert.equal(Object.keys(kg.drawers).length, drawersBefore, "refused apply files no shared copy");
+
+  // Retrieval is unchanged: nothing to admit from the (still empty) shared room.
+  const result = await expandScopedRetrieval(kg.client, { ...RETRIEVAL_OPTIONS, domain: "code" });
+  assert.equal(result.filters.shared_skills_expansion.targets_admitted, 0);
 });
 
 test("promote is idempotent across the retrieval loop: a second apply writes nothing", async () => {
   const kg = makeInMemoryPalace();
+
+  // Phase 12: promotion requires an explicit domain on the origin.
+  kg.domains[ORIGIN] = "code";
+  kg.edges.push({ subject: ORIGIN, predicate: "es-domain", object: "code" });
 
   await runSkillPromotion({ call: kg.call, skillId: ORIGIN, sharedWing: SHARED_WING, dryRun: false });
   const edgesAfterFirst = kg.edges.length;

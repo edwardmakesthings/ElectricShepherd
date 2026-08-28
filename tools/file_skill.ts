@@ -25,6 +25,7 @@
  */
 
 import { tool } from "@opencode-ai/plugin";
+import { SKILL_DOMAINS, type SkillDomain } from "../adapter/memgraph.ts";
 import { asObject, asText, createPalaceClient, parseRows, parseTaxonomy } from "../adapter/palace-tools.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
@@ -52,6 +53,8 @@ export type SkillFilingReport = {
   error?: string;
   duplicate_drawer_id?: string;
   pre_snapshot?: { total: number; covered: number };
+  /** Phase 12: the resolved es-domain (explicit arg, or the `general` default). */
+  domain?: SkillDomain;
   drawer_id?: string;
   stamp_failed?: number;
   next_step?: string;
@@ -68,12 +71,23 @@ export async function runSkillFiling(args: {
   content: string;
   desc?: string;
   room?: string;
+  /** Phase 12: es-domain axis. Closed vocabulary — unknown values are rejected at write time. */
+  domain?: SkillDomain | string;
   dryRun?: boolean;
 }): Promise<SkillFilingReport> {
   const wing = String(args.wing || "").trim();
   if (!wing) throw new Error("file_skill: wing is required (no project wing resolved)");
   const content = String(args.content || "").trim();
   if (!content) throw new Error("file_skill: content is required — the full procedure text, not a summary");
+  // Phase 12: validate against the closed vocabulary at write time so drift can never
+  // land in the KG (the read side treats unknown values as unstamped, i.e. general).
+  const rawDomain = String(args.domain ?? "").trim();
+  if (rawDomain && !(SKILL_DOMAINS as readonly string[]).includes(rawDomain)) {
+    throw new Error(`file_skill: unknown domain "${rawDomain}" — allowed: ${SKILL_DOMAINS.join(" | ")}`);
+  }
+  // TEMPORARY CONSERVATIVE DEFAULT until project-domain inference is added (spec wants
+  // `general` used sparingly; an explicit arg is the only way to opt out for now).
+  const domain = (rawDomain || "general") as SkillDomain;
   const dryRun = args.dryRun !== false;
 
   const taxonomy = parseTaxonomy(await args.call("get_taxonomy", {}));
@@ -122,10 +136,11 @@ export async function runSkillFiling(args: {
       dry_run: true,
       pre_snapshot: pre,
       duplicate_drawer_id: duplicateDrawerId,
+      domain,
       next_step:
         duplicateDrawerId
           ? `An exact-duplicate skill drawer already exists (${duplicateDrawerId}) — apply will skip filing. Re-file with different content only if the procedure genuinely changed (then merge old → new).`
-          : `Apply will file into ${wing}/${room} (reused=${reused}) and stamp es-source-type: skill. Re-run with dry_run:false to apply.`,
+          : `Apply will file into ${wing}/${room} (reused=${reused}) and stamp es-source-type: skill + es-domain: ${domain}. Re-run with dry_run:false to apply.`,
     };
   }
 
@@ -183,19 +198,24 @@ export async function runSkillFiling(args: {
     };
   }
 
-  // Stamp the source-type axis. `es-status` is intentionally NOT touched —
-  // orthogonal axes; a skill is authoritative on arrival, like a doc.
+  // Stamp the source-type axis, then the Phase 12 domain axis. `es-status` is
+  // intentionally NOT touched — orthogonal axes; a skill is authoritative on arrival.
   let stampFailed = 0;
   try {
     await args.call("kg_add", { subject: drawerId, predicate: "es-source-type", object: "skill", source_closet: drawerId });
   } catch {
-    stampFailed = 1;
+    stampFailed += 1;
+  }
+  try {
+    await args.call("kg_add", { subject: drawerId, predicate: "es-domain", object: domain, source_closet: drawerId });
+  } catch {
+    stampFailed += 1;
   }
 
-  const report: SkillFilingReport = { ok: true, wing, room, reused, dry_run: false, drawer_id: drawerId };
+  const report: SkillFilingReport = { ok: true, wing, room, reused, dry_run: false, drawer_id: drawerId, domain };
   if (stampFailed > 0) {
-    report.stamp_failed = 1;
-    report.next_step = `Drawer ${drawerId} is filed but UNSTAMPED. Re-run /file-skill with the same content — the duplicate guard returns the existing ID and the stamp can be retried via palace_stamp_source_type.`;
+    report.stamp_failed = stampFailed;
+    report.next_step = `Drawer ${drawerId} is filed but UNSTAMPED (${stampFailed}/2 stamps failed). Re-run /file-skill with the same content — the duplicate guard returns the existing ID and the stamp can be retried via palace_stamp_source_type.`;
   }
   return report;
 }
@@ -208,6 +228,7 @@ export default tool({
     desc: tool.schema.string().optional().describe("One-line description for discoverability."),
     wing: tool.schema.string().optional().describe("Wing to file into. Defaults to this project's wing."),
     room: tool.schema.string().optional().describe("Explicit destination room. Default: reuse an existing skill-like room, else `skills`."),
+    domain: tool.schema.string().optional().describe("Phase 12 es-domain axis: code | writing | infra | research | general. Defaults to 'general' (temporary conservative default until project-domain inference is added)."),
     dry_run: tool.schema.boolean().optional().describe("Preview without writing (default true)."),
     tool_prefix: tool.schema.string().optional().describe("MCP tool prefix override."),
   },
@@ -234,6 +255,7 @@ export default tool({
       content: String(args.content || ""),
       desc: args.desc,
       room: args.room,
+      domain: args.domain,
       dryRun: args.dry_run,
     });
 

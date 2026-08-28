@@ -158,6 +158,11 @@ function parseArgs(argv: string[], runtimeConfig: ReturnType<typeof loadRuntimeC
     // Phase 10 (unified memory): shared skills wing for procedural-intent retrieval.
     // Read directly from runtime config; expansion only uses it for procedural intent.
     shared_wing: getRuntimeConfigValueByPath(runtimeConfig, "memory.sharedSkillsWing") || undefined,
+    // Phase 12 (unified memory): the requesting project's es-domain — hard-filters
+    // shared-skill admission on procedural intent. Prefer the runtime config path;
+    // when absent keep the backward-compatible omission (expansion then admits only
+    // null/general skills). Out-of-vocabulary values are dropped, not passed through.
+    domain: getRuntimeConfigValueByPath(runtimeConfig, "memory.projectDomain") || undefined,
   };
 }
 

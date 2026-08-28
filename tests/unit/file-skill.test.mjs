@@ -10,8 +10,9 @@ import { pickPurposeRoom, pickReferenceRoom } from "../../tools/ingest_docs.ts";
  *   1. room selection reuses an existing skill-like room, else mints `skills`,
  *      via the shared pickPurposeRoom (and that pickReferenceRoom still works);
  *   2. dry-run makes NO add_drawer / kg_add calls;
- *   3. apply files verbatim into the picked room and stamps es-source-type: skill
- *      with source_closet provenance — and never touches es-status;
+ *   3. apply files verbatim into the picked room and stamps es-source-type: skill +
+ *      es-domain (Phase 12, closed vocabulary, default `general`) with source_closet
+ *      provenance — and never touches es-status;
  *   4. exact-duplicate guard skips filing (dry-run reports it, apply writes nothing);
  *   5. missing wing is an error report, not a throw;
  *   6. add_drawer failure stops the pass before any stamp; stamp failure is counted;
@@ -89,6 +90,23 @@ test("dry-run makes zero add_drawer / kg_add calls and returns a plan", async ()
   assert.match(report.next_step, /dry_run:false/);
 });
 
+test("Phase 12: dry-run reports the resolved domain (default general) without writing", async () => {
+  const fake = makeFakePalace({ taxonomy: { [WING]: {} } });
+  const report = await runSkillFiling({ call: fake.call, wing: WING, content: CONTENT, dryRun: true });
+
+  assert.equal(report.domain, "general", "omitted domain defaults to general");
+  assert.match(report.next_step, /es-domain: general/);
+  assert.deepEqual(
+    fake.calls.filter((c) => c.name === "add_drawer" || c.name === "kg_add"),
+    [],
+    "dry-run must make no mutating calls even with a domain resolved"
+  );
+
+  const explicit = await runSkillFiling({ call: fake.call, wing: WING, content: CONTENT, domain: "writing", dryRun: true });
+  assert.equal(explicit.domain, "writing");
+  assert.match(explicit.next_step, /es-domain: writing/);
+});
+
 test("apply files verbatim into the picked room and stamps es-source-type: skill (never es-status)", async () => {
   const fake = makeFakePalace({ taxonomy: { [WING]: { notes: 4 } } });
   const report = await runSkillFiling({ call: fake.call, wing: WING, content: CONTENT, desc: "doc ingest procedure", dryRun: false });
@@ -103,14 +121,47 @@ test("apply files verbatim into the picked room and stamps es-source-type: skill
   assert.equal(add.args.desc, "doc ingest procedure");
 
   const stamps = fake.calls.filter((c) => c.name === "kg_add");
-  assert.equal(stamps.length, 1, "exactly one stamp on apply");
+  assert.equal(stamps.length, 2, "exactly two stamps on apply (es-source-type + es-domain)");
   assert.deepEqual(stamps[0].args, {
     subject: report.drawer_id,
     predicate: "es-source-type",
     object: "skill",
     source_closet: report.drawer_id,
   });
+  // Phase 12: the domain stamp follows the source-type stamp on the same drawer.
+  assert.deepEqual(stamps[1].args, {
+    subject: report.drawer_id,
+    predicate: "es-domain",
+    object: "general",
+    source_closet: report.drawer_id,
+  });
+  assert.equal(report.domain, "general");
   assert.ok(!stamps.some((s) => s.args.predicate === "es-status"), "es-status must never be touched");
+});
+
+test("Phase 12: an explicit domain is stamped verbatim on apply", async () => {
+  const fake = makeFakePalace({ taxonomy: { [WING]: {} } });
+  const report = await runSkillFiling({ call: fake.call, wing: WING, content: CONTENT, domain: "code", dryRun: false });
+
+  assert.equal(report.ok, true);
+  assert.equal(report.domain, "code");
+  const stamps = fake.calls.filter((c) => c.name === "kg_add");
+  assert.equal(stamps.length, 2);
+  assert.deepEqual(stamps[1].args, {
+    subject: report.drawer_id,
+    predicate: "es-domain",
+    object: "code",
+    source_closet: report.drawer_id,
+  });
+});
+
+test("Phase 12: an out-of-vocabulary domain is rejected before any MCP call", async () => {
+  const fake = makeFakePalace({ taxonomy: { [WING]: {} } });
+  await assert.rejects(
+    () => runSkillFiling({ call: fake.call, wing: WING, content: CONTENT, domain: "coding", dryRun: false }),
+    /unknown domain/
+  );
+  assert.deepEqual(fake.calls, [], "no MCP call may precede the validation error");
 });
 
 test("exact-duplicate guard: dry-run reports it, apply writes nothing", async () => {
@@ -165,7 +216,8 @@ test("stamp failure is counted with a retry next_step", async () => {
 
   const report = await runSkillFiling({ call: fake.call, wing: WING, content: CONTENT, dryRun: false });
   assert.equal(report.ok, true);
-  assert.equal(report.stamp_failed, 1);
+  // Both kg_adds (es-source-type + es-domain) hit the same failing subject.
+  assert.equal(report.stamp_failed, 2);
   assert.match(report.next_step, /UNSTAMPED/);
 });
 

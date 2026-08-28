@@ -1,4 +1,4 @@
-import type { ClosetSourceType, MemgraphClient } from "./memgraph.ts";
+import type { ClosetSourceType, MemgraphClient, SkillDomain } from "./memgraph.ts";
 
 export type RetrievalWeights = {
   height: number;
@@ -65,6 +65,12 @@ export type RetrievalExpansionOptions = {
   // is byte-identical to pre-Phase-10 behavior: no shared-wing calls, no cross-wing nodes.
   // Omitted = off (default path stays single-wing).
   shared_wing?: string;
+  // Phase 12 (unified memory): the requesting project's es-domain. On procedural intent
+  // with a shared wing, shared-skill admission filters on it: a candidate is admitted iff
+  // its domain is unstamped (null), `general`, or equals this value. Omitted = unknown
+  // requester — only null/`general` candidates are admitted; specific-domain skills are
+  // never surfaced to an unclassified project.
+  domain?: string;
 };
 
 export type RankedScopedNode = {
@@ -1319,8 +1325,13 @@ export async function expandScopedRetrieval(
   // read failures degrade to pre-Phase-10 behavior with zero extra calls. Never pages
   // past one bounded page (spec guardrail: no room exhaustion).
   const sharedWing = intent === "procedural" ? String(options.shared_wing || "").trim() : "";
+  // Phase 12: domain filter. Capability-gated like every expansion — clients without
+  // getClosetDomain degrade to pre-Phase-12 behavior (no filtering, zero extra calls).
+  const sharedDomainFilterEnabled = typeof client.getClosetDomain === "function";
+  const requestingDomain = String(options.domain || "").trim();
   let sharedSkillIds: string[] = [];
   let sharedScanReport: { wing: string; room: string; drawers_scanned: number; truncated: boolean } | undefined;
+  let sharedDomainFiltered = 0; // skill-eligible candidates dropped by the domain filter
   if (sharedWing && typeof client.listDrawers === "function" && typeof client.getClosetSourceType === "function") {
     const sharedRoom = "skills"; // canonical skills room in the shared wing (Phase 5 convention)
     const pageSize = 50; // same bounded-page shape as the Phase 3 doc scan
@@ -1356,16 +1367,26 @@ export async function expandScopedRetrieval(
         fresh.map((c) => {
           const drawerP = typeof client.getDrawer === "function" ? client.getDrawer({ drawer_id: c.id }).catch(() => ({})) : Promise.resolve({});
           const typeP = client.getClosetSourceType(c.id).then((t) => t ?? "unknown");
-          return Promise.all([drawerP, typeP]);
+          // Phase 12: one extra one-hop read per candidate, same cost profile as the
+          // source-type read above. Read failures degrade to null (unstamped → admitted).
+          const domainP = sharedDomainFilterEnabled ? client.getClosetDomain(c.id).catch(() => null) : Promise.resolve(null);
+          return Promise.all([drawerP, typeP, domainP]);
         }),
       );
-      results.forEach(([drawerRaw, sourceType], i) => {
+      results.forEach(([drawerRaw, sourceType, skillDomain], i) => {
         const c = fresh[i];
         if (sourceType !== "skill") return; // hard check: only skill-stamped drawers qualify
         const drawer = asObject(drawerRaw);
         const row = c.row;
         const wing = asString(drawer.wing || asObject(drawer.metadata).wing || row.wing || row.closet || row.namespace);
         if (wing && wing !== sharedWing) return; // must be the shared wing — never another project
+        // Phase 12: admit iff unstamped (null), `general`, or matching the requesting
+        // domain. An unknown/absent requesting domain admits ONLY null/general — a
+        // specific-domain skill is never surfaced to an unclassified project.
+        if (sharedDomainFilterEnabled && skillDomain !== null && skillDomain !== "general" && skillDomain !== requestingDomain) {
+          sharedDomainFiltered += 1;
+          return;
+        }
         const room = asString(drawer.room || asObject(drawer.metadata).room || row.room);
         scopedNodes.push({
           node_id: c.id,
@@ -1594,6 +1615,18 @@ export async function expandScopedRetrieval(
             drawers_scanned: sharedScanReport.drawers_scanned,
             targets_admitted: scopedNodes.filter((n) => n.via === "shared").length,
             truncated: sharedScanReport.truncated,
+            // Phase 12 envelope honesty: state what the domain filter did. Present only
+            // when the client supports getClosetDomain; otherwise pre-Phase-12 output.
+            ...(sharedDomainFilterEnabled
+              ? {
+                  domain_filter: {
+                    enabled: true,
+                    requesting_domain: requestingDomain || null,
+                    matched: scopedNodes.filter((n) => n.via === "shared").length,
+                    filtered: sharedDomainFiltered,
+                  },
+                }
+              : {}),
           }
         : undefined,
     },

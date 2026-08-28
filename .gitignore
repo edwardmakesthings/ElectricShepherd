@@ -227,4 +227,5 @@ __marimo__/
 /memory/
 node_modules/
 .serena/
+.ast-cache/
 .opencode/

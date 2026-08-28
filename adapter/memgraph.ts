@@ -25,6 +25,12 @@ export type ClosetSourceType = "transcript" | "doc" | "synthesis" | "skill";
 
 const CLOSET_SOURCE_TYPES: readonly string[] = ["transcript", "doc", "synthesis", "skill"];
 
+// Phase 12 (unified memory): the `es-domain` axis on skill drawers — a CLOSED
+// vocabulary so domain drift cannot become room-sprawl wearing different clothes.
+export type SkillDomain = "code" | "writing" | "infra" | "research" | "general";
+
+export const SKILL_DOMAINS: readonly string[] = ["code", "writing", "infra", "research", "general"];
+
 export type SourceDrawerWorkItem = {
   drawer_id: string;
   family_drawer_ids?: string[];
@@ -1054,6 +1060,32 @@ export class MemgraphClient {
       const values = this.uniqueFromFactsByDirection(this.parseKgFacts(result), "outgoing");
       for (const value of values) {
         if ((CLOSET_SOURCE_TYPES as readonly string[]).includes(value)) return value as ClosetSourceType;
+      }
+      return null;
+    } catch {
+      // non-fatal: a failed read reads as "unstamped", not an error
+      return null;
+    }
+  }
+
+  // ── Phase 12: es-domain axis (skill drawers only) ───────────────────────────
+  // `es-domain` records which project domain a skill belongs to. Written at skill
+  // creation (file_skill / promote_skill); read by procedural retrieval to filter
+  // shared-skill admission. Same one-hop read discipline as es-source-type.
+
+  /** Read a closet's es-domain. Returns null when unstamped, out-of-vocabulary, or on read failure. */
+  async getClosetDomain(closetId: string): Promise<SkillDomain | null> {
+    try {
+      const result = await this.kgQuery({
+        entity: closetId,
+        direction: "outgoing",
+        predicate: "es-domain",
+        recurse: false,
+        max_depth: 1,
+      });
+      const values = this.uniqueFromFactsByDirection(this.parseKgFacts(result), "outgoing");
+      for (const value of values) {
+        if ((SKILL_DOMAINS as readonly string[]).includes(value)) return value as SkillDomain;
       }
       return null;
     } catch {
