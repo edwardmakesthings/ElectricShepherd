@@ -1,6 +1,4 @@
-// @ts-expect-error loader package does not include node typings
 import { existsSync, readFileSync } from "node:fs";
-// @ts-expect-error loader package does not include node typings
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 export type MemcoreSourceType = "direct" | "store";

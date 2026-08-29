@@ -1,12 +1,8 @@
 import { createMemgraphClient, type SourceDrawerWorkItem } from "../adapter/memgraph.ts";
 import { MCPHttpClient, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-client.ts";
-// @ts-expect-error runtime script package does not include node typings
 import { execFileSync } from "node:child_process";
-// @ts-expect-error runtime script package does not include node typings
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-// @ts-expect-error runtime script package does not include node typings
 import { dirname, join, relative, resolve } from "node:path";
-// @ts-expect-error runtime script package does not include node typings
 import { fileURLToPath } from "node:url";
 import {
   runSynthesisConsolidation,
@@ -1090,7 +1086,7 @@ function factBullets(values: string[], max: number): string[] {
 // at `limit`. This replaces the raw per-drawer heuristic fallback for facts, which
 // has height 0 (never synthesized) and is the source of garbled mem-core bullets.
 async function fetchHighHeightFacts(
-  client: MemgraphClient,
+  client: ReturnType<typeof createMemgraphClient>,
   args: { wing: string; room: string; minHeight?: number; limit?: number },
 ): Promise<string[]> {
   const minHeight = Math.max(0, Number(args.minHeight) || 2);
@@ -1737,7 +1733,7 @@ async function main(): Promise<void> {
         moveErrors.push(
           ...moveResult.errors.map((entry) => ({
             drawer_id: entry.drawer_id,
-            phase,
+            phase: phase as "processed" | "failed",
             error: entry.error,
           })),
         );
@@ -1850,12 +1846,15 @@ async function main(): Promise<void> {
             limit: Math.min(50, Math.max(maxPending * 3, 12)),
           });
           const { matchRemindersForScope, renderPendingLines } = await import("../adapter/prospective.ts");
-          const matches = matchRemindersForScope(reminders, {
-            relScopes,
-            wing: consolidationOptions.targetWing,
-            room: consolidationOptions.targetRoom,
-            query: consolidation.query,
-          });
+          const matches = matchRemindersForScope(
+            reminders.map((reminder) => ({ ...reminder, status: String(reminder.status || "active") as "active" | "satisfied" | "expired" })),
+            {
+              relScopes,
+              wing: consolidationOptions.targetWing,
+              room: consolidationOptions.targetRoom,
+              query: consolidation.query,
+            },
+          );
           pendingReminderLines = renderPendingLines(matches, maxPending);
         }
       } catch (err) {

@@ -1845,10 +1845,6 @@ export async function expandScopedRetrieval(
           }
         : undefined,
     },
-    policy: {
-      enforced,
-      allowed_labels: allowedLabels,
-    },
     seeds: {
       query,
       raw_seed_ids: rawSeedIDs,

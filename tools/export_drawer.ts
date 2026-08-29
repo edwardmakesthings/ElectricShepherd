@@ -9,9 +9,7 @@ import {
 } from "../adapter/palace-tools.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
-// @ts-expect-error plugin runtime does not include node typings in this workspace
 import { mkdirSync, writeFileSync } from "node:fs";
-// @ts-expect-error plugin runtime does not include node typings in this workspace
 import { dirname, relative, resolve } from "node:path";
 
 declare const process: {

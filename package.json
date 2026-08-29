@@ -48,5 +48,9 @@
   },
   "dependencies": {
     "@opencode-ai/plugin": "1.17.8"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.0",
+    "typescript": "^7.0.2"
   }
 }

@@ -309,7 +309,8 @@ export default tool({
         }
 
         const moved = await applyMove();
-        if (!moved.ok) {
+        if (moved.ok === false) {
+          const moveError: string = moved.error;
           return {
             drawer_id: drawerID,
             ok: false,
@@ -319,8 +320,8 @@ export default tool({
             to_room: toRoom,
             via_bridge: needsBridge,
             bridge_wing: needsBridge ? bridgeWing : undefined,
-            error: moved.error,
-            error_kind: classifyErrorKind(moved.error),
+            error: moveError,
+            error_kind: classifyErrorKind(moveError),
           };
         }
 

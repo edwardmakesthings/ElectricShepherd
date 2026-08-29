@@ -1,8 +1,5 @@
-// @ts-expect-error runtime script package does not include node typings
 import { spawn } from "node:child_process";
-// @ts-expect-error runtime script package does not include node typings
 import { dirname, resolve } from "node:path";
-// @ts-expect-error runtime script package does not include node typings
 import { fileURLToPath } from "node:url";
 import { isTranscriptLikeRoom, parseTaxonomy } from "../adapter/palace-tools.ts";
 import { MCPHttpClient, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-client.ts";

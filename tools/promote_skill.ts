@@ -472,7 +472,7 @@ export async function findPromotionCandidates(args: {
   const sharedWing = String(args.sharedWing || DEFAULT_SHARED_WING).trim() || DEFAULT_SHARED_WING;
   const maxRooms = Math.max(1, Number(args.maxRooms) || 25);
 
-  let taxonomy: { wing: string; rooms: Record<string, number> }[];
+  let taxonomy: ReturnType<typeof parseTaxonomy>;
   try {
     taxonomy = parseTaxonomy(await args.call("get_taxonomy", {}));
   } catch (error) {
@@ -502,7 +502,7 @@ export async function findPromotionCandidates(args: {
     const wingEntry = taxonomy.find((entry) => entry.wing === wing);
     let room = SHARED_SKILLS_ROOM;
     try {
-      ({ room } = pickPurposeRoom(wingEntry?.rooms || [], SHARED_SKILLS_ROOM, SKILL_LIKE_STEMS));
+      ({ room } = pickPurposeRoom(wingEntry ? wingEntry.rooms : [], SHARED_SKILLS_ROOM, SKILL_LIKE_STEMS));
     } catch {
       // unreadable rooms — fall back to the canonical name
     }

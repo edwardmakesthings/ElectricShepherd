@@ -1,6 +1,4 @@
-// @ts-expect-error plugin runtime does not include node typings in this workspace
 import { readFileSync } from "node:fs";
-// @ts-expect-error plugin runtime does not include node typings in this workspace
 import { resolve } from "node:path";
 
 export type ErrorKind = "not_found" | "permission_denied" | "network" | "unknown";

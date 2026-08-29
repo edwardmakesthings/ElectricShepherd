@@ -17,11 +17,8 @@
  * holds.
  */
 
-// @ts-expect-error runtime script package does not include node typings
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-// @ts-expect-error runtime script package does not include node typings
 import { execFileSync } from "node:child_process";
-// @ts-expect-error runtime script package does not include node typings
 import { join } from "node:path";
 
 declare const process: { pid: number; env?: Record<string, string | undefined> };

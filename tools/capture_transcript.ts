@@ -1,14 +1,9 @@
 import { tool } from "@opencode-ai/plugin";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
-// @ts-expect-error plugin runtime does not include node typings in this workspace
 import { execFile } from "node:child_process";
-// @ts-expect-error plugin runtime does not include node typings in this workspace
 import { existsSync } from "node:fs";
-// @ts-expect-error plugin runtime does not include node typings in this workspace
 import { dirname, join, resolve } from "node:path";
-// @ts-expect-error plugin runtime does not include node typings in this workspace
 import { fileURLToPath } from "node:url";
-// @ts-expect-error plugin runtime does not include node typings in this workspace
 import { promisify } from "node:util";
 
 declare const process: {

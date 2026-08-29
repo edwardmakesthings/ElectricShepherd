@@ -13,6 +13,7 @@ import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
 
 declare const process: {
   env: Record<string, string | undefined>;
+  cwd(): string;
 };
 
 const DEFAULT_THRESHOLD = 12;
@@ -161,7 +162,7 @@ export default tool({
     // bypasses createPalaceClient entirely — keeps execute() hermetic for integration
     // tests, matching the runDocIngest({ call, ... }) convention every other tool test uses.
     const injectedCall =
-      typeof args.__call === "function" ? (args.__call as (name: string, payload: Record<string, unknown>) => Promise<unknown>) : null;
+      typeof (args as { __call?: unknown }).__call === "function" ? ((args as { __call: unknown }).__call as (name: string, payload: Record<string, unknown>) => Promise<unknown>) : null;
     let call: (name: string, payload: Record<string, unknown>) => Promise<unknown>;
     if (injectedCall) {
       call = injectedCall;
@@ -473,7 +474,8 @@ function clampNumber(value: unknown, fallback: number, min: number, max: number)
 }
 
 function thresholdReport(backlog: number) {
-  const runtimeConfig = loadRuntimeConfig({ cwd: process.cwd(), env: process.env });
+  const cwd = process.cwd();
+  const runtimeConfig = loadRuntimeConfig({ cwd, env: process.env as Record<string, string | undefined> });
   const raw = Number(runtimeConfig.valuesByPath.consolidation?.auto?.messageThreshold);
   const threshold = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_THRESHOLD;
   return {

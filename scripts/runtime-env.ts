@@ -1,8 +1,5 @@
-// @ts-expect-error runtime script package does not include node typings
 import { existsSync, readFileSync } from "node:fs";
-// @ts-expect-error runtime script package does not include node typings
 import { dirname, resolve } from "node:path";
-// @ts-expect-error runtime script package does not include node typings
 import { fileURLToPath } from "node:url";
 
 type RuntimeEnv = Record<string, string | undefined>;
