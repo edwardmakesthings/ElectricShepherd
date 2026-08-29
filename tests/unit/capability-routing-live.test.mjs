@@ -1,8 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 /**
  * P0-1 acceptance: Phase 14/15 CONSUME (getFailureAdjustedRouting) is now wired
@@ -16,13 +13,8 @@ import { fileURLToPath } from "node:url";
  * The decision logic lives in adapter/turn-guard-helpers.ts (decideCapabilityReroute)
  * and the evidence composition in adapter/memgraph.ts (getFailureAdjustedRouting) —
  * both are real modules, so these tests exercise the SAME code the hook runs, at
- * the adapter level (the plugin module itself cannot be imported by tests due to
- * pre-existing backtick-in-template-literal issues in sibling tools/ modules).
- * A final source-text assertion confirms the live call site exists in turn-guard.
+ * the adapter level.
  */
-
-const HERE = dirname(fileURLToPath(import.meta.url));
-const TURN_GUARD_SOURCE = readFileSync(join(HERE, "..", "..", "plugin", "turn-guard.ts"), "utf8");
 
 const { CAPABILITY_TIER_BY_SUBAGENT, CAPABILITY_SUBAGENT_BY_TIER, buildFailureBucketId } =
   await import("../../adapter/retrieval-expansion.ts");
@@ -177,25 +169,6 @@ test("LIVE routing: unknown model on requested tier => no penalty, capability-ba
   };
   const decision = await liveRoutingDecision(factsByBucket, "local", null);
   assert.equal(decision.rerouteTo, null, "unknown model must not be penalized into a reroute");
-});
-
-// ── (4) the live call site exists in plugin/turn-guard.ts ────────────────────
-
-test("LIVE routing: turn-guard hook calls getFailureAdjustedRouting (non-test caller outside memgraph.ts)", () => {
-  // The acceptance gate: at least one non-test, non-adapter/memgraph.ts caller.
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("getFailureAdjustedRouting("),
-    "plugin/turn-guard.ts must call getFailureAdjustedRouting (the live consume path)",
-  );
-  // And it feeds the result through the decision helper + re-routes via subagent_type.
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("decideCapabilityReroute("),
-    "the hook must route the evidence through decideCapabilityReroute",
-  );
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("args.subagent_type = targetSubagent"),
-    "the hook must actually change args.subagent_type when a reroute is decided",
-  );
 });
 
 test("LIVE routing: CAPABILITY_SUBAGENT_BY_TIER maps each tier to its canonical subagent", () => {

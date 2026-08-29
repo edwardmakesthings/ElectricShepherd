@@ -39,6 +39,7 @@ import { promisify } from "node:util"
 import { fileURLToPath } from "node:url"
 import {
   buildCommandExecutionPlan,
+  buildCalibrationEscalationNote,
   clipText,
   computeMemcoreSignature,
   computeToolSignature,
@@ -49,6 +50,9 @@ import {
   detectDeliberationSpiral,
   isDeliberationExemptPrompt,
   pruneAutoConsolidationTracking,
+  shouldFileWorkedExample,
+  shouldInjectWorkedExamples,
+  shouldSkipWorkedExampleByCooldown,
 } from "../adapter/turn-guard-helpers.ts"
 import type { AutoConsolidationTrigger, MemcoreInjectionRecord } from "../adapter/turn-guard-helpers.ts"
 import { loadPackagedAssets, mergeWithoutOverride, loadInstructionPaths, dedupeAppendInstructions } from "../adapter/asset-loader.ts"
@@ -1453,24 +1457,30 @@ export const TurnGuard = async ({ client, directory }: any) => {
     prompt: string
     output: string
   }): Promise<void> {
-    if (!workedExampleFilingEnabled) return
     const { sid, subagentType, description, prompt, output } = args
 
-    // Gate 1: only target subagent types.
-    if (!WORKED_EXAMPLE_FILE_AGENT_TYPES.has(subagentType)) return
-
-    // Gate 2: success-only — the caller passes output only on successful completion.
+    const isTargetSubagentType = WORKED_EXAMPLE_FILE_AGENT_TYPES.has(subagentType)
+    if (
+      !shouldFileWorkedExample({
+        enabled: workedExampleFilingEnabled,
+        isTargetSubagentType,
+        output,
+        minSubstantiveChars: WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS,
+      })
+    ) {
+      return
+    }
     const trimmedOutput = String(output || "").trim()
-    if (trimmedOutput.length < WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS) return
 
     // Gate 3: in-session near-duplicate suppression by shape key.
     const shape = extractWorkedExampleShape(`${description}\n${prompt}`)
     const filedBySession = workedExampleFiledByShape.get(sid) ?? new Map<string, number>()
+    const nowMs = Date.now()
     const lastFiledAt = Number(filedBySession.get(shape.shapeKey) ?? 0)
-    if (lastFiledAt > 0 && Date.now() - lastFiledAt < 30 * 60 * 1000) {
+    if (shouldSkipWorkedExampleByCooldown({ nowMs, lastFiledAtMs: lastFiledAt, cooldownMs: 30 * 60 * 1000 })) {
       console.log(
         `[turn-guard] worked-example filing: skipping near-duplicate shape ${shape.shapeKey} ` +
-          `(filed ${Math.round((Date.now() - lastFiledAt) / 1000)}s ago) sid=${sid}`,
+          `(filed ${Math.round((nowMs - lastFiledAt) / 1000)}s ago) sid=${sid}`,
       )
       return
     }
@@ -1510,7 +1520,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
       }
 
       // Record the filing for in-session dedup.
-      filedBySession.set(shape.shapeKey, Date.now())
+      filedBySession.set(shape.shapeKey, nowMs)
       workedExampleFiledByShape.set(sid, filedBySession)
 
       console.log(
@@ -3530,22 +3540,22 @@ export const TurnGuard = async ({ client, directory }: any) => {
         // hiccup must never block or alter a delegation.
         const demonstrationHeading =
           "## Demonstrations: how this class of problem was solved in this codebase before"
-        const hasPrompt = Boolean(prompt)
-        const promptAlreadyAugmented = hasPrompt && prompt.includes(demonstrationHeading)
-        const shouldInjectWorkedExamples =
-          workedExampleInjectionEnabled &&
-          subagentType === "implement-local" &&
-          hasPrompt &&
-          !promptAlreadyAugmented
-        if (!shouldInjectWorkedExamples) {
+        const injectDecision = shouldInjectWorkedExamples({
+          enabled: workedExampleInjectionEnabled,
+          subagentType,
+          prompt,
+          heading: demonstrationHeading,
+        })
+        const hasPrompt = injectDecision.hasPrompt
+        if (!injectDecision.shouldInject) {
           console.log(
             `[turn-guard] worked-example injection: skipped sid=${sid} ` +
               `(enabled=${workedExampleInjectionEnabled}, subagentType=${subagentType || ""}, ` +
-              `hasPrompt=${hasPrompt}, promptAlreadyAugmented=${promptAlreadyAugmented})`,
+              `hasPrompt=${hasPrompt}, promptAlreadyAugmented=${injectDecision.promptAlreadyAugmented})`,
           )
         }
 
-        if (shouldInjectWorkedExamples) {
+        if (injectDecision.shouldInject) {
           try {
             const palaceClient = await getWorkedExampleClient()
             if (palaceClient) {
@@ -3738,13 +3748,13 @@ export const TurnGuard = async ({ client, directory }: any) => {
                   minSample: CALIBRATION_OVERRIDE_MIN_SAMPLES,
                 })
                 if (decision.action === "escalate") {
-                  const noteBlock =
-                    `\n\n---\n${calibrationNoteHeading}\n\n` +
-                    `Calibration data for ${effectiveModel} on this class of task shows that ` +
-                    `"${reportedConfidence}" self-reports are measured unreliable: only ` +
-                    `${Math.round((decision.hitRate ?? 0) * 100)}% of units reporting this level were actually accepted ` +
-                    `(across ${decision.total} recorded outcomes). Do NOT take your own confidence at face value - ` +
-                    `verify the result before acting on it, and state what you verified.\n---\n`
+                  const noteBlock = buildCalibrationEscalationNote({
+                    heading: calibrationNoteHeading,
+                    modelId: effectiveModel,
+                    reportedConfidence,
+                    hitRate: decision.hitRate ?? 0,
+                    total: decision.total,
+                  })
                   args.prompt = `${args.prompt}${noteBlock}`
                   if (output?.args) output.args = args
                   if (input?.args) input.args = args

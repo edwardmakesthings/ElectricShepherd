@@ -344,3 +344,58 @@ export function decideCapabilityReroute(args: {
   // A concrete, sufficient recommendation for a DIFFERENT tier => re-route.
   return { rerouteTo: recommendation, reason: "evidence-reroute" }
 }
+
+export function shouldInjectWorkedExamples(args: {
+  enabled: boolean
+  subagentType: string | undefined | null
+  prompt: string | undefined | null
+  heading: string
+}): { shouldInject: boolean; hasPrompt: boolean; promptAlreadyAugmented: boolean } {
+  const text = typeof args.prompt === "string" ? args.prompt : ""
+  const hasPrompt = text.length > 0
+  const promptAlreadyAugmented = hasPrompt && text.includes(args.heading)
+  const shouldInject =
+    Boolean(args.enabled) &&
+    String(args.subagentType || "") === "implement-local" &&
+    hasPrompt &&
+    !promptAlreadyAugmented
+  return { shouldInject, hasPrompt, promptAlreadyAugmented }
+}
+
+export function shouldFileWorkedExample(args: {
+  enabled: boolean
+  isTargetSubagentType: boolean
+  output: string | undefined | null
+  minSubstantiveChars: number
+}): boolean {
+  if (!args.enabled) return false
+  if (!args.isTargetSubagentType) return false
+  const trimmedOutput = String(args.output || "").trim()
+  return trimmedOutput.length >= args.minSubstantiveChars
+}
+
+export function shouldSkipWorkedExampleByCooldown(args: {
+  nowMs: number
+  lastFiledAtMs: number
+  cooldownMs: number
+}): boolean {
+  if (args.lastFiledAtMs <= 0) return false
+  return args.nowMs - args.lastFiledAtMs < args.cooldownMs
+}
+
+export function buildCalibrationEscalationNote(args: {
+  heading: string
+  modelId: string
+  reportedConfidence: string
+  hitRate: number
+  total: number
+}): string {
+  return (
+    `\n\n---\n${args.heading}\n\n` +
+    `Calibration data for ${args.modelId} on this class of task shows that ` +
+    `"${args.reportedConfidence}" self-reports are measured unreliable: only ` +
+    `${Math.round(args.hitRate * 100)}% of units reporting this level were actually accepted ` +
+    `(across ${args.total} recorded outcomes). Do NOT take your own confidence at face value - ` +
+    `verify the result before acting on it, and state what you verified.\n---\n`
+  )
+}

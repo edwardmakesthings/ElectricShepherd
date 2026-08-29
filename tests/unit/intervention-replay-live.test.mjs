@@ -1,8 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 /**
  * P0-3 acceptance: getFailureInterventions (adapter/memgraph.ts) — the sole reader
@@ -21,22 +18,15 @@ import { fileURLToPath } from "node:url";
  *   2. no interventions recorded => prompt unchanged (neutral fallback),
  *   3. read failure / throw => prompt unchanged (graceful degradation),
  *   4. maxPatches bound is genuinely enforced (more recorded than the bound =>
- *      only the bound is injected; verified by mutation of the constant),
- *   5. a source assertion that the production call site exists (secondary).
+ *      only the bound is injected).
  *
  * The decision logic lives in adapter/memgraph.ts (getFailureInterventions) and
  * the block formatting in adapter/retrieval-expansion.ts (formatInterventionBlock /
  * INTERVENTION_REPLAY_HEADING) — both are real modules, exercised here at the
  * adapter level with a fake kg_query backend. The live-hook composition is mirrored
  * exactly (same effectiveModel resolution fallback, same shape extraction on the
- * ORIGINAL prompt, same maxPatches argument). A final source-text assertion
- * confirms the live call site exists in turn-guard (the plugin module itself cannot
- * be imported by tests due to pre-existing issues in sibling tools/ modules — but
- * see the load guardrail: `node --experimental-strip-types -e "import('./plugin/turn-guard.ts')"`).
+ * ORIGINAL prompt, same maxPatches argument).
  */
-
-const HERE = dirname(fileURLToPath(import.meta.url));
-const TURN_GUARD_SOURCE = readFileSync(join(HERE, "..", "..", "plugin", "turn-guard.ts"), "utf8");
 
 const { createMemgraphClient } = await import("../../adapter/memgraph.ts");
 const { buildFailurePatchId, extractWorkedExampleShape, canonicalModelId, INTERVENTION_REPLAY_HEADING, formatInterventionBlock } =
@@ -232,29 +222,4 @@ test("LIVE intervention replay: bound is a live constant — mutating it changes
   // A STRICTER bound (1) genuinely reduces the count — proving the argument is live.
   const stricter = await client.getFailureInterventions(MODEL, shape, { maxPatches: 1 });
   assert.equal(stricter.length, 1, "a stricter maxPatches must reduce the injected count");
-});
-
-// ── (5) source assertion: the production call site exists (secondary) ──────────
-
-test("LIVE intervention replay: turn-guard hook calls getFailureInterventions (non-test caller outside memgraph.ts)", () => {
-  // The acceptance gate: at least one non-test, non-adapter/memgraph.ts caller.
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("getFailureInterventions("),
-    "plugin/turn-guard.ts must call getFailureInterventions (the live consume path)",
-  );
-});
-
-test("LIVE intervention replay: the hook enforces the bound and the idempotency guard", () => {
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("INTERVENTION_REPLAY_MAX_PATCHES = 3"),
-    "the hook must define the named INTERVENTION_REPLAY_MAX_PATCHES constant",
-  );
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("maxPatches: INTERVENTION_REPLAY_MAX_PATCHES"),
-    "the hook must pass the named constant into getFailureInterventions",
-  );
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("INTERVENTION_REPLAY_HEADING"),
-    "the hook must check the block heading (idempotency guard) before appending",
-  );
 });

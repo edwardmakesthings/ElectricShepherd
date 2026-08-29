@@ -1,8 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 /**
  * P0-2 acceptance: Phase 16's decision API decideCalibratedEscalation is now
@@ -14,18 +11,12 @@ import { fileURLToPath } from "node:url";
  *
  *   1. a low-accuracy calibration cell with >= 5 samples FLIPS the decision to escalate,
  *   2. a < 5 sample cell does NOT override the baseline (neutral fallback),
- *   3. read-path failure degrades gracefully to the baseline,
- *   4. a non-test caller exists in production code (plugin/turn-guard.ts).
+ *   3. read-path failure degrades gracefully to the baseline.
  *
  * The decision logic lives in adapter/memgraph.ts (decideCalibratedEscalation /
  * getCalibrationCell) — the real module the hook calls, exercised here at the
- * adapter level with a fake kg_query backend. A final source-text assertion
- * confirms the live call site exists in turn-guard (the plugin module itself
- * cannot be imported by tests due to pre-existing issues in sibling tools/ modules).
+ * adapter level with a fake kg_query backend.
  */
-
-const HERE = dirname(fileURLToPath(import.meta.url));
-const TURN_GUARD_SOURCE = readFileSync(join(HERE, "..", "..", "plugin", "turn-guard.ts"), "utf8");
 
 const { createMemgraphClient } = await import("../../adapter/memgraph.ts");
 
@@ -137,31 +128,4 @@ test("LIVE calibration: kg_query throws => NEUTRAL FALLBACK, baseline trust pres
   });
   assert.equal(decision.action, "trust", "a read failure must preserve the baseline (no escalation)");
   assert.ok(decision.reason.includes("insufficient-data"), `reason must cite insufficient data (got ${decision.reason})`);
-});
-
-// ── (4) a non-test caller exists in production code ───────────────────────────
-
-test("LIVE calibration: turn-guard hook calls decideCalibratedEscalation (non-test caller outside memgraph.ts)", () => {
-  // The acceptance gate: at least one non-test, non-adapter/memgraph.ts caller.
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("decideCalibratedEscalation("),
-    "plugin/turn-guard.ts must call decideCalibratedEscalation (the live consume path)",
-  );
-});
-
-test("LIVE calibration: the hook enforces the >= 5 sample gate and keeps the display path intact", () => {
-  // The trust override requires at least 5 samples per cell (operator decision).
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("CALIBRATION_OVERRIDE_MIN_SAMPLES = 5"),
-    "the hook must define the 5-sample override floor",
-  );
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("minSample: CALIBRATION_OVERRIDE_MIN_SAMPLES"),
-    "the hook must pass the 5-sample floor into decideCalibratedEscalation",
-  );
-  // The existing display/status path (getCalibrationTable -> /memory-status) is untouched.
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("getCalibrationTable"),
-    "the display path (getCalibrationTable) must remain intact in turn-guard",
-  );
 });

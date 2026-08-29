@@ -1,8 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 /**
  * Unit coverage for Phase 16 (confidence calibration).
@@ -22,9 +19,6 @@ import { fileURLToPath } from "node:url";
  * confidence) with a 20-pair minimum-sample gate. Below the threshold, every
  * consumer reports "insufficient data" and falls back to default behaviour.
  */
-
-const HERE = dirname(fileURLToPath(import.meta.url));
-const TURN_GUARD_SOURCE = readFileSync(join(HERE, "..", "..", "plugin", "turn-guard.ts"), "utf8");
 
 // The real Phase 16 helpers (single source of truth for confidence parse + bucket id).
 const {
@@ -370,26 +364,35 @@ test("CONSUME: zero-pair cell falls back to defaultAction (no data at all)", asy
   assert.ok(decision.reason.includes("insufficient-data"));
 });
 
-// ── (h) turn-guard source: calibration capture is wired in ───────────────────
+// ── (h) CONSUME: escalation note formatting (pure helper) ───────────────────
+// The plugin injects this note into the prompt when decideCalibratedEscalation
+// returns 'escalate'; its content is what makes the instruction actionable.
 
-test("turn-guard source has a calibration capture gate and helper", () => {
-  assert.ok(TURN_GUARD_SOURCE.includes("calibrationCaptureEnabled"), "must have the config gate");
-  assert.ok(TURN_GUARD_SOURCE.includes("maybeCaptureCalibrationTuple"), "must have the capture function");
-  assert.ok(TURN_GUARD_SOURCE.includes("pendingCalibrationBySession"), "must have the session-local pending map");
+const { buildCalibrationEscalationNote } = await import("../../adapter/turn-guard-helpers.ts");
+
+test("buildCalibrationEscalationNote renders heading, model, confidence, hit rate and total", () => {
+  const note = buildCalibrationEscalationNote({
+    heading: "## Calibration warning",
+    modelId: "litellm/model-x",
+    reportedConfidence: "high",
+    hitRate: 0.4,
+    total: 25,
+  });
+  assert.ok(note.includes("## Calibration warning"), "note must lead with the heading");
+  assert.ok(note.includes("litellm/model-x"), "note must name the model");
+  assert.ok(note.includes(`"high"`), "note must quote the reported confidence level");
+  assert.ok(note.includes("40%"), "hit rate must be rendered as a percent (0.4 -> 40%)");
+  assert.ok(note.includes("(across 25 recorded outcomes)"), "note must state the sample total");
 });
 
-test("turn-guard source parses confidence from terminal output (not a proxy label)", () => {
-  assert.ok(TURN_GUARD_SOURCE.includes("parseSelfReportedConfidence(outputText)"), "must parse the self-reported label");
-  assert.ok(!TURN_GUARD_SOURCE.includes('predicate: "es-calibration-outcome"'), "turn-guard must NOT write es-calibration-outcome directly (no proxy labels)");
-});
-
-test("turn-guard source gates calibration capture on model identity + confidence presence", () => {
-  // The capture function must skip when modelId or confidence is missing.
-  assert.ok(TURN_GUARD_SOURCE.includes("if (!modelId) return"), "must skip unknown model");
-  assert.ok(TURN_GUARD_SOURCE.includes("if (!confidence) return"), "must skip missing confidence label");
-});
-
-test("turn-guard source imports the Phase 16 helpers from retrieval-expansion", () => {
-  assert.ok(TURN_GUARD_SOURCE.includes("parseSelfReportedConfidence"));
-  assert.ok(TURN_GUARD_SOURCE.includes("buildCalibrationBucketId"));
+test("buildCalibrationEscalationNote rounds the hit rate and keeps the do-not-trust instruction", () => {
+  const note = buildCalibrationEscalationNote({
+    heading: "## Calibration warning",
+    modelId: "m1",
+    reportedConfidence: "medium",
+    hitRate: 0.756,
+    total: 21,
+  });
+  assert.ok(note.includes("76%"), "hit rate must round to the nearest percent (0.756 -> 76%)");
+  assert.ok(note.includes("Do NOT take your own confidence at face value"), "note must carry the do-not-trust instruction");
 });

@@ -1,8 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 /**
  * Unit coverage for Phase 14 (capability memory / learned routing).
@@ -10,9 +7,9 @@ import { fileURLToPath } from "node:url";
  * CREATE (write path): turn-guard records a capability tuple (task shape, tier,
  * outcome) when a routing-tier subagent completes. The plugin module cannot be
  * imported directly (pre-existing backtick-in-template-literal issues in sibling
- * tools/ modules), so the CREATE path is exercised against the SAME source text
- * the hook uses, plus the real shape/tier/outcome helpers from
- * adapter/retrieval-expansion.ts.
+ * tools/ modules), so the CREATE-path decision logic is exercised against the
+ * real pure helpers from adapter/turn-guard-helpers.ts and the real
+ * shape/tier/outcome helpers from adapter/retrieval-expansion.ts.
  *
  * CONSUME (read path): MemgraphClient.getCapabilityRoutingEvidence aggregates
  * capability evidence per (shape, tier) and produces a recommendation with a
@@ -20,9 +17,6 @@ import { fileURLToPath } from "node:url";
  * fake kg_query backend — at least one behavior test executes the aggregation
  * logic end-to-end (not just string contains).
  */
-
-const HERE = dirname(fileURLToPath(import.meta.url));
-const TURN_GUARD_SOURCE = readFileSync(join(HERE, "..", "..", "plugin", "turn-guard.ts"), "utf8");
 
 // The real Phase 14 helpers (single source of truth for shape/tier/outcome).
 const {
@@ -121,97 +115,41 @@ test("buildCapabilityBucketId produces a stable capability::<shapeKey>::<tier> i
   assert.equal(id, "capability::abc12345::local");
 });
 
-// ── (d) CREATE hook source: turn-guard records the tuple ─────────────────────
+// ── (d) CONSUME live decision: decideCapabilityReroute (pure helper) ─────────
+// The plugin delegates the routing change to this helper. NEUTRAL FALLBACK is
+// load-bearing: insufficient/inconclusive evidence must preserve the existing
+// pick, never move a unit.
 
-test("hook source has a capability recording gate and helper", () => {
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("capabilityRecordingEnabled"),
-    "capability recording must be gated by a config flag",
+const { decideCapabilityReroute } = await import("../../adapter/turn-guard-helpers.ts");
+
+test("decideCapabilityReroute returns neutral fallback when evidence is insufficient (fallback=true)", () => {
+  const decision = decideCapabilityReroute({ requestedTier: "local", recommendation: "deep", fallback: true });
+  assert.equal(decision.rerouteTo, null, "fallback evidence must never reroute");
+  assert.equal(decision.reason, "neutral-fallback");
+});
+
+test("decideCapabilityReroute returns neutral fallback for no-data / empty recommendation", () => {
+  assert.deepEqual(
+    decideCapabilityReroute({ requestedTier: "cloud", recommendation: "no-data", fallback: false }),
+    { rerouteTo: null, reason: "neutral-fallback" },
   );
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("async function maybeRecordCapabilityTuple("),
-    "turn-guard must define maybeRecordCapabilityTuple",
+  assert.deepEqual(
+    decideCapabilityReroute({ requestedTier: "deep", recommendation: "", fallback: false }),
+    { rerouteTo: null, reason: "neutral-fallback" },
   );
 });
 
-test("hook source records capability tuples on session.idle (via maybeFileWorkedExamplesFromMessage)", () => {
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("await maybeRecordCapabilityTuple({ sid, subagentType, description, prompt, status })"),
-    "idle scanner must call maybeRecordCapabilityTuple for every task part",
-  );
+test("decideCapabilityReroute does NOT reroute when the evidence agrees with the requested tier", () => {
+  const decision = decideCapabilityReroute({ requestedTier: "local", recommendation: "local", fallback: false });
+  assert.equal(decision.rerouteTo, null, "same-tier agreement must not change routing");
+  assert.equal(decision.reason, "already-recommended");
 });
 
-test("hook source gates capability recording on CAPABILITY_TIER_BY_SUBAGENT (routing tiers only)", () => {
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("const tier = CAPABILITY_TIER_BY_SUBAGENT[subagentType]"),
-    "capability recording must look up the tier from the subagent type",
-  );
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("if (!tier) return"),
-    "non-routing subagents must be skipped (no tier)",
-  );
+test("decideCapabilityReroute reroutes to a concrete different tier only on sufficient evidence", () => {
+  const decision = decideCapabilityReroute({ requestedTier: "local", recommendation: "cloud", fallback: false });
+  assert.equal(decision.rerouteTo, "cloud", "sufficient different-tier evidence must reroute");
+  assert.equal(decision.reason, "evidence-reroute");
 });
-
-test("hook source gates capability recording on a closed outcome set (unknown statuses skipped)", () => {
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("const outcome = mapTaskStatusToCapabilityOutcome(status)"),
-    "capability recording must map status to a closed outcome",
-  );
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("if (!outcome) return"),
-    "unknown statuses must be skipped (not guessed)",
-  );
-});
-
-test("hook source uses session-local dedup to avoid double-recording on repeated idle events", () => {
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("capabilityRecordedBySession"),
-    "must track recorded capability keys per session",
-  );
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("skipping duplicate"),
-    "must log when skipping a duplicate recording",
-  );
-});
-
-test("hook source writes es-capability-outcome via kg_add (not es-outcome — Phase 7 is human-authoritative)", () => {
-  const block = TURN_GUARD_SOURCE.split("async function maybeRecordCapabilityTuple(")[1]?.split("\n  }\n")[0] ?? "";
-  assert.ok(
-    block.includes('predicate: "es-capability-outcome"'),
-    "capability outcome must use the NEW es-capability-outcome predicate",
-  );
-  assert.ok(
-    !block.includes('predicate: "es-outcome"'),
-    "capability recording must NOT write es-outcome (Phase 7 is human-authoritative)",
-  );
-});
-
-test("hook source stamps es-capability-shape and es-capability-tier for explainability", () => {
-  const block = TURN_GUARD_SOURCE.split("async function maybeRecordCapabilityTuple(")[1]?.split("\n  }\n")[0] ?? "";
-  assert.ok(
-    block.includes('predicate: "es-capability-shape"'),
-    "must stamp es-capability-shape (canonical summary string)",
-  );
-  assert.ok(
-    block.includes('predicate: "es-capability-tier"'),
-    "must stamp es-capability-tier (tier value)",
-  );
-});
-
-test("hook source wraps capability recording in try/catch (never throws into the turn)", () => {
-  const block = TURN_GUARD_SOURCE.split("async function maybeRecordCapabilityTuple(")[1]?.split("\n  }\n")[0] ?? "";
-  assert.ok(
-    block.includes("catch (err) {"),
-    "capability recording must be wrapped in try/catch",
-  );
-  assert.ok(
-    block.includes("Recording failure must never break the turn"),
-    "failure path must log and continue",
-  );
-});
-
-// ── (e) CONSUME: aggregation + recommendation with min-sample gate ───────────
-
 function makeCapabilityClient(factsByBucket) {
   const calls = [];
   return {

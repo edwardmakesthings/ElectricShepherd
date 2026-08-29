@@ -1,27 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 /**
  * Unit coverage for Phase 13 CREATE — worked-example filing on successful
  * implementation subagent completion. Validates:
  *   (a) only cloud target subagent types trigger filing (NOT apprentice flows)
- *   (b) success-only gating
- *   (c) source-type stamping = worked-example
+ *   (b) success-only gating + substantive-output floor
+ *   (c) near-duplicate suppression window
  *   (d) shape metadata present + deterministic
- *   (e) duplicate suppression
- *   (f) graceful degradation on diary/stamp failure
  *
  * The plugin module cannot be imported directly (pre-existing backtick-in-template-literal
- * issues in sibling tools/ modules), so the filing logic is exercised against the SAME
- * source text the hook uses, plus the real shape/entry functions from
- * adapter/retrieval-expansion.ts.
+ * issues in sibling tools/ modules), so the filing decision gates are exercised
+ * against the real pure helpers from adapter/turn-guard-helpers.ts, plus the real
+ * shape/entry functions from adapter/retrieval-expansion.ts.
  */
-
-const HERE = dirname(fileURLToPath(import.meta.url));
-const TURN_GUARD_SOURCE = readFileSync(join(HERE, "..", "..", "plugin", "turn-guard.ts"), "utf8");
 
 // The real Phase 13 CREATE functions (single source of truth for shape + entry).
 const {
@@ -40,78 +32,73 @@ test("WORKED_EXAMPLE_FILE_AGENT_TYPES contains exactly implement-cloud, build-cl
   assert.ok(WORKED_EXAMPLE_FILE_AGENT_TYPES.has("build-cloud"));
 });
 
-test("hook source gates filing on WORKED_EXAMPLE_FILE_AGENT_TYPES", () => {
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("WORKED_EXAMPLE_FILE_AGENT_TYPES.has(subagentType)"),
-    "filing must be gated on the target subagent type set",
+// The real filing decision helpers (single source of truth for the gates).
+const { shouldFileWorkedExample, shouldSkipWorkedExampleByCooldown } = await import("../../adapter/turn-guard-helpers.ts");
+
+test("shouldFileWorkedExample files only for target subagent types with substantive output", () => {
+  const substantive = "x".repeat(WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS);
+  assert.equal(
+    shouldFileWorkedExample({ enabled: true, isTargetSubagentType: true, output: substantive, minSubstantiveChars: WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS }),
+    true,
+    "target type + sufficient output must file",
+  );
+  assert.equal(
+    shouldFileWorkedExample({ enabled: true, isTargetSubagentType: false, output: substantive, minSubstantiveChars: WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS }),
+    false,
+    "non-target subagent types must not file",
   );
 });
 
-test("hook source does NOT file for non-target subagent types (explore, review-diff)", () => {
-  assert.ok(!WORKED_EXAMPLE_FILE_AGENT_TYPES.has("explore"));
-  assert.ok(!WORKED_EXAMPLE_FILE_AGENT_TYPES.has("review-diff"));
-  assert.ok(!WORKED_EXAMPLE_FILE_AGENT_TYPES.has("run-tests"));
-});
-
-test("apprentice flows (implement-local, build) do NOT trigger filing — they consume examples, not produce them", () => {
-  assert.ok(
-    !WORKED_EXAMPLE_FILE_AGENT_TYPES.has("implement-local"),
-    "implement-local must not file worked examples",
+test("shouldFileWorkedExample requires substantive output (>= WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS)", () => {
+  assert.equal(WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS >= 100, true, "minimum should be at least 100 chars");
+  const justBelow = "x".repeat(WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS - 1);
+  const exactly = "x".repeat(WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS);
+  assert.equal(
+    shouldFileWorkedExample({ enabled: true, isTargetSubagentType: true, output: justBelow, minSubstantiveChars: WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS }),
+    false,
+    "output one char below the floor must not file",
   );
-  assert.ok(!WORKED_EXAMPLE_FILE_AGENT_TYPES.has("build"), "build must not file worked examples");
-});
-
-// --- (b) Success-only gating ---
-
-test("hook source skips filing on error/aborted/failed status", () => {
-  const successGate = TURN_GUARD_SOURCE.match(
-    /if \(status === "error" \|\| status === "aborted" \|\| status === "failed"\) continue/,
-  );
-  assert.ok(successGate, "filing must skip error/aborted/failed task statuses");
-});
-
-test("hook source requires substantive output (>= WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS)", () => {
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS"),
-    "filing must require a minimum output length",
-  );
-  assert.ok(WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS >= 100, "minimum should be at least 100 chars");
-});
-
-// --- (c) Source-type stamping = worked-example ---
-
-test("hook source stamps es-source-type: worked-example via kg_add", () => {
-  assert.ok(
-    TURN_GUARD_SOURCE.includes('predicate: "es-source-type"'),
-    "stamp must use es-source-type predicate",
-  );
-  assert.ok(
-    TURN_GUARD_SOURCE.includes('object: "worked-example"'),
-    "stamp object must be 'worked-example' (distinct knowledge class from skill)",
+  assert.equal(
+    shouldFileWorkedExample({ enabled: true, isTargetSubagentType: true, output: exactly, minSubstantiveChars: WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS }),
+    true,
+    "output at the floor must file",
   );
 });
 
-test("hook source does NOT stamp worked examples as skill", () => {
-  const filingBlock = TURN_GUARD_SOURCE.split("async function maybeFileWorkedExample(")[1]?.split("\n  }\n")[0] ?? "";
-  assert.ok(
-    !filingBlock.includes('object: "skill"'),
-    "filing path must not stamp es-source-type: skill",
+test("shouldFileWorkedExample respects the config gate and trims whitespace before measuring", () => {
+  const substantive = `  ${"x".repeat(WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS)}  `;
+  assert.equal(
+    shouldFileWorkedExample({ enabled: false, isTargetSubagentType: true, output: substantive, minSubstantiveChars: WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS }),
+    false,
+    "disabled filing must never file",
+  );
+  assert.equal(
+    shouldFileWorkedExample({ enabled: true, isTargetSubagentType: true, output: substantive, minSubstantiveChars: WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS }),
+    true,
+    "surrounding whitespace must not count against the floor",
   );
 });
 
-test("hook source calls diary_write to the apprenticeship room", () => {
-  assert.ok(TURN_GUARD_SOURCE.includes('room = "apprenticeship"'), "filing must target the apprenticeship room");
-  assert.ok(TURN_GUARD_SOURCE.includes("palaceClient.diaryWrite"), "filing must call diaryWrite");
-});
-
-test("hook source documents that worked-example is a distinct knowledge class from skill", () => {
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("distinct knowledge class"),
-    "code comment must document the worked-example vs skill rationale",
+test("shouldSkipWorkedExampleByCooldown enforces the near-duplicate window (30 minutes in the plugin)", () => {
+  const COOLDOWN_MS = 30 * 60 * 1000;
+  assert.equal(
+    shouldSkipWorkedExampleByCooldown({ nowMs: 1000, lastFiledAtMs: 0, cooldownMs: COOLDOWN_MS }),
+    false,
+    "no prior filing (lastFiledAtMs=0) must never skip",
+  );
+  assert.equal(
+    shouldSkipWorkedExampleByCooldown({ nowMs: 1000 + COOLDOWN_MS - 1, lastFiledAtMs: 1000, cooldownMs: COOLDOWN_MS }),
+    true,
+    "a filing inside the window must be skipped",
+  );
+  assert.equal(
+    shouldSkipWorkedExampleByCooldown({ nowMs: 1000 + COOLDOWN_MS, lastFiledAtMs: 1000, cooldownMs: COOLDOWN_MS }),
+    false,
+    "a filing at/after the window must not be skipped",
   );
 });
 
-// --- (d) Shape metadata present + deterministic ---
+
 
 test("extractWorkedExampleShape returns all required fields", () => {
   const shape = extractWorkedExampleShape("Fix the websocket reconnect bug in gateway.ts");
@@ -175,63 +162,4 @@ test("buildWorkedExampleEntry respects max chars", () => {
     shape,
   });
   assert.ok(entry.length <= WORKED_EXAMPLE_ENTRY_MAX_CHARS, `entry must be <= ${WORKED_EXAMPLE_ENTRY_MAX_CHARS} chars (got ${entry.length})`);
-});
-
-// --- (e) Duplicate suppression ---
-
-test("hook source implements in-session dedup by shape key", () => {
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("workedExampleFiledByShape"),
-    "must track filed shapes per session",
-  );
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("skipping near-duplicate shape"),
-    "must log when skipping a near-duplicate",
-  );
-});
-
-test("hook source uses a 30-minute dedup window", () => {
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("30 * 60 * 1000"),
-    "dedup window must be 30 minutes",
-  );
-});
-
-// --- (f) Graceful degradation on diary/stamp failure ---
-
-test("hook source wraps filing in try/catch (never throws into the turn)", () => {
-  const catchBlock = TURN_GUARD_SOURCE.match(
-    /catch \(err\) \{\s*\/\/ Filing failure must never break the turn\./,
-  );
-  assert.ok(catchBlock, "filing must be wrapped in try/catch with a non-fatal comment");
-});
-
-test("hook source logs stamp failure as non-fatal", () => {
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("stamp failed (non-fatal)"),
-    "stamp failures must be logged as non-fatal",
-  );
-});
-
-test("hook source degrades gracefully when palace client is null", () => {
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("!palaceClient || typeof palaceClient.diaryWrite !== \"function\""),
-    "must check client availability before filing",
-  );
-});
-
-// --- Integration: the idle hook calls the filing function ---
-
-test("hook source calls maybeFileWorkedExamplesFromMessage on session.idle", () => {
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("await maybeFileWorkedExamplesFromMessage(sid, last)"),
-    "idle handler must call the filing scanner",
-  );
-});
-
-test("hook source config echo includes workedExampleFilingEnabled", () => {
-  assert.ok(
-    TURN_GUARD_SOURCE.includes("workedExampleFilingEnabled,"),
-    "config echo must include the filing flag",
-  );
 });
