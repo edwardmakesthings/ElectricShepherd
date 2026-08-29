@@ -113,6 +113,13 @@ export type RankedScopedNode = {
   // deprioritisation term in computeNodeScore), so a flagged node is both labelled
   // and lowered — penalised, never filtered out.
   stale?: { value: string };
+  // Phase 10 (unified memory): provenance marker for shared-wing skills that carry an
+  // outgoing `promoted-from` edge (written by tools/promote_skill.ts at promotion).
+  // Present ONLY when the reader is available AND the read returns at least one origin
+  // — unstamped/unpromoted skills and clients without getPromotedFrom keep their nodes
+  // byte-identical to pre-P2-1 output. Metadata only: it never feeds computeNodeScore,
+  // admission, or ranking in any way.
+  promoted_from?: string[];
 };
 
 
@@ -188,6 +195,16 @@ export type RetrievalExpansionResult = {
       drawers_scanned: number;
       targets_admitted: number;
       truncated: boolean;
+      // P2-1: envelope honesty for the promoted-from provenance read. Present ONLY when
+      // the client supports getPromotedFrom AND at least one admitted shared skill was
+      // checked — clients without the capability (and pools with no admitted shared
+      // skills) keep their envelopes byte-identical to pre-P2-1 output. Metadata only:
+      // it does not change admission, ranking, or any score.
+      promoted_from?: {
+        enabled: boolean;
+        checked: number;
+        with_origin: number;
+      };
     };
   };
   seeds: {
@@ -1543,8 +1560,13 @@ export async function expandScopedRetrieval(
   // Phase 12: domain filter. Capability-gated like every expansion — clients without
   // getClosetDomain degrade to pre-Phase-12 behavior (no filtering, zero extra calls).
   const sharedDomainFilterEnabled = typeof client.getClosetDomain === "function";
+  // P2-1: promoted-from provenance reader. Capability-gated like every expansion —
+  // clients without getPromotedFrom degrade to pre-P2-1 behavior with zero extra calls.
+  const promotedFromEnabled = typeof client.getPromotedFrom === "function";
   const requestingDomain = String(options.domain || "").trim();
   let sharedSkillIds: string[] = [];
+  let sharedPromotedChecked = 0; // admitted shared skills the reader was called for
+  let sharedPromotedWithOrigin = 0; // of those, how many returned at least one origin
   let sharedScanReport: { wing: string; room: string; drawers_scanned: number; truncated: boolean } | undefined;
   let sharedDomainFiltered = 0; // skill-eligible candidates dropped by the domain filter
   if (sharedWing && typeof client.listDrawers === "function" && typeof client.getClosetSourceType === "function") {
@@ -1585,10 +1607,15 @@ export async function expandScopedRetrieval(
           // Phase 12: one extra one-hop read per candidate, same cost profile as the
           // source-type read above. Read failures degrade to null (unstamped → admitted).
           const domainP = sharedDomainFilterEnabled ? client.getClosetDomain(c.id).catch(() => null) : Promise.resolve(null);
-          return Promise.all([drawerP, typeP, domainP]);
+          // P2-1: promoted-from provenance for a (shared) skill candidate. Same cost
+          // profile as the source-type read above; read failures degrade to "no origin"
+          // (empty list), matching getConcerns' discipline. Metadata only — never feeds
+          // admission, scoring, or ranking.
+          const promotedP = promotedFromEnabled ? client.getPromotedFrom(c.id).catch(() => ({ node_ids: [] as string[] })) : Promise.resolve({ node_ids: [] as string[] });
+          return Promise.all([drawerP, typeP, domainP, promotedP]);
         }),
       );
-      results.forEach(([drawerRaw, sourceType, skillDomain], i) => {
+      results.forEach(([drawerRaw, sourceType, skillDomain, promotedRes], i) => {
         const c = fresh[i];
         if (sourceType !== "skill") return; // hard check: only skill-stamped drawers qualify
         const drawer = asObject(drawerRaw);
@@ -1617,8 +1644,16 @@ export async function expandScopedRetrieval(
           score: 0,
           selected: false,
           via: "shared",
+          // P2-1: provenance metadata — the originating project skill drawer(s) this
+          // shared copy was promoted from. Absent when the reader is unavailable or
+          // returned nothing (byte-identical to pre-P2-1 nodes).
+          ...(promotedFromEnabled && promotedRes.node_ids.length > 0 ? { promoted_from: [...promotedRes.node_ids] } : {}),
         });
         sharedSkillIds.push(c.id);
+        if (promotedFromEnabled) {
+          sharedPromotedChecked += 1;
+          if (promotedRes.node_ids.length > 0) sharedPromotedWithOrigin += 1;
+        }
       });
     }
   }
@@ -1839,6 +1874,18 @@ export async function expandScopedRetrieval(
                     requesting_domain: requestingDomain || null,
                     matched: scopedNodes.filter((n) => n.via === "shared").length,
                     filtered: sharedDomainFiltered,
+                  },
+                }
+              : {}),
+            // P2-1 envelope honesty: state what the promoted-from provenance read did.
+            // Present only when the capability exists AND at least one admitted shared
+            // skill was checked — otherwise pre-P2-1 output (no new field).
+            ...(promotedFromEnabled && sharedPromotedChecked > 0
+              ? {
+                  promoted_from: {
+                    enabled: true,
+                    checked: sharedPromotedChecked,
+                    with_origin: sharedPromotedWithOrigin,
                   },
                 }
               : {}),

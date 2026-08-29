@@ -1776,30 +1776,6 @@ export class MemgraphClient {
   static readonly CALIBRATION_CONFIDENCE_VALUES: readonly string[] = ["high", "medium", "low"];
 
   /**
-   * Phase 16 CREATE: record ONE calibration tuple edge on a (model, shape, confidence)
-   * bucket. Accumulation — never invalidates or overwrites existing edges. `validFrom`
-   * timestamps the edge so consumers can window recent history. Throws on an invalid
-   * outcome value: the axis is closed to exactly accept | revise | failed | unused
-   * (the same set as es-outcome — the ground truth, not a proxy).
-   */
-  async recordCalibrationTuple(bucketId: string, outcome: string, validFrom?: string): Promise<void> {
-    const id = this.asString(bucketId).trim();
-    if (!id) throw new Error("recordCalibrationTuple: bucketId is required");
-    if (!(MemgraphClient.OUTCOME_VALUES as readonly string[]).includes(outcome)) {
-      throw new Error(
-        `recordCalibrationTuple: invalid outcome "${outcome}" — must be one of ${MemgraphClient.OUTCOME_VALUES.join(" | ")}`,
-      );
-    }
-    await this.kgAdd({
-      subject: id,
-      predicate: MemgraphClient.CALIBRATION_OUTCOME_PREDICATE,
-      object: outcome,
-      valid_from: validFrom,
-      source_closet: id,
-    });
-  }
-
-  /**
    * Phase 16 CONSUME: read one calibration cell — the (model, shapeKey, confidence)
    * bucket's outcome counts plus hit rate. One one-hop outgoing kg_query on
    * es-calibration-outcome. Read failures degrade to zero counts (neutral): a failed

@@ -20,7 +20,11 @@ import { expandScopedRetrieval } from "../../adapter/retrieval-expansion.ts";
  *   6. envelope honesty: shared_skills_expansion reports scanned/admitted/truncated;
  *   7. Phase 12 es-domain filtering: a code request admits code + general, excludes
  *      writing; an unknown requester admits only null/general; unstamped legacy skills
- *      stay admissible; a client without getClosetDomain degrades to no filtering.
+ *      stay admissible; a client without getClosetDomain degrades to no filtering;
+ *   8. P2-1 promoted-from provenance read: the reader is called for admitted shared
+ *      skills on procedural intent and its result rides into the node metadata +
+ *      envelope WITHOUT changing ranking; non-procedural intents, other pool nodes, and
+ *      clients without getPromotedFrom never call it (degrade to pre-P2-1 output).
  */
 
 const BASE_OPTIONS = {
@@ -47,7 +51,7 @@ const SKILL_CODE = { drawer_id: "skill-code", wing: SHARED_WING, room: "skills",
 const SKILL_WRITING = { drawer_id: "skill-writing", wing: SHARED_WING, room: "skills", desc: "A writing-domain skill" };
 const SKILL_GENERAL = { drawer_id: "skill-general", wing: SHARED_WING, room: "skills", desc: "A general-domain skill" };
 
-function makeClient({ sourceTypes = {}, sharedDrawers = [], domains = {}, callTracker } = {}) {
+function makeClient({ sourceTypes = {}, sharedDrawers = [], domains = {}, callTracker, promotedFrom } = {}) {
   const client = {
     getHallPolicy: async () => ({}),
     search: async () => ({ results: [] }),
@@ -59,6 +63,10 @@ function makeClient({ sourceTypes = {}, sharedDrawers = [], domains = {}, callTr
     getClosetSourceType: async (id) => sourceTypes[id] ?? null,
     // Phase 12: es-domain reader. Absent id = unstamped legacy skill (null).
     getClosetDomain: async (id) => domains[id] ?? null,
+    // P2-1: promoted-from provenance reader (shared skill -> origin project skill).
+    // Only present when the fixture opts in — its absence simulates a client without
+    // the capability. Absent id = no origin edge.
+    ...(promotedFrom ? { getPromotedFrom: async (id) => { if (callTracker) callTracker.push({ name: "getPromotedFrom", id }); return { node_ids: promotedFrom[id] ?? [], count: (promotedFrom[id] ?? []).length }; } } : {}),
     getDrawer: async ({ drawer_id }) => {
       const row = sharedDrawers.find((d) => d.drawer_id === drawer_id);
       return row ? { ...row } : {};
@@ -299,4 +307,141 @@ test("envelope reports truncated when the shared room exceeds one page", async (
   assert.ok(result.filters.shared_skills_expansion, "envelope must report the scan");
   assert.equal(result.filters.shared_skills_expansion.truncated, true, "51 drawers > 50 page size = truncated");
   assert.equal(result.filters.shared_skills_expansion.drawers_scanned, 50, "only one bounded page is scanned");
+});
+
+// ── P2-1: promoted-from provenance read on the shared-skill admission path ───────
+// The reader (getPromotedFrom) must be called for admitted shared skills on procedural
+// intent and its result must ride into node metadata + envelope WITHOUT changing
+// ranking. It is not required anywhere else: non-procedural intents, other pool nodes,
+// and clients without the capability never call it.
+
+test("P2-1: getPromotedFrom is called for admitted shared skills and origin rides into node metadata", async () => {
+  const calls = [];
+  const client = makeClient({
+    sourceTypes: { "local-synth": "synthesis", "shared-skill-1": "skill" },
+    sharedDrawers: [SHARED_SKILL],
+    callTracker: calls,
+    promotedFrom: { "shared-skill-1": ["drawer_projA_skills_origin"] },
+  });
+
+  const result = await expandScopedRetrieval(client, { ...BASE_OPTIONS, intent: "procedural", shared_wing: SHARED_WING });
+  const byId = Object.fromEntries(result.ranked_nodes.map((n) => [n.node_id, n]));
+
+  // The reader was called exactly once — for the admitted shared skill.
+  const promotedCalls = calls.filter((c) => c.name === "getPromotedFrom");
+  assert.equal(promotedCalls.length, 1, `getPromotedFrom must be called once for the admitted shared skill: ${JSON.stringify(calls)}`);
+  assert.equal(promotedCalls[0].id, "shared-skill-1");
+
+  // The origin rides into the node as metadata.
+  assert.deepEqual(byId["shared-skill-1"].promoted_from, ["drawer_projA_skills_origin"]);
+
+  // Envelope honesty for the provenance read.
+  const pf = result.filters.shared_skills_expansion.promoted_from;
+  assert.ok(pf, "envelope must report the promoted-from read");
+  assert.equal(pf.enabled, true);
+  assert.equal(pf.checked, 1);
+  assert.equal(pf.with_origin, 1);
+});
+
+test("P2-1: promoted-from metadata does NOT change ranking or scores", async () => {
+  const withOrigin = makeClient({
+    sourceTypes: { "local-synth": "synthesis", "shared-skill-1": "skill" },
+    sharedDrawers: [SHARED_SKILL],
+    promotedFrom: { "shared-skill-1": ["drawer_projA_skills_origin"] },
+  });
+  const withoutOrigin = makeClient({
+    sourceTypes: { "local-synth": "synthesis", "shared-skill-1": "skill" },
+    sharedDrawers: [SHARED_SKILL],
+    promotedFrom: {}, // reader present but no edge
+  });
+
+  const a = await expandScopedRetrieval(withOrigin, { ...BASE_OPTIONS, intent: "procedural", shared_wing: SHARED_WING });
+  const b = await expandScopedRetrieval(withoutOrigin, { ...BASE_OPTIONS, intent: "procedural", shared_wing: SHARED_WING });
+
+  // Identical node set and order — provenance is metadata only.
+  assert.deepEqual(ids(a), ids(b), "ranking must be identical with or without a promoted-from origin");
+  const scoreA = Object.fromEntries(a.ranked_nodes.map((n) => [n.node_id, n.score]));
+  const scoreB = Object.fromEntries(b.ranked_nodes.map((n) => [n.node_id, n.score]));
+  assert.deepEqual(scoreA, scoreB, "scores must be identical with or without a promoted-from origin");
+
+  // The only difference is the metadata field + envelope sub-block.
+  const byIdA = Object.fromEntries(a.ranked_nodes.map((n) => [n.node_id, n]));
+  const byIdB = Object.fromEntries(b.ranked_nodes.map((n) => [n.node_id, n]));
+  assert.deepEqual(byIdA["shared-skill-1"].promoted_from, ["drawer_projA_skills_origin"]);
+  assert.equal(byIdB["shared-skill-1"].promoted_from, undefined);
+  const pfA = a.filters.shared_skills_expansion.promoted_from;
+  const pfB = b.filters.shared_skills_expansion.promoted_from;
+  assert.equal(pfA.checked, 1);
+  assert.equal(pfA.with_origin, 1);
+  assert.equal(pfB.checked, 1);
+  assert.equal(pfB.with_origin, 0, "the read was attempted but found no origin");
+});
+
+test("P2-1: non-procedural intents never call getPromotedFrom", async () => {
+  const calls = [];
+  const client = makeClient({
+    sourceTypes: { "local-synth": "synthesis", "shared-skill-1": "skill" },
+    sharedDrawers: [SHARED_SKILL],
+    callTracker: calls,
+    promotedFrom: { "shared-skill-1": ["drawer_projA_skills_origin"] },
+  });
+
+  await expandScopedRetrieval(client, { ...BASE_OPTIONS, intent: "factual", shared_wing: SHARED_WING });
+  assert.equal(calls.filter((c) => c.name === "getPromotedFrom").length, 0, "factual intent must make zero getPromotedFrom calls");
+});
+
+test("P2-1: getPromotedFrom is never called for non-shared pool nodes", async () => {
+  const calls = [];
+  // A skill in the LOCAL (scoped) pool — not a shared-wing admission. The reader must
+  // only run on the shared-skill admission path, not for arbitrary pool skills.
+  const client = makeClient({
+    sourceTypes: { "local-synth": "synthesis", "shared-skill-1": "skill" },
+    sharedDrawers: [SHARED_SKILL],
+    callTracker: calls,
+    promotedFrom: { "local-synth": ["drawer_projA_skills_origin"] },
+  });
+  // Force a local skill into the scoped pool.
+  client.listScopedDerivedDrawers = async () => ({
+    nodes: [...FIXTURE_NODES, { node_id: "local-skill", labels: [], wing: "projA", room: "unit-room", desc: "d", height: 1, retrieval_count: 0, connection_degree: 0, lineage_match_count: 0 }],
+  });
+
+  await expandScopedRetrieval(client, { ...BASE_OPTIONS, intent: "procedural", shared_wing: SHARED_WING });
+  const promotedCalls = calls.filter((c) => c.name === "getPromotedFrom");
+  assert.equal(promotedCalls.length, 1, `only the admitted shared skill may be checked: ${JSON.stringify(calls)}`);
+  assert.equal(promotedCalls[0].id, "shared-skill-1", "the reader must not be called for non-shared pool nodes");
+});
+
+test("P2-1: a client without getPromotedFrom degrades to pre-P2-1 output (no metadata, no envelope entry)", async () => {
+  const client = makeClient({
+    sourceTypes: { "local-synth": "synthesis", "shared-skill-1": "skill" },
+    sharedDrawers: [SHARED_SKILL],
+    // No promotedFrom fixture -> client has no getPromotedFrom method.
+  });
+
+  const result = await expandScopedRetrieval(client, { ...BASE_OPTIONS, intent: "procedural", shared_wing: SHARED_WING });
+  const byId = Object.fromEntries(result.ranked_nodes.map((n) => [n.node_id, n]));
+
+  assert.ok(byId["shared-skill-1"], "the skill is still admitted without the reader");
+  assert.equal(byId["shared-skill-1"].promoted_from, undefined, "no promoted_from metadata without the capability");
+  assert.equal(result.filters.shared_skills_expansion.promoted_from, undefined, "no envelope entry without the capability");
+});
+
+test("P2-1: a failing getPromotedFrom degrades to no origin (admission and ranking unchanged)", async () => {
+  const client = makeClient({
+    sourceTypes: { "local-synth": "synthesis", "shared-skill-1": "skill" },
+    sharedDrawers: [SHARED_SKILL],
+  });
+  // Override with a reader that always throws — the read must degrade, never abort.
+  client.getPromotedFrom = async () => { throw new Error("kg_query exploded"); };
+
+  const result = await expandScopedRetrieval(client, { ...BASE_OPTIONS, intent: "procedural", shared_wing: SHARED_WING });
+  const byId = Object.fromEntries(result.ranked_nodes.map((n) => [n.node_id, n]));
+
+  assert.ok(byId["shared-skill-1"], "a failing provenance read must not drop the skill");
+  assert.equal(byId["shared-skill-1"].promoted_from, undefined, "failure degrades to no origin");
+  // Envelope: checked=1 (the call was made), with_origin=0.
+  const pf = result.filters.shared_skills_expansion.promoted_from;
+  assert.ok(pf, "envelope must still report the read attempt");
+  assert.equal(pf.checked, 1);
+  assert.equal(pf.with_origin, 0);
 });
