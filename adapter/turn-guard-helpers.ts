@@ -311,3 +311,36 @@ const DELIBERATION_EXEMPT_PROMPT_RE =
 export function isDeliberationExemptPrompt(text: string | undefined | null): boolean {
   return DELIBERATION_EXEMPT_PROMPT_RE.test(typeof text === "string" ? text : "")
 }
+
+/**
+ * Phase 14/15 CONSUME (live routing decision): given the tier a delegation is
+ * CURRENTLY targeting and the failure-adjusted recommendation from
+ * MemgraphClient.getFailureAdjustedRouting, decide whether to re-route the unit
+ * to a different tier.
+ *
+ * NEUTRAL FALLBACK (load-bearing): whenever the evidence is insufficient or
+ * inconclusive — `fallback` true, recommendation "no-data", or an unknown value —
+ * this returns `{ rerouteTo: null }`, i.e. PRESERVE THE EXISTING ROUTING OUTCOME
+ * EXACTLY. A failed/empty read must never look like a reason to move a unit. The
+ * only case that changes routing is a SUFFICIENT, concrete recommendation for a
+ * tier different from the one being requested.
+ */
+export function decideCapabilityReroute(args: {
+  requestedTier: string
+  recommendation: string
+  fallback: boolean
+}): { rerouteTo: string | null; reason: string } {
+  const requested = String(args.requestedTier || "").trim()
+  const recommendation = String(args.recommendation || "").trim()
+
+  // Insufficient / inconclusive evidence => neutral, preserve the current pick.
+  if (args.fallback || recommendation === "no-data" || !recommendation) {
+    return { rerouteTo: null, reason: "neutral-fallback" }
+  }
+  // Evidence agrees with the tier already requested => no change (baseline).
+  if (recommendation === requested) {
+    return { rerouteTo: null, reason: "already-recommended" }
+  }
+  // A concrete, sufficient recommendation for a DIFFERENT tier => re-route.
+  return { rerouteTo: recommendation, reason: "evidence-reroute" }
+}

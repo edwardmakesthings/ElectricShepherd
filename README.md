@@ -276,9 +276,11 @@ npm run policy:mem-core:load -- --format markdown
 npm run policy:mem-core:rebuild
 ```
 
-The first command exercises the unit suite; the second confirms the mem-core loader
-path works without requiring a live model. The rebuild command writes canonical
-scoped mem-core to `.electric-shepherd/memory/memory.md`.
+The first command runs the full test suite (unit + integration files; integration
+tests self-skip without a MemPalace endpoint and `ESHEPHERD_TEST_INTEGRATION=1`, so
+this stays offline). The second confirms the mem-core loader path works without
+requiring a live model. The rebuild command writes canonical scoped mem-core to
+`.electric-shepherd/memory/memory.md`.
 
 ---
 
@@ -411,7 +413,7 @@ Core policy runtime in place. The following are committed and usable now:
 - Native-first standalone consolidation coordination via `scripts/native-consolidation-coord.py` with lockfile fallback (`scripts/consolidation-lock.ts`), while plugin-triggered runs keep inherited-lock behavior
 - Policy adapter scaffold in `adapter/memgraph.ts`, retrieval expansion in `adapter/retrieval-expansion.ts`, source-to-derived consolidation in `adapter/synthesis-consolidation.ts`, and validation+merge review in `adapter/validation-merge-review.ts`
 - Dreamer profile files in `agents/`
-- Unit test coverage for auto-consolidation decision + hardening helpers (`npm test`: 34 passing)
+- Test coverage for auto-consolidation decision + hardening helpers (`npm test` collects unit + integration files; see QUICKSTART §3e)
 
 Still pending for full autonomy:
 - Broader harness integrations outside OpenCode defaults

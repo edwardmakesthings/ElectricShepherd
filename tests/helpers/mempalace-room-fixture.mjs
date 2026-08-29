@@ -39,6 +39,8 @@
  * hard-failing.
  */
 
+import { readFileSync, readdirSync } from "node:fs";
+
 import { createMemgraphClient } from "../../adapter/memgraph.ts";
 import { MCPHttpClient, resolveMCPHeadersFromEnv } from "../../adapter/mcp-http-client.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../../adapter/runtime-config.ts";
@@ -62,6 +64,52 @@ function loadFixtureConfig() {
 export function isIntegrationEnabled() {
   loadFixtureConfig();
   return process.env.ESHEPHERD_TEST_INTEGRATION === "1";
+}
+
+/**
+ * Loud local skip banner (P0-5).
+ *
+ * Each endpoint-gated integration test file calls this once at module load when
+ * its gate is closed. The count is computed, not hardcoded: it scans the
+ * integration directory for `{ skip:` gates and reports how many consumption
+ * tests will NOT run in this invocation. Local runs must stay exit 0 — an
+ * offline developer is not a defect — but the skip must be impossible to miss.
+ */
+export function reportSkippedIntegrationTests() {
+  let count = 0;
+  try {
+    const dir = new URL("../integration/", import.meta.url);
+    for (const entry of readdirSync(dir)) {
+      if (!entry.endsWith(".test.mjs")) continue;
+      const src = readFileSync(new URL(entry, dir), "utf8");
+      count += (src.match(/\{\s*skip:\s*!/g) || []).length;
+    }
+  } catch {
+    // Directory unreadable: fall back to the known gate count so the banner
+    // still names a number rather than going silent.
+    count = 6;
+  }
+  const bar = "=".repeat(78);
+  const lines = [
+    "",
+    bar,
+    `  WARNING: ${count} integration (read-path/consumption) tests SKIPPED in this run.`,
+    "  The MemPalace integration gate is CLOSED — none of these executed:",
+    "",
+    "    - quickstart retrieval expansion returns expected envelope",
+    "    - quickstart consolidation and cadence return expected envelopes",
+    "    - source drawers consolidate into a derived drawer that is then discoverable",
+    `    - ${Math.max(0, count - 3)} more (dedup gate, room fixture blast radius, retrieval envelope)`,
+    "",
+    '  Why: ESHEPHERD_TEST_INTEGRATION is not set to "1" and/or MEMPALACE_MCP_URL',
+    "       is not configured. This is expected offline — the suite still exits 0.",
+    "  To run them:",
+    "      export ESHEPHERD_TEST_INTEGRATION=1  (plus a reachable MEMPALACE_MCP_URL)",
+    "      npm run test:integration",
+    bar,
+    "",
+  ];
+  console.error(lines.join("\n"));
 }
 
 function makeRunId() {

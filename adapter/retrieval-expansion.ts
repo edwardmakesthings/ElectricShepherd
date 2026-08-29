@@ -891,6 +891,19 @@ export const CAPABILITY_TIER_BY_SUBAGENT: Readonly<Record<string, CapabilityTier
   "solve-deep-cloud": "deep",
 };
 
+/**
+ * Phase 14 CONSUME (live routing): the canonical subagent for each routing tier.
+ * The inverse of CAPABILITY_TIER_BY_SUBAGENT, used by the turn-guard delegation
+ * hook to re-route a unit to a different tier when capability/failure evidence
+ * recommends it. `deep` maps to implement-deep-cloud (the canonical deep-tier
+ * implementation agent; solve-deep-cloud is an alternate alias for the same tier).
+ */
+export const CAPABILITY_SUBAGENT_BY_TIER: Readonly<Record<CapabilityTier, string>> = {
+  local: "implement-local",
+  cloud: "implement-cloud",
+  deep: "implement-deep-cloud",
+};
+
 /** Phase 14: closed outcome vocabulary for capability tuples (matches es-outcome). */
 export const CAPABILITY_OUTCOME_VALUES = ["accept", "revise", "failed", "unused"] as const;
 
@@ -973,6 +986,34 @@ export function buildFailurePatchId(modelId: string, shapeKey: string, label: In
 
 /** Phase 15: bound intervention text stored as a KG fact (kg object field). */
 export const FAILURE_PATCH_TEXT_MAX_CHARS = 500;
+
+/**
+ * Phase 15 CONSUME (intervention replay): the prompt block appended to an outgoing
+ * delegation when getFailureInterventions returns patches for this (model, shape).
+ * The HEADING is load-bearing: the live hook checks args.prompt against it before
+ * appending (idempotency guard — a re-fired hook must not double the block), and
+ * tests assert on it. Keep in sync with the INTERVENTION_REPLAY_MAX_PATCHES constant
+ * in plugin/turn-guard.ts that bounds how many patches are injected.
+ */
+export const INTERVENTION_REPLAY_HEADING = "## Known interventions for this model on this class of task";
+
+/**
+ * Phase 15 CONSUME (intervention replay): format the recorded intervention texts
+ * as the prompt block appended to an outgoing delegation. Returns "" when there is
+ * nothing to inject (empty list) — the caller leaves the prompt EXACTLY as-is.
+ */
+export function formatInterventionBlock(interventions: string[]): string {
+  const items = (Array.isArray(interventions) ? interventions : [])
+    .map((t) => String(t ?? "").trim())
+    .filter(Boolean);
+  if (items.length === 0) return "";
+  return (
+    `\n\n---\n${INTERVENTION_REPLAY_HEADING}\n\n` +
+    "This model has previously failed on this class of task. The interventions below " +
+    "broke the loop last time — apply them proactively:\n" +
+    items.map((t, i) => `${i + 1}. ${t}`).join("\n") + "\n---\n"
+  );
+}
 
 /** Phase 16: closed self-reported-confidence vocabulary (dream-mapper, drawer-digest, build end-of-loop line). */
 export const CONFIDENCE_VALUES = ["high", "medium", "low"] as const;

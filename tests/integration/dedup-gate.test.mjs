@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test, { after, before } from "node:test";
 
-import { createTestRoom, isIntegrationEnabled } from "../helpers/mempalace-room-fixture.mjs";
+import { createTestRoom, isIntegrationEnabled, reportSkippedIntegrationTests } from "../helpers/mempalace-room-fixture.mjs";
 
 /**
  * Integration coverage for the source transcript dedup CAPTURE GATE contract.
@@ -21,6 +21,7 @@ import { createTestRoom, isIntegrationEnabled } from "../helpers/mempalace-room-
  */
 
 const runIntegration = isIntegrationEnabled();
+if (!runIntegration) reportSkippedIntegrationTests();
 
 let room = null;
 

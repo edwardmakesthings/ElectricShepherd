@@ -3,11 +3,12 @@ import { execFileSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { isIntegrationEnabled } from "../helpers/mempalace-room-fixture.mjs";
+import { isIntegrationEnabled, reportSkippedIntegrationTests } from "../helpers/mempalace-room-fixture.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..", "..");
 const shouldRunIntegration = isIntegrationEnabled();
+if (!shouldRunIntegration) reportSkippedIntegrationTests();
 
 function runScript(scriptPath, scriptArgs) {
   const stdout = execFileSync(

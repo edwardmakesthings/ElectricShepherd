@@ -78,8 +78,11 @@ npm test
 npm run policy:mem-core:load -- --format markdown
 ```
 
-If the unit suite fails, fix the local Node/runtime issue first; the mem-core loader
-check is a lightweight way to confirm the scoped loader path is wired correctly.
+`npm test` collects the full suite (unit + integration files). Integration tests
+self-skip without a MemPalace endpoint and `ESHEPHERD_TEST_INTEGRATION=1`, so this
+still runs offline. If the unit suite fails, fix the local Node/runtime issue first;
+the mem-core loader check is a lightweight way to confirm the scoped loader path is
+wired correctly.
 
 ## 2. Set the tool prefix
 
@@ -471,26 +474,33 @@ per-prompt tax when nothing was ruled out.
 
 ## 3e. Running tests
 
-Unit tests run fully offline:
+**The default verification command is `npm test`, and it collects the full suite —
+unit AND integration files.** Phase-completion claims must cite `npm test` (or
+`npm run test:all`, an alias for it), never a narrower script.
 
 ```bash
 npm test
 ```
 
-Integration tests exercise the adapters against a real MemPalace MCP endpoint
-and are gated behind `ESHEPHERD_TEST_INTEGRATION=1`. They use `mcp.url` from
+Integration tests exercise the adapters against a real MemPalace MCP endpoint and
+are gated behind `ESHEPHERD_TEST_INTEGRATION=1`. They use `mcp.url` from
 `.electric-shepherd/config.jsonc` (or `MEMPALACE_MCP_URL` if you intentionally
 override in env) — the configured endpoint must expose the full tool surface
-(lineage graph traversal, scoped-node lookup, single/bulk delete).
+(lineage graph traversal, scoped-node lookup, single/bulk delete). Without the gate
+they are collected but self-skip, so `npm test` still runs offline.
+
+To run the integration files alone (or with the gate open):
 
 ```bash
 export ESHEPHERD_TEST_INTEGRATION=1
-npm run test:integration   # or: npm run test:all
+npm run test:integration   # or: npm run test:all (alias for npm test)
+# unit-only, when you specifically want it: npm run test:unit
 ```
 
 GitHub Actions wiring:
 
-- `.github/workflows/ci.yml` always runs `npm test`.
+- `.github/workflows/ci.yml` always runs `npm test`, which collects the
+  integration files too; they self-skip unless the gate is open.
 - If `MEMPALACE_MCP_URL` is configured as a repository variable/secret, CI uses
   that endpoint for integration suites (env wins over config only when set deliberately).
 - If no endpoint is configured, CI starts an ephemeral local MemPalace MCP

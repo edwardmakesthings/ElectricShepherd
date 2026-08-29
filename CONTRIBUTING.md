@@ -31,9 +31,14 @@ Minimum checks before opening a PR:
 # Ensure package contents are correct
 npm pack --dry-run
 
-# Run unit tests (fast, no live MCP dependency)
+# Run the full suite — unit + integration files. Integration tests self-skip
+# without a MemPalace endpoint and ESHEPHERD_TEST_INTEGRATION=1, so this stays
+# fast and offline by default. (Unit-only: npm run test:unit)
 npm test
 ```
+
+When claiming a phase or change complete, cite `npm test` (or its alias
+`npm run test:all`) — the narrow scripts do not cover the read-path integration tests.
 
 For runtime or adapter changes, also run one or more policy scripts in an environment with MemPalace tools available:
 

@@ -43,6 +43,7 @@ import {
   computeMemcoreSignature,
   computeToolSignature,
   decideAutoConsolidation,
+  decideCapabilityReroute,
   decideLoopIntervention,
   decideMemcoreInjection,
   detectDeliberationSpiral,
@@ -53,7 +54,8 @@ import type { AutoConsolidationTrigger, MemcoreInjectionRecord } from "../adapte
 import { loadPackagedAssets, mergeWithoutOverride, loadInstructionPaths, dedupeAppendInstructions } from "../adapter/asset-loader.ts"
 import { loadRuntimeConfig, getRuntimeConfigEnvMap, DEFAULT_MCP_URL, DEFAULT_MCP_TOOL_PREFIX } from "../adapter/runtime-config.ts"
 import { MCPHttpClient, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-client.ts"
-import { retrieveSimilarWorkedExamples, formatWorkedExampleDemonstration, WORKED_EXAMPLE_MAX_INJECT, WORKED_EXAMPLE_RELEVANCE_FLOOR, extractWorkedExampleShape, buildWorkedExampleEntry, WORKED_EXAMPLE_FILE_AGENT_TYPES, WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS, CAPABILITY_TIER_BY_SUBAGENT, mapTaskStatusToCapabilityOutcome, buildCapabilityCanonicalShape, buildCapabilityBucketId, canonicalModelId, buildFailureBucketId, buildFailurePatchId, FAILURE_PATCH_TEXT_MAX_CHARS, parseSelfReportedConfidence, buildCalibrationBucketId } from "../adapter/retrieval-expansion.ts"
+import { createMemgraphClient } from "../adapter/memgraph.ts"
+import { retrieveSimilarWorkedExamples, formatWorkedExampleDemonstration, WORKED_EXAMPLE_MAX_INJECT, WORKED_EXAMPLE_RELEVANCE_FLOOR, extractWorkedExampleShape, buildWorkedExampleEntry, WORKED_EXAMPLE_FILE_AGENT_TYPES, WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS, CAPABILITY_TIER_BY_SUBAGENT, CAPABILITY_SUBAGENT_BY_TIER, mapTaskStatusToCapabilityOutcome, buildCapabilityCanonicalShape, buildCapabilityBucketId, canonicalModelId, buildFailureBucketId, buildFailurePatchId, FAILURE_PATCH_TEXT_MAX_CHARS, parseSelfReportedConfidence, buildCalibrationBucketId, INTERVENTION_REPLAY_HEADING, formatInterventionBlock } from "../adapter/retrieval-expansion.ts"
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts"
 import deleteDrawersTool from "../tools/delete_drawers.ts"
 import moveDrawersTool from "../tools/move_drawers.ts"
@@ -186,6 +188,32 @@ const DEFAULT_FAILURE_PATCH_INJECTION_ENABLED = true
 // operator later records an es-outcome for that unit via record_outcome (the
 // human-authoritative path). No proxy outcome labels are ever written here.
 const DEFAULT_CALIBRATION_CAPTURE_ENABLED = true
+// Phase 16 CONSUME (calibrated escalation): when delegating via the task tool,
+// consult the (model, shape, confidence) calibration cell BEFORE trusting the
+// subagent's self-reported confidence at face value. ACTIVE BY DEFAULT — no
+// feature flag. NEUTRAL FALLBACK (operator decision): a trust override requires
+// at least 5 recorded samples per cell; below that, or on any read failure /
+// unavailable data, the existing baseline path is preserved EXACTLY (the unit
+// runs as it always did). A sufficient cell with a low measured hit rate flips
+// the decision to escalate: the delegation prompt gets a calibration note telling
+// the subagent its self-reported confidence at this level on this shape is
+// measured unreliable, so verify before acting. The display path
+// (getCalibrationTable -> /memory-status) is untouched — it keeps reporting the
+// full 20-pair curve to humans; only the decision gate uses the 5-sample floor.
+const CALIBRATION_OVERRIDE_MIN_SAMPLES = 5
+const CALIBRATION_MIN_HIT_RATE = 0.6
+// Phase 15 CONSUME (intervention replay): when delegating via the task tool,
+// consult getFailureInterventions for (model, shape) — the intervention texts
+// that previously BROKE a loop on this exact model + task class — and inject
+// them into the outgoing prompt ("last time this shape failed, here is what
+// fixed it"). ALWAYS ACTIVE — no feature flag. Bounded by INTERVENTION_REPLAY_MAX_PATCHES
+// via getFailureInterventions' maxPatches argument; the closed label vocabulary
+// (spiral-nudge | retry-nudge | loop-block) caps the read at 3 one-hop kg_queries
+// regardless. Neutral fallback: no interventions recorded, empty result, MCP
+// unavailable, or a throwing read => the prompt is left EXACTLY as-is. Idempotent:
+// the block heading is checked against the current args.prompt before appending,
+// so a re-fired hook never doubles the block.
+const INTERVENTION_REPLAY_MAX_PATCHES = 3
   // looking like a loop, without needing to exempt the verify tools themselves.
 const DEFAULT_LOOP_MUTATION_TOOLS = [
   "write",
@@ -1347,6 +1375,35 @@ export const TurnGuard = async ({ client, directory }: any) => {
   // Expired / unconfirmed patches are dropped — failed attempts never persist.
   const pendingInterventionBySession = new Map<string, Array<{ key: string; label: string; text: string }>>()
   let workedExampleClientPromise: Promise<any> | null = null
+  // Phase 14/15 CONSUME (live routing): a full MemgraphClient used ONLY to read
+  // capability + failure evidence before choosing a delegation tier. Kept separate
+  // from the thin worked-example wrapper above because it needs the composed
+  // getFailureAdjustedRouting method, not just raw kgQuery. Lazy + cached exactly
+  // like getWorkedExampleClient; init failure degrades to null (neutral routing).
+  let routingEvidenceClientPromise: Promise<any> | null = null
+  function getRoutingEvidenceClient(): Promise<any> {
+    if (!routingEvidenceClientPromise) {
+      routingEvidenceClientPromise = (async () => {
+        const mcpURL = String(cfgRaw("mcp.url") || "").trim() || DEFAULT_MCP_URL
+        const toolPrefix = String(cfgRaw("mcp.toolPrefix") || "").trim() || DEFAULT_MCP_TOOL_PREFIX
+        const headers = resolveMCPHeadersFromEnv(runtimeEnv)
+        const mcp = new MCPHttpClient(mcpURL, headers, {
+          clientName: "electric-shepherd-turn-guard-routing",
+          requestTimeoutMs: workedExampleSearchTimeoutMs,
+          maxRetries: 0,
+        })
+        await mcp.initialize()
+        return createMemgraphClient({
+          callTool: (name: string, args?: Record<string, unknown>) => mcp.callTool(name, args),
+          toolPrefix,
+        })
+      })().catch((err) => {
+        console.log(`[turn-guard] routing evidence client init failed (neutral routing): ${String(err)}`)
+        return null
+      })
+    }
+    return routingEvidenceClientPromise
+  }
   function getWorkedExampleClient(): Promise<any> {
     if (!workedExampleClientPromise) {
       workedExampleClientPromise = (async () => {
@@ -3575,6 +3632,191 @@ export const TurnGuard = async ({ client, directory }: any) => {
             }
           } catch (err) {
             console.log(`[turn-guard] failure-patch injection: failed, prompt unchanged: ${String(err)}`)
+          }
+        }
+
+        // Phase 14/15 CONSUME (live routing): consult capability + failure evidence
+        // BEFORE the tier is chosen, and re-route the delegation to a different tier
+        // when the evidence recommends it. ALWAYS ACTIVE — no feature flag. Neutral
+        // fallback: if the palace is unavailable, the read throws, or the sample is
+        // insufficient (fallback / no-data), decideCapabilityReroute returns null and
+        // the existing routing outcome is preserved EXACTLY. Only a sufficient,
+        // concrete recommendation for a DIFFERENT tier changes args.subagent_type.
+        // Runs AFTER the watchdog signature was computed from the ORIGINAL args (the
+        // loop guard must see the pre-reroute call) and mutates args in place so both
+        // output.args and input.args carry the re-routed delegation. Any failure
+        // degrades to no reroute — a read hiccup must never block or alter a unit.
+        const requestedTier = CAPABILITY_TIER_BY_SUBAGENT[subagentType]
+        if (requestedTier && hasPrompt) {
+          try {
+            const routing = await resolveLoopGuardRouting(sid, input, output)
+            // The model pinned to the REQUESTED tier is what we penalize; sibling
+            // tiers have no known pin in this codebase, so they stay null (unknown
+            // => no penalty, per getFailureAdjustedRouting's documented semantics).
+            const pinnedModel = normalizeModelSpec(args.model)
+            const effectiveModel =
+              (pinnedModel ? canonicalModelId(pinnedModel.providerID, pinnedModel.modelID) : null) ??
+              canonicalModelId(routing.model?.providerID, routing.model?.modelID)
+            const shape = extractWorkedExampleShape(prompt)
+            const routingClient = await getRoutingEvidenceClient()
+            if (routingClient && typeof routingClient.getFailureAdjustedRouting === "function") {
+              const modelByTier: Record<string, string | null> = { local: null, cloud: null, deep: null }
+              modelByTier[requestedTier] = effectiveModel
+              const adjusted = await routingClient.getFailureAdjustedRouting(shape.shapeKey, modelByTier)
+              const decision = decideCapabilityReroute({
+                requestedTier,
+                recommendation: String(adjusted?.recommendation ?? ""),
+                fallback: Boolean(adjusted?.fallback),
+              })
+              if (decision.rerouteTo) {
+                const targetSubagent = CAPABILITY_SUBAGENT_BY_TIER[decision.rerouteTo as keyof typeof CAPABILITY_SUBAGENT_BY_TIER]
+                if (targetSubagent && targetSubagent !== subagentType) {
+                  args.subagent_type = targetSubagent
+                  if (output?.args) output.args = args
+                  if (input?.args) input.args = args
+                  console.log(
+                    `[turn-guard] capability routing: re-routing ${subagentType} (${requestedTier}) -> ` +
+                      `${targetSubagent} (${decision.rerouteTo}) on evidence sid=${sid} shape=${shape.shapeKey}`,
+                  )
+                } else {
+                  console.log(
+                    `[turn-guard] capability routing: recommended ${decision.rerouteTo} has no distinct subagent — kept ${subagentType} sid=${sid}`,
+                  )
+                }
+              } else {
+                console.log(
+                  `[turn-guard] capability routing: no reroute (${decision.reason}) for ${subagentType} ` +
+                    `(${requestedTier}) sid=${sid} shape=${shape.shapeKey}`,
+                )
+              }
+            }
+          } catch (err) {
+            // Neutral: a read/init failure must never alter the delegation.
+            console.log(`[turn-guard] capability routing: failed, kept ${subagentType}: ${String(err)}`)
+          }
+        }
+
+        // Phase 16 CONSUME (calibrated escalation): consult the calibration cell
+        // for this (model, shape, confidence) BEFORE a subagent's self-reported
+        // confidence is trusted at face value. ACTIVE BY DEFAULT — no feature
+        // flag. The trust override requires >= CALIBRATION_OVERRIDE_MIN_SAMPLES
+        // (5) recorded samples in the cell; below that, or on any read failure /
+        // unavailable data, decideCalibratedEscalation returns defaultAction
+        // "trust" and NOTHING changes — the existing baseline path is preserved
+        // EXACTLY. A sufficient cell with a low measured hit rate flips the
+        // decision to escalate: the delegation prompt gets a calibration note
+        // telling the subagent its self-reported confidence at this level on this
+        // shape is measured unreliable, so verify before acting. Runs AFTER the
+        // watchdog signature was computed from the ORIGINAL args (the loop guard
+        // must see the pre-injection call) and mutates args.prompt in place so
+        // both output.args and input.args carry the augmented prompt. Any failure
+        // degrades to no injection — a read hiccup must never block or alter a unit.
+        const calibrationNoteHeading = "## Calibration note: your self-reported confidence is measured unreliable for this class of task"
+        if (hasPrompt && !prompt.includes(calibrationNoteHeading)) {
+          try {
+            const routing = await resolveLoopGuardRouting(sid, input, output)
+            const pinnedModel = normalizeModelSpec(args.model)
+            const effectiveModel =
+              (pinnedModel ? canonicalModelId(pinnedModel.providerID, pinnedModel.modelID) : null) ??
+              canonicalModelId(routing.model?.providerID, routing.model?.modelID)
+            if (effectiveModel) {
+              const shape = extractWorkedExampleShape(prompt)
+              // The confidence the subagent is expected to self-report: the
+              // delegation prompt's own terminal CONFIDENCE line when present,
+              // otherwise "high" — the level whose trust we are gating. A
+              // misreported label only changes which cell is read; the decision
+              // stays neutral below the 5-sample floor either way.
+              const reportedConfidence = parseSelfReportedConfidence(prompt) ?? "high"
+              const routingClient = await getRoutingEvidenceClient()
+              if (routingClient && typeof routingClient.decideCalibratedEscalation === "function") {
+                const decision = await routingClient.decideCalibratedEscalation({
+                  modelId: effectiveModel,
+                  shapeKey: shape.shapeKey,
+                  reportedConfidence,
+                  defaultAction: "trust",
+                  minHitRate: CALIBRATION_MIN_HIT_RATE,
+                  minSample: CALIBRATION_OVERRIDE_MIN_SAMPLES,
+                })
+                if (decision.action === "escalate") {
+                  const noteBlock =
+                    `\n\n---\n${calibrationNoteHeading}\n\n` +
+                    `Calibration data for ${effectiveModel} on this class of task shows that ` +
+                    `"${reportedConfidence}" self-reports are measured unreliable: only ` +
+                    `${Math.round((decision.hitRate ?? 0) * 100)}% of units reporting this level were actually accepted ` +
+                    `(across ${decision.total} recorded outcomes). Do NOT take your own confidence at face value - ` +
+                    `verify the result before acting on it, and state what you verified.\n---\n`
+                  args.prompt = `${args.prompt}${noteBlock}`
+                  if (output?.args) output.args = args
+                  if (input?.args) input.args = args
+                  console.log(
+                    `[turn-guard] calibrated escalation: ESCALATE for ${effectiveModel} ` +
+                      `(shape=${shape.shapeKey}, reported=${reportedConfidence}, hitRate=${decision.hitRate}) sid=${sid}`,
+                  )
+                } else {
+                  console.log(
+                    `[turn-guard] calibrated escalation: trust (${decision.reason}) for ${effectiveModel} ` +
+                      `(shape=${shape.shapeKey}, reported=${reportedConfidence}) sid=${sid}`,
+                  )
+                }
+              }
+            }
+          } catch (err) {
+            // Neutral: a read/init failure must never alter the delegation.
+            console.log(`[turn-guard] calibrated escalation: failed, prompt unchanged: ${String(err)}`)
+          }
+        }
+
+        // Phase 15 CONSUME (intervention replay): consult getFailureInterventions
+        // for this (model, shape) — the intervention texts that previously BROKE a
+        // loop on this exact model + task class — and inject them into the outgoing
+        // delegation prompt: "last time this shape failed, here is what fixed it."
+        // ALWAYS ACTIVE — no feature flag. Neutral fallback: no interventions
+        // recorded, empty result, MCP unavailable, or a throwing read => the prompt
+        // is left EXACTLY as-is (no mutation). Idempotent: the block heading is
+        // checked against args.prompt (which may already carry earlier injections)
+        // before appending, so a re-fired hook never doubles the block. Bounded by
+        // INTERVENTION_REPLAY_MAX_PATCHES via getFailureInterventions' maxPatches
+        // argument (the closed label vocabulary caps the read at 3 one-hop reads).
+        // Runs AFTER the watchdog signature was computed from the ORIGINAL args and
+        // mutates args.prompt in place so both output.args and input.args carry the
+        // augmented prompt. Any failure degrades to no injection — a read hiccup
+        // must never block or alter a unit.
+        if (hasPrompt && !String(args?.prompt ?? "").includes(INTERVENTION_REPLAY_HEADING)) {
+          try {
+            const routing = await resolveLoopGuardRouting(sid, input, output)
+            const pinnedModel = normalizeModelSpec(args.model)
+            const effectiveModel =
+              (pinnedModel ? canonicalModelId(pinnedModel.providerID, pinnedModel.modelID) : null) ??
+              canonicalModelId(routing.model?.providerID, routing.model?.modelID)
+            if (effectiveModel) {
+              const shape = extractWorkedExampleShape(prompt)
+              const routingClient = await getRoutingEvidenceClient()
+              if (routingClient && typeof routingClient.getFailureInterventions === "function") {
+                const interventions = await routingClient.getFailureInterventions(
+                  effectiveModel,
+                  shape.shapeKey,
+                  { maxPatches: INTERVENTION_REPLAY_MAX_PATCHES },
+                )
+                const block = formatInterventionBlock(interventions)
+                if (block) {
+                  args.prompt = `${args.prompt}${block}`
+                  if (output?.args) output.args = args
+                  if (input?.args) input.args = args
+                  console.log(
+                    `[turn-guard] intervention replay: appended ${interventions.length} intervention(s) ` +
+                      `for ${effectiveModel} (shape=${shape.shapeKey}) to ${subagentType || "task"} prompt sid=${sid}`,
+                  )
+                } else {
+                  console.log(
+                    `[turn-guard] intervention replay: no interventions for ${effectiveModel} ` +
+                      `shape=${shape.shapeKey} — prompt unchanged sid=${sid}`,
+                  )
+                }
+              }
+            }
+          } catch (err) {
+            // Neutral: a read/init failure must never alter the delegation.
+            console.log(`[turn-guard] intervention replay: failed, prompt unchanged: ${String(err)}`)
           }
         }
 

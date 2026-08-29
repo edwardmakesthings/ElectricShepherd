@@ -36,6 +36,11 @@ jobs:
         run: npm ci
 
       - name: Run unit tests
+        # `npm test` collects unit + integration files. Without the gate the
+        # endpoint-gated integration tests self-skip and print a loud banner;
+        # the "Integration suites skipped" step below FAILS the build if no
+        # endpoint was available, so CI can never report green with zero
+        # read-path coverage (P0-5).
         run: npm test
 
       - name: Setup Python (ephemeral MemPalace fallback)
@@ -93,7 +98,20 @@ jobs:
       - name: Integration suites skipped (no endpoint and fallback unavailable)
         if: ${{ env.MEMPALACE_MCP_URL == '' && steps.start_ephemeral.outputs.endpoint == '' }}
         run: |
-          echo "Skipping integration suites: no external MEMPALACE_MCP_URL and no ephemeral fallback endpoint."
+          # A closed integration gate in CI is a REAL DEFECT, not a warning:
+          # the read-path/consumption tests (quickstart retrieval + consolidation,
+          # synthesis pipeline, dedup gate, room fixture) would all be skipped,
+          # leaving the build with zero consumption coverage. Fail loudly instead
+          # of reporting green (P0-5). Local runs stay exit 0 — only CI is held
+          # to this standard.
+          echo "::error::CI integration gate CLOSED: no external MEMPALACE_MCP_URL and no ephemeral fallback endpoint." >&2
+          echo "::error::The following read-path/consumption tests were NOT executed in this build:" >&2
+          echo "::error::  - quickstart retrieval expansion returns expected envelope" >&2
+          echo "::error::  - quickstart consolidation and cadence return expected envelopes" >&2
+          echo "::error::  - source drawers consolidate into a derived drawer that is then discoverable" >&2
+          echo "::error::  - dedup gate / room fixture blast-radius / retrieval envelope tests (6 endpoint-gated tests total)" >&2
+          echo "::error::Fix: configure the MEMPALACE_MCP_URL repo secret/variable, or restore the ephemeral MemPalace fallback so the integration suites can run." >&2
+          exit 1
 
       - name: Stop ephemeral MemPalace MCP server
         if: ${{ always() && steps.start_ephemeral.outputs.endpoint != '' }}

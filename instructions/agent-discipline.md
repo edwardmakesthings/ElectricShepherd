@@ -80,6 +80,15 @@ Use `dev-tools_verify` as the default end-of-task verifier for implementation wo
 
 Reason: one combined verify call is cheaper and reduces loop noise.
 
+**Phase-completion evidence (required):** A phase or change may only be claimed
+complete on the full test suite — `npm test` (alias `npm run test:all`), which
+collects unit AND integration files. The narrow scripts (`test:unit`,
+`test:integration`) are for targeted debugging, never as completion evidence:
+the read-path coverage lives in the integration files, and a green unit-only run
+proves nothing about whether anything actually reads what was written. Integration
+tests self-skip without a MemPalace endpoint and `ESHEPHERD_TEST_INTEGRATION=1`;
+report skip counts honestly alongside pass/fail when citing results.
+
 ## Missing MCP tool — ask, don't substitute (required)
 
 If a task genuinely requires a specific tool (e.g. `kg_query`, `get_ancestors`, `apply_merge`)

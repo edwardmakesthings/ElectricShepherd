@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test, { after, before } from "node:test";
 
 import { expandScopedRetrieval } from "../../adapter/retrieval-expansion.ts";
-import { createTestRoom, isIntegrationEnabled } from "../helpers/mempalace-room-fixture.mjs";
+import { createTestRoom, isIntegrationEnabled, reportSkippedIntegrationTests } from "../helpers/mempalace-room-fixture.mjs";
 
 /**
  * Integration coverage for ElectricShepherd-specific behavior against a real
@@ -19,6 +19,7 @@ import { createTestRoom, isIntegrationEnabled } from "../helpers/mempalace-room-
  */
 
 const runIntegration = isIntegrationEnabled();
+if (!runIntegration) reportSkippedIntegrationTests();
 
 let room = null;
 
