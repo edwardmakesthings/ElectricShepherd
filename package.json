@@ -36,6 +36,7 @@
     "policy:cadence:execute": "node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts --run-cadence --cadence-mode execute",
     "policy:backfill:nontranscript": "node --experimental-strip-types scripts/run-nontranscript-backfill.ts",
     "policy:mem-core:load": "node --experimental-strip-types scripts/run-mem-core-loader.ts",
+    "verify:structural": "node --experimental-strip-types scripts/verify-structural.ts",
     "policy:mem-core:rebuild": "node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts --all --mem-core-file .electric-shepherd/memory/memory.md",
     "sheep:count": "node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts --apply",
     "sheep:memory-status": "node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts --run-cadence --cadence-mode plan",

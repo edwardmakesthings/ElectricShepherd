@@ -1,8 +1,16 @@
 import { DEFAULT_MCP_TOOL_PREFIX } from "./runtime-config.ts";
+import type { SubstrateResult } from "./mcp-http-client.ts";
 
 export type JsonMap = Record<string, unknown>;
 
-export type ToolCaller = (name: string, args?: JsonMap) => Promise<JsonMap>;
+/**
+ * A substrate tool call. Returns `SubstrateResult` (slice 1) so a failed call is
+ * distinguishable from an empty result — the transport never collapses errors into
+ * `{}`. Callers that intentionally ignore a failure must do so explicitly and name
+ * a reason (spec §4.1: "A caller that wants to ignore an error must say so
+ * explicitly and name a reason").
+ */
+export type ToolCaller = (name: string, args?: JsonMap) => Promise<SubstrateResult<JsonMap>>;
 
 export type MemgraphToolMap = {
   applyMerge: string;
@@ -107,8 +115,83 @@ export class MemgraphClient {
     this.tools = buildToolMap(resolveToolPrefix(options.toolPrefix), options.toolMap);
   }
 
+  /**
+   * Normalize a ToolCaller result to a `SubstrateResult`. Real callers (turn-guard,
+   * the consolidation/policy scripts) return a proper `SubstrateResult` via
+   * `mcp.callToolResult`. Test fakes and any legacy caller may still return a raw
+   * JsonMap — that is treated as an implicit success so existing fixtures keep
+   * working without a mass rewrite. The boundary normalization lives here, in one
+   * place, so the typed-failure contract holds for every real substrate call.
+   */
+  private async invoke(name: keyof MemgraphToolMap | string, args: JsonMap | undefined): Promise<SubstrateResult<JsonMap>> {
+    const toolName = typeof name === "string" && !(name in this.tools) ? name : this.tools[name as keyof MemgraphToolMap];
+    let raw: unknown;
+    try {
+      raw = await this.callTool(toolName, args || {});
+    } catch (err) {
+      // A throwing caller (e.g. mcp.callTool, which throws SubstrateError on failure)
+      // is converted to an explicit failed result here so the degrade/propagate logic
+      // in callIgnoringFailure / call can branch on it instead of receiving a throw.
+      const detail = err instanceof Error ? err.message : String(err);
+      return { ok: false, kind: "protocol", detail };
+    }
+    if (raw && typeof raw === "object" && "ok" in raw) return raw as SubstrateResult<JsonMap>;
+    // Legacy / test fake: a plain JsonMap with no `ok` discriminator is an implicit success.
+    return { ok: true, value: (raw || {}) as JsonMap };
+  }
+
+  /**
+   * Explicitly ignore a substrate failure and degrade to an empty result. This is the
+   * ONLY sanctioned place in this class where a failed call becomes `{}`: every caller
+   * must route through it, so each degradation is a named decision with a reason that
+   * is logged operator-visible (spec §4.1). The returned object carries `__esError` so
+   * callers that need to distinguish "empty" from "failed" can still see the failure.
+   */
+  private async callIgnoringFailure(
+    name: keyof MemgraphToolMap,
+    args: JsonMap | undefined,
+    reason: string,
+  ): Promise<JsonMap> {
+    const result = await this.invoke(name, args);
+    if (result.ok === false) {
+      console.warn(`[memgraph] ${this.tools[name]} failed (${result.kind}), ignoring by design — ${reason}: ${result.detail}`);
+      return { __esError: `${result.kind}: ${result.detail}` };
+    }
+    return result.value;
+  }
+
+  /**
+   * Run a kg_query through the public `kgQuery()` method (which handles param
+   * stripping and the -32602 fallback) and degrade to an empty result on failure.
+   * The reason is logged operator-visible so a broken substrate cannot masquerade as
+   * "this entity has no facts".
+   */
+  private async kgQueryIgnoringFailure(
+    args: {
+      entity: string;
+      as_of?: string;
+      direction?: "incoming" | "outgoing" | "both";
+      predicate?: string;
+      recurse?: boolean;
+      max_depth?: number;
+    },
+    reason: string,
+  ): Promise<JsonMap> {
+    try {
+      return await this.kgQuery(args);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      console.warn(`[memgraph] kg_query failed (${reason}), ignoring by design: ${detail}`);
+      return { __esError: detail };
+    }
+  }
+
   private async call(name: keyof MemgraphToolMap, args?: JsonMap): Promise<JsonMap> {
-    return this.callTool(this.tools[name], args || {});
+    const result = await this.invoke(name, args);
+    if (result.ok === false) {
+      throw new Error(`substrate call failed (${this.tools[name]}, kind=${result.kind}): ${result.detail}`);
+    }
+    return result.value;
   }
 
   private shouldRetryWithDreamNamespacedTool(err: unknown): boolean {
@@ -269,13 +352,16 @@ export class MemgraphClient {
   }
 
   async getOutgoingObjects(entity: string, predicate: string): Promise<string[]> {
-    const result = await this.kgQuery({
+    // Degrade to "no facts" on read failure — the same neutral reading as an empty
+    // result for every caller of this helper. The failure is logged (not silent) so a
+    // broken substrate cannot masquerade as "this entity has no edges".
+    const result = await this.kgQueryIgnoringFailure({
       entity,
       direction: "outgoing",
       predicate,
       recurse: false,
       max_depth: 1,
-    }).catch(() => ({}));
+    }, `getOutgoingObjects(${entity}, ${predicate}) read failure degrades to no facts`);
     return this.uniqueFromFactsByDirection(this.parseKgFacts(result), "outgoing");
   }
 
@@ -283,13 +369,16 @@ export class MemgraphClient {
     const forward = await this.getOutgoingObjects(drawerId, "consolidated-into");
     if (forward.length > 0) return true;
 
-    const incoming = await this.kgQuery({
+    // Degrade to "not consolidated" on read failure — the conservative reading for a
+    // consolidation worklist (a missed check re-surfaces the drawer next pass). The
+    // failure is logged, not silent.
+    const incoming = await this.kgQueryIgnoringFailure({
       entity: drawerId,
       direction: "incoming",
       predicate: "synthesized-from",
       recurse: false,
       max_depth: 1,
-    }).catch(() => ({}));
+    }, `isSourceDrawerConsolidated(${drawerId}) read failure degrades to unconsolidated`);
     const incomingSynth = this.uniqueFromFactsByDirection(this.parseKgFacts(incoming), "incoming");
     return incomingSynth.length > 0;
   }
@@ -327,57 +416,65 @@ export class MemgraphClient {
     const lineageErrors: string[] = [];
     let lineageEdgesAdded = 0;
     for (const sourceId of sourceDrawerIds) {
-      try {
-        await this.kgAdd({
-          subject: id,
-          predicate: "synthesized-from",
-          object: sourceId,
-          source_closet: id,
-          source_run_id: args.source_run_id,
-        });
-        // P1-3: forward edge — source drawer → new closet (cheap worklist exclusion)
-        await this.kgAdd({
-          subject: sourceId,
-          predicate: "consolidated-into",
-          object: id,
-          source_closet: id,
-          source_run_id: args.source_run_id,
-        });
-        lineageEdgesAdded += 1;
-      } catch (err) {
-        lineageErrors.push(String(err));
+      // Explicit per-edge failure handling: a failed edge is recorded in
+      // `lineageErrors` (operator-visible, returned to the caller) rather than
+      // silently dropped. Both edges are attempted independently so one failure
+      // never masks the other.
+      const synthRes = await this.invoke("kgAdd", {
+        subject: id,
+        predicate: "synthesized-from",
+        object: sourceId,
+        source_closet: id,
+        source_run_id: args.source_run_id,
+      });
+      if (synthRes.ok === false) {
+        lineageErrors.push(`synthesized-from edge ${id} -> ${sourceId}: ${synthRes.kind}: ${synthRes.detail}`);
+        continue;
       }
+      // P1-3: forward edge — source drawer → new closet (cheap worklist exclusion)
+      const fwdRes = await this.invoke("kgAdd", {
+        subject: sourceId,
+        predicate: "consolidated-into",
+        object: id,
+        source_closet: id,
+        source_run_id: args.source_run_id,
+      });
+      if (fwdRes.ok === false) {
+        lineageErrors.push(`consolidated-into edge ${sourceId} -> ${id}: ${fwdRes.kind}: ${fwdRes.detail}`);
+        continue;
+      }
+      lineageEdgesAdded += 1;
     }
 
     // P2-2: stamp the new closet `provisional`. Validation promotes it to `active`
     // once it has >= 2 direct sources; until then it is filtered from default
     // retrieval. Vanilla-only (kg_add). Best-effort: a failed stamp must not fail
     // closet creation — an unstamped closet reads as "unknown" and stays visible.
-    try {
-      await this.kgAdd({
-        subject: id,
-        predicate: "es-status",
-        object: "provisional",
-        source_closet: id,
-        source_run_id: args.source_run_id,
-      });
-    } catch {
-      // non-fatal: leave the closet unstamped rather than fail creation
+    const statusStamp = await this.invoke("kgAdd", {
+      subject: id,
+      predicate: "es-status",
+      object: "provisional",
+      source_closet: id,
+      source_run_id: args.source_run_id,
+    });
+    if (statusStamp.ok === false) {
+      // non-fatal: leave the closet unstamped rather than fail creation (logged).
+      console.warn(`[memgraph] es-status stamp failed for ${id} (kind=${statusStamp.kind}), leaving closet unstamped: ${statusStamp.detail}`);
     }
 
     // Phase 1: stamp the new closet `synthesis` on the es-source-type axis.
-    // Independent of the es-status stamp above — separate try/catch so one
-    // failure never masks the other; a failed stamp leaves the axis "unknown".
-    try {
-      await this.kgAdd({
-        subject: id,
-        predicate: "es-source-type",
-        object: "synthesis",
-        source_closet: id,
-        source_run_id: args.source_run_id,
-      });
-    } catch {
-      // non-fatal: leave the closet unstamped rather than fail creation
+    // Independent of the es-status stamp above — one failure never masks the other;
+    // a failed stamp leaves the axis "unknown".
+    const typeStamp = await this.invoke("kgAdd", {
+      subject: id,
+      predicate: "es-source-type",
+      object: "synthesis",
+      source_closet: id,
+      source_run_id: args.source_run_id,
+    });
+    if (typeStamp.ok === false) {
+      // non-fatal: leave the closet unstamped rather than fail creation (logged).
+      console.warn(`[memgraph] es-source-type stamp failed for ${id} (kind=${typeStamp.kind}), leaving axis unknown: ${typeStamp.detail}`);
     }
 
     return {
@@ -422,11 +519,11 @@ export class MemgraphClient {
    * `mempalace_kg_query` schema.
    *
    * Older deployed builds accept only `entity` / `direction` / `as_of` and reject
-   * the whole call with `-32602 Unknown parameters`. Every caller here wraps this
-   * in `.catch(() => ({}))`, so against such a server the rejection surfaced as
-   * "this entity has no facts" and made every consolidated source look
-   * permanently unconsolidated. That silent-false-negative is why we degrade
-   * explicitly instead of assuming a fixed contract.
+   * the whole call with `-32602 Unknown parameters`. Callers that wrap this in a
+   * neutral-degrade helper would surface the rejection as "this entity has no
+   * facts" and make every consolidated source look permanently unconsolidated. That
+   * silent-false-negative is why we degrade explicitly (and log) instead of assuming
+   * a fixed contract.
    *
    * So: prefer the server, and fall back to a client-side predicate filter when
    * it can't. The fallback is single-hop only — `recurse` / `max_depth` cannot be
@@ -453,11 +550,18 @@ export class MemgraphClient {
       if (args.recurse) fullArgs.recurse = true;
       if (typeof args.max_depth === "number") fullArgs.max_depth = args.max_depth;
 
-      try {
-        result = await this.call("kgQuery", fullArgs);
-      } catch (err) {
-        if (!this.isUnknownParameterError(err)) throw err;
-        this.kgQueryTraversalUnsupported = true;
+      const fullRes = await this.invoke("kgQuery", fullArgs);
+      if (fullRes.ok === false) {
+        if (this.isUnknownParameterError(new Error(fullRes.detail))) {
+          // Explicit degrade: a pre-179c613 server rejected the traversal parameters.
+          // Fall back to a single-hop client-side filter below (logged, cached).
+          console.warn(`[memgraph] kg_query rejected traversal params for ${args.entity} (${fullRes.kind}), degrading to single-hop client-side filter: ${fullRes.detail}`);
+          this.kgQueryTraversalUnsupported = true;
+        } else {
+          throw new Error(`substrate call failed (kg_query, kind=${fullRes.kind}): ${fullRes.detail}`);
+        }
+      } else {
+        result = fullRes.value;
       }
     }
 
@@ -519,13 +623,14 @@ export class MemgraphClient {
    * Degrades to "no concerns" on read failure, matching getOutgoingObjects.
    */
   async getConcerns(nodeId: string): Promise<{ node_ids: string[]; count: number }> {
-    const result = await this.kgQuery({
+    // Degrade to "no concerns" on read failure (logged), matching getOutgoingObjects.
+    const result = await this.kgQueryIgnoringFailure({
       entity: nodeId,
       direction: "outgoing",
       predicate: "concerns",
       recurse: false,
       max_depth: 1,
-    }).catch(() => ({}));
+    }, `getConcerns(${nodeId}) read failure degrades to no concerns`);
     const nodeIds = this.uniqueFromFactsByDirection(this.parseKgFacts(result), "outgoing").filter(
       (id) => id !== nodeId,
     );
@@ -543,13 +648,14 @@ export class MemgraphClient {
    * on read failure, matching getConcerns.
    */
   async getRefinedBy(nodeId: string): Promise<{ node_ids: string[]; count: number }> {
-    const result = await this.kgQuery({
+    // Degrade to "no refined-by" on read failure (logged), matching getConcerns.
+    const result = await this.kgQueryIgnoringFailure({
       entity: nodeId,
       direction: "incoming",
       predicate: "refined-by",
       recurse: false,
       max_depth: 1,
-    }).catch(() => ({}));
+    }, `getRefinedBy(${nodeId}) read failure degrades to no refined-by`);
     const nodeIds = this.uniqueFromFactsByDirection(this.parseKgFacts(result), "incoming").filter(
       (id) => id !== nodeId,
     );
@@ -562,13 +668,14 @@ export class MemgraphClient {
    * "no refined-by" on read failure, matching getConcerns.
    */
   async getRefines(nodeId: string): Promise<{ node_ids: string[]; count: number }> {
-    const result = await this.kgQuery({
+    // Degrade to "no refined-by" on read failure (logged), matching getConcerns.
+    const result = await this.kgQueryIgnoringFailure({
       entity: nodeId,
       direction: "outgoing",
       predicate: "refined-by",
       recurse: false,
       max_depth: 1,
-    }).catch(() => ({}));
+    }, `getRefines(${nodeId}) read failure degrades to no refined-by`);
     const nodeIds = this.uniqueFromFactsByDirection(this.parseKgFacts(result), "outgoing").filter(
       (id) => id !== nodeId,
     );
@@ -597,13 +704,14 @@ export class MemgraphClient {
    * getConcerns. Read-only — promotion itself is written by tools/promote_skill.ts.
    */
   async getPromotedFrom(nodeId: string): Promise<{ node_ids: string[]; count: number }> {
-    const result = await this.kgQuery({
+    // Degrade to "no origin" on read failure (logged), matching getConcerns.
+    const result = await this.kgQueryIgnoringFailure({
       entity: nodeId,
       direction: "outgoing",
       predicate: "promoted-from",
       recurse: false,
       max_depth: 1,
-    }).catch(() => ({}));
+    }, `getPromotedFrom(${nodeId}) read failure degrades to no origin`);
     const nodeIds = this.uniqueFromFactsByDirection(this.parseKgFacts(result), "outgoing").filter(
       (id) => id !== nodeId,
     );
@@ -616,13 +724,14 @@ export class MemgraphClient {
    * to "no rules-out" on read failure, matching getConcerns.
    */
   async getRulesOut(nodeId: string): Promise<{ statements: string[]; polarities: string[]; count: number }> {
-    const result = await this.kgQuery({
+    // Degrade to "no rules-out" on read failure (logged), matching getConcerns.
+    const result = await this.kgQueryIgnoringFailure({
       entity: nodeId,
       direction: "outgoing",
       predicate: "rules-out",
       recurse: false,
       max_depth: 1,
-    }).catch(() => ({}));
+    }, `getRulesOut(${nodeId}) read failure degrades to no rules-out`);
     const statements: string[] = [];
     const polarities: string[] = [];
     for (const fact of this.parseKgFacts(result)) {
@@ -681,32 +790,34 @@ export class MemgraphClient {
     const errors: string[] = [];
     let added = 0;
     for (const statement of statements) {
-      try {
-        await this.kgAdd({
-          subject: nodeId,
-          predicate: "rules-out",
-          object: statement,
-          source_closet: nodeId,
-          source_run_id: args.source_run_id,
-        });
-        added += 1;
-      } catch (err) {
-        errors.push(String(err));
+      // Explicit per-edge failure handling: a failed edge is reported in `errors`
+      // (operator-visible, returned to the caller), never silently dropped.
+      const res = await this.invoke("kgAdd", {
+        subject: nodeId,
+        predicate: "rules-out",
+        object: statement,
+        source_closet: nodeId,
+        source_run_id: args.source_run_id,
+      });
+      if (res.ok === false) {
+        errors.push(`rules-out edge ${nodeId} -> ${statement}: ${res.kind}: ${res.detail}`);
+        continue;
       }
+      added += 1;
     }
     const polarity = this.asString(args.polarity).trim();
     if (polarity === "tried-failed" || polarity === "considered-rejected") {
-      try {
-        await this.kgAdd({
-          subject: nodeId,
-          predicate: "rules-out",
-          object: polarity,
-          source_closet: nodeId,
-          source_run_id: args.source_run_id,
-        });
+      const res = await this.invoke("kgAdd", {
+        subject: nodeId,
+        predicate: "rules-out",
+        object: polarity,
+        source_closet: nodeId,
+        source_run_id: args.source_run_id,
+      });
+      if (res.ok === false) {
+        errors.push(`rules-out edge ${nodeId} -> ${polarity}: ${res.kind}: ${res.detail}`);
+      } else {
         added += 1;
-      } catch (err) {
-        errors.push(String(err));
       }
     }
 
@@ -805,31 +916,38 @@ export class MemgraphClient {
 
       let canonicalNodeId = nodeId;
       if (!includeMerged) {
-        const resolved = this.asObject(await this.resolveCanonical(nodeId).catch(() => ({ canonical_node_id: nodeId })));
+        // Degrade to "not merged" on read failure (logged): an unreadable node is
+        // kept in the listing rather than silently dropped.
+        const resolved = this.asObject(
+          await this.callIgnoringFailure("resolveCanonical", { node_id: nodeId }, `listScopedDerivedDrawers canonical check for ${nodeId} degrades to not-merged`),
+        );
         canonicalNodeId = this.asString(resolved.canonical_node_id || nodeId).trim() || nodeId;
         if (canonicalNodeId !== nodeId) continue;
       }
 
+      // Degrade to "no sources" on read failure (logged): an unreadable node is
+      // skipped from the derived-drawer listing rather than silently dropped.
       const outgoingSynth = this.asObject(
-        await this.kgQuery({
+        await this.kgQueryIgnoringFailure({
           entity: nodeId,
           direction: "outgoing",
           predicate: "synthesized-from",
           recurse: false,
           max_depth: 1,
-        }).catch(() => ({})),
+        }, `listScopedDerivedDrawers lineage read for ${nodeId} degrades to no sources`),
       );
       const sourceIds = this.uniqueFromFactsByDirection(this.parseKgFacts(outgoingSynth), "outgoing");
       if (sourceIds.length === 0) continue;
 
+      // Degrade to "no labels" on read failure (logged).
       const hallFacts = this.asObject(
-        await this.kgQuery({
+        await this.kgQueryIgnoringFailure({
           entity: nodeId,
           direction: "outgoing",
           predicate: "in-hall",
           recurse: false,
           max_depth: 1,
-        }).catch(() => ({})),
+        }, `listScopedDerivedDrawers hall read for ${nodeId} degrades to no labels`),
       );
 
       const labels = this.uniqueFromFactsByDirection(this.parseKgFacts(hallFacts), "outgoing").map((v) => v.toLowerCase());
@@ -840,14 +958,18 @@ export class MemgraphClient {
         if (!passes) continue;
       }
 
-      const heightRes = this.asObject(await this.getHeight(nodeId).catch(() => ({ height: 0 })));
+      // Degrade to height 0 on read failure (logged).
+      const heightRes = this.asObject(
+        await this.callIgnoringFailure("getHeight", { node_id: nodeId }, `listScopedDerivedDrawers height read for ${nodeId} degrades to 0`),
+      );
+      // Degrade to "no connections" on read failure (logged).
       const graphFacts = this.asObject(
-        await this.kgQuery({
+        await this.kgQueryIgnoringFailure({
           entity: nodeId,
           direction: "both",
           recurse: false,
           max_depth: maxDepth,
-        }).catch(() => ({})),
+        }, `listScopedDerivedDrawers graph read for ${nodeId} degrades to no connections`),
       );
       const graphFactCount = this.parseKgFacts(graphFacts).filter((fact) => this.asBoolean(fact.current, true)).length;
 
@@ -881,41 +1003,50 @@ export class MemgraphClient {
     labels?: string[];
   }) {
     const labels = this.uniq((args.labels || []).map((label) => this.asString(label).toLowerCase()));
-    const current = await this.kgQuery({
+    // Degrade to "no current labels" on read failure (logged): an unreadable node
+    // gets the requested labels added rather than being silently left untouched.
+    const current = await this.kgQueryIgnoringFailure({
       entity: args.node_id,
       direction: "outgoing",
       predicate: "in-hall",
       recurse: false,
       max_depth: 1,
-    }).catch(() => ({}));
+    }, `setHallLabels current-read for ${args.node_id} degrades to no labels`);
 
     const currentLabels = this.uniqueFromFactsByDirection(this.parseKgFacts(current), "outgoing");
     const toRemove = currentLabels.filter((label) => !labels.includes(label.toLowerCase()));
     const toAdd = labels.filter((label) => !currentLabels.map((v) => v.toLowerCase()).includes(label));
 
+    // Explicit per-label failure handling: failed invalidations/adds are reported in
+    // `errors` (operator-visible), never silently dropped. `success` is false if any
+    // label operation failed.
+    const errors: string[] = [];
     for (const label of toRemove) {
-      await this.kgInvalidate({
+      const res = await this.invoke("kgInvalidate", {
         subject: args.node_id,
         predicate: "in-hall",
         object: label,
-      }).catch(() => ({}));
+      });
+      if (res.ok === false) errors.push(`invalidate in-hall ${args.node_id}/${label}: ${res.kind}: ${res.detail}`);
     }
 
     for (const label of toAdd) {
-      await this.kgAdd({
+      const res = await this.invoke("kgAdd", {
         subject: args.node_id,
         predicate: "in-hall",
         object: label,
         source_closet: args.node_id,
-      }).catch(() => ({}));
+      });
+      if (res.ok === false) errors.push(`add in-hall ${args.node_id}/${label}: ${res.kind}: ${res.detail}`);
     }
 
     return {
-      success: true,
+      success: errors.length === 0,
       node_id: args.node_id,
       labels,
       invalidated_labels: toRemove,
       added_labels: toAdd,
+      ...(errors.length > 0 ? { errors } : {}),
     };
   }
 
@@ -952,24 +1083,28 @@ export class MemgraphClient {
   }
 
   private async callWithUpdateDrawerFallback(args: JsonMap): Promise<JsonMap> {
-    try {
-      return await this.call("updateDrawer", args);
-    } catch (err) {
-      if (!this.shouldRetryWithDreamNamespacedTool(err)) throw err;
+    const primary = await this.invoke("updateDrawer", args);
+    if (primary.ok === false) {
+      let lastDetail: string;
+      if (!this.shouldRetryWithDreamNamespacedTool(new Error(primary.detail))) throw new Error(`substrate call failed (${this.tools.updateDrawer}, kind=${primary.kind}): ${primary.detail}`);
+      // The server rejected the prefixed name (not-found / not-allowed): try the
+      // namespaced fallback tool names. Each failure is explicit; the last one wins.
       const fallbackNames = [
         "mempalace-mempalace_update_drawer",
         "dream_mempalace-mempalace_update_drawer",
       ];
-      let lastErr: unknown = err;
+      lastDetail = primary.detail;
       for (const toolName of fallbackNames) {
-        try {
-          return await this.callTool(toolName, args);
-        } catch (fallbackErr) {
-          lastErr = fallbackErr;
+        const res = await this.invoke(toolName, args);
+        if (res.ok === false) {
+          lastDetail = res.detail;
+        } else {
+          return res.value;
         }
       }
-      throw lastErr;
+      throw new Error(`update_drawer failed via all names (${this.tools.updateDrawer} + ${fallbackNames.join(", ")}): ${lastDetail}`);
     }
+    return primary.value;
   }
 
   kgAdd(args: {
@@ -1002,26 +1137,28 @@ export class MemgraphClient {
 
   /** Count a closet's DIRECT sources via its outgoing one-hop synthesized-from edges. */
   async countDirectSources(closetId: string): Promise<number> {
-    const result = await this.kgQuery({
+    // Degrade to "no direct sources" on read failure (logged).
+    const result = await this.kgQueryIgnoringFailure({
       entity: closetId,
       direction: "outgoing",
       predicate: "synthesized-from",
       recurse: false,
       max_depth: 1,
-    }).catch(() => ({}));
+    }, `countDirectSources(${closetId}) read failure degrades to zero`);
     return this.uniqueFromFactsByDirection(this.parseKgFacts(result), "outgoing")
       .filter((id) => id !== closetId).length;
   }
 
   /** Read a closet's es-status. "provisional" | "active" | "unknown" (no stamp / legacy). */
   async getClosetStatus(closetId: string): Promise<"provisional" | "active" | "unknown"> {
-    const result = await this.kgQuery({
+    // Degrade to "unknown" on read failure (logged).
+    const result = await this.kgQueryIgnoringFailure({
       entity: closetId,
       direction: "outgoing",
       predicate: "es-status",
       recurse: false,
       max_depth: 1,
-    }).catch(() => ({}));
+    }, `getClosetStatus(${closetId}) read failure degrades to unknown`);
     const values = this.uniqueFromFactsByDirection(this.parseKgFacts(result), "outgoing");
     if (values.includes("active")) return "active";
     if (values.includes("provisional")) return "provisional";
@@ -1031,7 +1168,13 @@ export class MemgraphClient {
   /** Set a closet's es-status, invalidating the opposite value first. Idempotent-safe. */
   async setClosetStatus(closetId: string, status: "provisional" | "active", sourceRunId?: string): Promise<void> {
     const opposite = status === "active" ? "provisional" : "active";
-    await this.kgInvalidate({ subject: closetId, predicate: "es-status", object: opposite }).catch(() => ({}));
+    // Best-effort invalidation of the opposite value (logged on failure): a stale
+    // opposite fact does not block setting the new status — the add below is the
+    // authoritative write. The add itself is NOT best-effort: it throws on failure.
+    const invalidateRes = await this.invoke("kgInvalidate", { subject: closetId, predicate: "es-status", object: opposite });
+    if (invalidateRes.ok === false) {
+    console.warn(`[memgraph] es-status invalidation of ${closetId}/${opposite} failed (kind=${invalidateRes.kind}), continuing to set new status: ${invalidateRes.detail}`);
+    }
     await this.kgAdd({
       subject: closetId,
       predicate: "es-status",
@@ -1049,23 +1192,19 @@ export class MemgraphClient {
 
   /** Read a closet's es-source-type. Returns null when unstamped or on read failure. */
   async getClosetSourceType(closetId: string): Promise<ClosetSourceType | null> {
-    try {
-      const result = await this.kgQuery({
-        entity: closetId,
-        direction: "outgoing",
-        predicate: "es-source-type",
-        recurse: false,
-        max_depth: 1,
-      });
-      const values = this.uniqueFromFactsByDirection(this.parseKgFacts(result), "outgoing");
-      for (const value of values) {
-        if ((CLOSET_SOURCE_TYPES as readonly string[]).includes(value)) return value as ClosetSourceType;
-      }
-      return null;
-    } catch {
-      // non-fatal: a failed read reads as "unstamped", not an error
-      return null;
+    // Degrade to "unstamped" on read failure (logged).
+    const result = await this.kgQueryIgnoringFailure({
+      entity: closetId,
+      direction: "outgoing",
+      predicate: "es-source-type",
+      recurse: false,
+      max_depth: 1,
+    }, `getClosetSourceType(${closetId}) read failure degrades to unstamped`);
+    const values = this.uniqueFromFactsByDirection(this.parseKgFacts(result), "outgoing");
+    for (const value of values) {
+      if ((CLOSET_SOURCE_TYPES as readonly string[]).includes(value)) return value as ClosetSourceType;
     }
+    return null;
   }
 
   // ── Phase 12: es-domain axis (skill drawers only) ───────────────────────────
@@ -1075,23 +1214,19 @@ export class MemgraphClient {
 
   /** Read a closet's es-domain. Returns null when unstamped, out-of-vocabulary, or on read failure. */
   async getClosetDomain(closetId: string): Promise<SkillDomain | null> {
-    try {
-      const result = await this.kgQuery({
-        entity: closetId,
-        direction: "outgoing",
-        predicate: "es-domain",
-        recurse: false,
-        max_depth: 1,
-      });
-      const values = this.uniqueFromFactsByDirection(this.parseKgFacts(result), "outgoing");
-      for (const value of values) {
-        if ((SKILL_DOMAINS as readonly string[]).includes(value)) return value as SkillDomain;
-      }
-      return null;
-    } catch {
-      // non-fatal: a failed read reads as "unstamped", not an error
-      return null;
+    // Degrade to "unstamped" on read failure (logged).
+    const result = await this.kgQueryIgnoringFailure({
+      entity: closetId,
+      direction: "outgoing",
+      predicate: "es-domain",
+      recurse: false,
+      max_depth: 1,
+    }, `getClosetDomain(${closetId}) read failure degrades to unstamped`);
+    const values = this.uniqueFromFactsByDirection(this.parseKgFacts(result), "outgoing");
+    for (const value of values) {
+      if ((SKILL_DOMAINS as readonly string[]).includes(value)) return value as SkillDomain;
     }
+    return null;
   }
 
   /**
@@ -1100,23 +1235,29 @@ export class MemgraphClient {
    * the normal flow. Does not touch `es-status` facts.
    */
   async setClosetSourceType(closetId: string, sourceType: ClosetSourceType, sourceRunId?: string): Promise<boolean> {
-    try {
-      const previous = await this.getClosetSourceType(closetId);
-      if (previous && previous !== sourceType) {
-        await this.kgInvalidate({ subject: closetId, predicate: "es-source-type", object: previous }).catch(() => ({}));
+    const previous = await this.getClosetSourceType(closetId);
+    if (previous && previous !== sourceType) {
+      // Best-effort invalidation of the previous value (logged on failure): a stale
+      // previous fact does not block setting the new type — the add below is the
+      // authoritative write.
+      const invalidateRes = await this.invoke("kgInvalidate", { subject: closetId, predicate: "es-source-type", object: previous });
+      if (invalidateRes.ok === false) {
+      console.warn(`[memgraph] es-source-type invalidation of ${closetId}/${previous} failed (kind=${invalidateRes.kind}), continuing to set new type: ${invalidateRes.detail}`);
       }
-      await this.kgAdd({
-        subject: closetId,
-        predicate: "es-source-type",
-        object: sourceType,
-        source_closet: closetId,
-        source_run_id: sourceRunId,
-      });
-      return true;
-    } catch {
-      // non-fatal: leave the closet unstamped rather than fail the caller
+    }
+    const addRes = await this.invoke("kgAdd", {
+      subject: closetId,
+      predicate: "es-source-type",
+      object: sourceType,
+      source_closet: closetId,
+      source_run_id: sourceRunId,
+    });
+    if (addRes.ok === false) {
+      // non-fatal: leave the closet unstamped rather than fail the caller (logged).
+      console.warn(`[memgraph] es-source-type set for ${closetId} failed (kind=${addRes.kind}), leaving axis unknown: ${addRes.detail}`);
       return false;
     }
+    return true;
   }
 
 
@@ -1132,20 +1273,16 @@ export class MemgraphClient {
 
   /** Read a node's es-staleness flag. Returns the current value (e.g. "source-changed") or null when unflagged or on read failure. */
   async getStaleness(nodeId: string): Promise<string | null> {
-    try {
-      const result = await this.kgQuery({
-        entity: nodeId,
-        direction: "outgoing",
-        predicate: "es-staleness",
-        recurse: false,
-        max_depth: 1,
-      });
-      const values = this.uniqueFromFactsByDirection(this.parseKgFacts(result), "outgoing");
-      return values.length > 0 ? values[0] : null;
-    } catch {
-      // non-fatal: a failed read reads as "unflagged", not an error
-      return null;
-    }
+    // Degrade to "unflagged" on read failure (logged).
+    const result = await this.kgQueryIgnoringFailure({
+      entity: nodeId,
+      direction: "outgoing",
+      predicate: "es-staleness",
+      recurse: false,
+      max_depth: 1,
+    }, `getStaleness(${nodeId}) read failure degrades to unflagged`);
+    const values = this.uniqueFromFactsByDirection(this.parseKgFacts(result), "outgoing");
+    return values.length > 0 ? values[0] : null;
   }
 
   /**
@@ -1168,11 +1305,9 @@ export class MemgraphClient {
         const index = cursor;
         cursor += 1;
         const id = ids[index];
-        try {
-          out.set(id, await this.getStaleness(id));
-        } catch {
-          out.set(id, null); // non-fatal: a failed read reads as "unflagged" (neutral)
-        }
+        // getStaleness already degrades a failed read to null (logged) and never
+        // throws, so no wrapper is needed — the aggregate stays neutral per node.
+        out.set(id, await this.getStaleness(id));
       }
     };
     const slots = Math.max(1, Math.min(concurrency, ids.length));
@@ -1191,27 +1326,33 @@ export class MemgraphClient {
   async setStalenessFlag(nodeId: string, value: string, sourceRunId?: string): Promise<boolean> {
     const id = this.asString(nodeId).trim();
     if (!id) return false;
-    try {
-      const previous = await this.getStaleness(id);
-      if (previous === value) {
-        // Already current — no invalidation, no duplicate write.
-        return true;
-      }
-      if (previous && previous !== value) {
-        await this.kgInvalidate({ subject: id, predicate: "es-staleness", object: previous }).catch(() => ({}));
-      }
-      await this.kgAdd({
-        subject: id,
-        predicate: "es-staleness",
-        object: value,
-        source_closet: id,
-        source_run_id: sourceRunId,
-      });
+    const previous = await this.getStaleness(id);
+    if (previous === value) {
+      // Already current — no invalidation, no duplicate write.
       return true;
-    } catch {
-      // non-fatal: leave the node unflagged rather than fail the caller
+    }
+    if (previous && previous !== value) {
+      // Best-effort invalidation of the prior es-staleness value (logged on failure):
+      // a stale prior flag does not block setting the new one — the add below is the
+      // authoritative write. Scoped to es-staleness only, never other axes.
+      const invalidateRes = await this.invoke("kgInvalidate", { subject: id, predicate: "es-staleness", object: previous });
+      if (invalidateRes.ok === false) {
+      console.warn(`[memgraph] es-staleness invalidation of ${id}/${previous} failed (kind=${invalidateRes.kind}), continuing to set new flag: ${invalidateRes.detail}`);
+      }
+    }
+    const addRes = await this.invoke("kgAdd", {
+      subject: id,
+      predicate: "es-staleness",
+      object: value,
+      source_closet: id,
+      source_run_id: sourceRunId,
+    });
+    if (addRes.ok === false) {
+      // non-fatal: leave the node unflagged rather than fail the caller (logged).
+      console.warn(`[memgraph] es-staleness set for ${id} failed (kind=${addRes.kind}), leaving node unflagged: ${addRes.detail}`);
       return false;
     }
+    return true;
   }
 
 
@@ -1246,29 +1387,26 @@ export class MemgraphClient {
         const index = cursor;
         cursor += 1;
         const id = ids[index];
-        try {
-          const result = await this.kgQuery({
-            entity: id,
-            direction: "outgoing",
-            predicate: "es-outcome",
-            recurse: false,
-            max_depth: 1,
-          });
-          const counts = empty();
-          for (const fact of this.parseKgFacts(result)) {
-            if (!this.asBoolean(fact.current, true)) continue;
-            const value = this.asString(fact.object).trim();
-            if (value === "accept") counts.accept += 1;
-            else if (value === "revise") counts.revise += 1;
-            else if (value === "failed") counts.failed += 1;
-            else if (value === "unused") counts.unused += 1;
-            // unknown values are ignored — the axis is closed by construction
-          }
-          counts.total = counts.accept + counts.revise + counts.failed + counts.unused;
-          out.set(id, counts);
-        } catch {
-          out.set(id, empty()); // non-fatal: a failed read reads as "no history" (neutral)
+        // Degrade to "no history" on read failure (logged).
+        const result = await this.kgQueryIgnoringFailure({
+          entity: id,
+          direction: "outgoing",
+          predicate: "es-outcome",
+          recurse: false,
+          max_depth: 1,
+        }, `getOutcomeCounts(${id}) read failure degrades to no history`);
+        const counts = empty();
+        for (const fact of this.parseKgFacts(result)) {
+          if (!this.asBoolean(fact.current, true)) continue;
+          const value = this.asString(fact.object).trim();
+          if (value === "accept") counts.accept += 1;
+          else if (value === "revise") counts.revise += 1;
+          else if (value === "failed") counts.failed += 1;
+          else if (value === "unused") counts.unused += 1;
+          // unknown values are ignored — the axis is closed by construction
         }
+        counts.total = counts.accept + counts.revise + counts.failed + counts.unused;
+        out.set(id, counts);
       }
     };
     const slots = Math.max(1, Math.min(concurrency, ids.length));
@@ -1353,18 +1491,18 @@ export class MemgraphClient {
     const id = this.asString(bucketId).trim();
     const shape = this.asString(canonicalShape).trim();
     if (!id || !shape) return false;
-    try {
-      await this.kgAdd({
-        subject: id,
-        predicate: MemgraphClient.CAPABILITY_SHAPE_PREDICATE,
-        object: shape,
-        source_closet: id,
-      });
-      return true;
-    } catch {
-      // non-fatal: leave the axis "unknown" rather than fail the caller
+    const res = await this.invoke("kgAdd", {
+      subject: id,
+      predicate: MemgraphClient.CAPABILITY_SHAPE_PREDICATE,
+      object: shape,
+      source_closet: id,
+    });
+    if (res.ok === false) {
+      // non-fatal: leave the axis "unknown" rather than fail the caller (logged).
+      console.warn(`[memgraph] es-capability-shape set for ${id} failed (kind=${res.kind}), leaving axis unknown: ${res.detail}`);
       return false;
     }
+    return true;
   }
 
   /**
@@ -1375,18 +1513,18 @@ export class MemgraphClient {
     const id = this.asString(bucketId).trim();
     const value = this.asString(tier).trim();
     if (!id || !value) return false;
-    try {
-      await this.kgAdd({
-        subject: id,
-        predicate: MemgraphClient.CAPABILITY_TIER_PREDICATE,
-        object: value,
-        source_closet: id,
-      });
-      return true;
-    } catch {
-      // non-fatal: leave the axis "unknown" rather than fail the caller
+    const res = await this.invoke("kgAdd", {
+      subject: id,
+      predicate: MemgraphClient.CAPABILITY_TIER_PREDICATE,
+      object: value,
+      source_closet: id,
+    });
+    if (res.ok === false) {
+      // non-fatal: leave the axis "unknown" rather than fail the caller (logged).
+      console.warn(`[memgraph] es-capability-tier set for ${id} failed (kind=${res.kind}), leaving axis unknown: ${res.detail}`);
       return false;
     }
+    return true;
   }
 
   /**
@@ -1437,25 +1575,22 @@ export class MemgraphClient {
         cursor += 1;
         const { tier, bucketId } = tiers[index];
         const counts = empty();
-        try {
-          const result = await this.kgQuery({
-            entity: bucketId,
-            direction: "outgoing",
-            predicate: MemgraphClient.CAPABILITY_OUTCOME_PREDICATE,
-            recurse: false,
-            max_depth: 1,
-          });
-          for (const fact of this.parseKgFacts(result)) {
-            if (!this.asBoolean(fact.current, true)) continue;
-            const value = this.asString(fact.object).trim();
-            if (value === "accept") counts.accept += 1;
-            else if (value === "revise") counts.revise += 1;
-            else if (value === "failed") counts.failed += 1;
-            else if (value === "unused") counts.unused += 1;
-            // unknown values are ignored — the axis is closed by construction
-          }
-        } catch {
-          // non-fatal: a failed read reads as "no history" (neutral) for this tier
+        // Degrade to "no history" on read failure (logged).
+        const result = await this.kgQueryIgnoringFailure({
+          entity: bucketId,
+          direction: "outgoing",
+          predicate: MemgraphClient.CAPABILITY_OUTCOME_PREDICATE,
+          recurse: false,
+          max_depth: 1,
+        }, `getCapabilityRoutingEvidence(${bucketId}) read failure degrades to no history`);
+        for (const fact of this.parseKgFacts(result)) {
+          if (!this.asBoolean(fact.current, true)) continue;
+          const value = this.asString(fact.object).trim();
+          if (value === "accept") counts.accept += 1;
+          else if (value === "revise") counts.revise += 1;
+          else if (value === "failed") counts.failed += 1;
+          else if (value === "unused") counts.unused += 1;
+          // unknown values are ignored — the axis is closed by construction
         }
         counts.total = counts.accept + counts.revise + counts.failed + counts.unused;
         countsByTier.set(tier, counts);
@@ -1548,18 +1683,18 @@ export class MemgraphClient {
     const id = this.asString(bucketId).trim();
     const shape = this.asString(canonicalShape).trim();
     if (!id || !shape) return false;
-    try {
-      await this.kgAdd({
-        subject: id,
-        predicate: MemgraphClient.FAILURE_SHAPE_PREDICATE,
-        object: shape.slice(0, 200),
-        source_closet: id,
-      });
-      return true;
-    } catch {
-      // non-fatal: leave the axis "unknown" rather than fail the caller
+    const res = await this.invoke("kgAdd", {
+      subject: id,
+      predicate: MemgraphClient.FAILURE_SHAPE_PREDICATE,
+      object: shape.slice(0, 200),
+      source_closet: id,
+    });
+    if (res.ok === false) {
+      // non-fatal: leave the axis "unknown" rather than fail the caller (logged).
+      console.warn(`[memgraph] es-failure-shape set for ${id} failed (kind=${res.kind}), leaving axis unknown: ${res.detail}`);
       return false;
     }
+    return true;
   }
 
   /**
@@ -1572,17 +1707,22 @@ export class MemgraphClient {
     const id = this.asString(patchId).trim();
     const lbl = this.asString(label).trim();
     if (!id || !lbl) return false;
-    try {
-      await this.kgAdd({ subject: id, predicate: MemgraphClient.INTERVENTION_LABEL_PREDICATE, object: lbl, source_closet: id });
-      const clipped = this.asString(text).trim().slice(0, 500);
-      if (clipped) {
-        await this.kgAdd({ subject: id, predicate: MemgraphClient.INTERVENTION_TEXT_PREDICATE, object: clipped, source_closet: id });
-      }
-      return true;
-    } catch {
-      // non-fatal: an intervention write failure degrades to "no known patch"
+    const labelRes = await this.invoke("kgAdd", { subject: id, predicate: MemgraphClient.INTERVENTION_LABEL_PREDICATE, object: lbl, source_closet: id });
+    if (labelRes.ok === false) {
+      // non-fatal: an intervention write failure degrades to "no known patch" (logged).
+      console.warn(`[memgraph] intervention label write for ${id} failed (kind=${labelRes.kind}), degrading to no known patch: ${labelRes.detail}`);
       return false;
     }
+    const clipped = this.asString(text).trim().slice(0, 500);
+    if (clipped) {
+      const textRes = await this.invoke("kgAdd", { subject: id, predicate: MemgraphClient.INTERVENTION_TEXT_PREDICATE, object: clipped, source_closet: id });
+      if (textRes.ok === false) {
+        // non-fatal: the label is already stamped; a failed text write degrades to a
+        // patch with no text (logged).
+        console.warn(`[memgraph] intervention text write for ${id} failed (kind=${textRes.kind}), leaving patch without text: ${textRes.detail}`);
+      }
+    }
+    return true;
   }
 
   /**
@@ -1596,28 +1736,25 @@ export class MemgraphClient {
   ): Promise<{ spiral: number; loop: number; total: number }> {
     const id = this.asString(bucketId).trim();
     if (!id) return { spiral: 0, loop: 0, total: 0 };
-    try {
-      const result = await this.kgQuery({
-        entity: id,
-        direction: "outgoing",
-        predicate: MemgraphClient.FAILURE_EVENT_PREDICATE,
-        recurse: false,
-        max_depth: 1,
-      });
-      let spiral = 0;
-      let loop = 0;
-      for (const fact of this.parseKgFacts(result)) {
-        if (!this.asBoolean(fact.current, true)) continue;
-        const value = this.asString(fact.object).trim();
-        if (value === "spiral") spiral += 1;
-        else if (value === "loop") loop += 1;
-        // unknown values are ignored — the axis is closed by construction
-      }
-      return { spiral, loop, total: spiral + loop };
-    } catch {
-      // non-fatal: a failed read reads as "no history" (neutral)
-      return { spiral: 0, loop: 0, total: 0 };
+    // Degrade to "no history" on read failure (logged). A failed read must never look
+    // like "this model is bad" or "fine".
+    const result = await this.kgQueryIgnoringFailure({
+      entity: id,
+      direction: "outgoing",
+      predicate: MemgraphClient.FAILURE_EVENT_PREDICATE,
+      recurse: false,
+      max_depth: 1,
+    }, `getFailureCounts(${id}) read failure degrades to no history`);
+    let spiral = 0;
+    let loop = 0;
+    for (const fact of this.parseKgFacts(result)) {
+      if (!this.asBoolean(fact.current, true)) continue;
+      const value = this.asString(fact.object).trim();
+      if (value === "spiral") spiral += 1;
+      else if (value === "loop") loop += 1;
+      // unknown values are ignored — the axis is closed by construction
     }
+    return { spiral, loop, total: spiral + loop };
   }
 
   /**
@@ -1640,21 +1777,19 @@ export class MemgraphClient {
     const out: string[] = [];
     for (const label of labels.slice(0, maxPatches)) {
       const patchId = `failure-patch::${model}::${shape}::${label}`;
-      try {
-        const result = await this.kgQuery({
-          entity: patchId,
-          direction: "outgoing",
-          predicate: MemgraphClient.INTERVENTION_TEXT_PREDICATE,
-          recurse: false,
-          max_depth: 1,
-        });
-        for (const fact of this.parseKgFacts(result)) {
-          if (!this.asBoolean(fact.current, true)) continue;
-          const text = this.asString(fact.object).trim();
-          if (text && !out.includes(text)) out.push(text);
-        }
-      } catch {
-        // non-fatal: skip this label
+      // Degrade to "no patch text" on read failure (logged). Absent data yields no
+      // injection, no prompt bloat.
+      const result = await this.kgQueryIgnoringFailure({
+        entity: patchId,
+        direction: "outgoing",
+        predicate: MemgraphClient.INTERVENTION_TEXT_PREDICATE,
+        recurse: false,
+        max_depth: 1,
+      }, `getFailureInterventions(${patchId}) read failure skips label`);
+      for (const fact of this.parseKgFacts(result)) {
+        if (!this.asBoolean(fact.current, true)) continue;
+        const text = this.asString(fact.object).trim();
+        if (text && !out.includes(text)) out.push(text);
       }
     }
     return out.slice(0, maxPatches);
@@ -1815,25 +1950,23 @@ export class MemgraphClient {
     let revise = 0;
     let failed = 0;
     let unused = 0;
-    try {
-      const result = await this.kgQuery({
-        entity: bucketId,
-        direction: "outgoing",
-        predicate: MemgraphClient.CALIBRATION_OUTCOME_PREDICATE,
-        recurse: false,
-        max_depth: 1,
-      });
-      for (const fact of this.parseKgFacts(result)) {
-        if (!this.asBoolean(fact.current, true)) continue;
-        const value = this.asString(fact.object).trim();
-        if (value === "accept") accept += 1;
-        else if (value === "revise") revise += 1;
-        else if (value === "failed") failed += 1;
-        else if (value === "unused") unused += 1;
-        // unknown values are ignored — the axis is closed by construction
-      }
-    } catch {
-      // non-fatal: a failed read reads as "no history" (neutral)
+    // Degrade to "no history" on read failure (logged). A failed read must look like
+    // "no data", never like "this model is miscalibrated".
+    const result = await this.kgQueryIgnoringFailure({
+      entity: bucketId,
+      direction: "outgoing",
+      predicate: MemgraphClient.CALIBRATION_OUTCOME_PREDICATE,
+      recurse: false,
+      max_depth: 1,
+    }, `getCalibrationCell(${bucketId}) read failure degrades to no history`);
+    for (const fact of this.parseKgFacts(result)) {
+      if (!this.asBoolean(fact.current, true)) continue;
+      const value = this.asString(fact.object).trim();
+      if (value === "accept") accept += 1;
+      else if (value === "revise") revise += 1;
+      else if (value === "failed") failed += 1;
+      else if (value === "unused") unused += 1;
+      // unknown values are ignored — the axis is closed by construction
     }
     const total = accept + revise + failed + unused;
     return {
@@ -2025,19 +2158,20 @@ export class MemgraphClient {
     const room = this.asString(args.room).trim() || "reminders";
     const limit = Math.max(1, Math.min(50, Number(args.limit) || 20));
 
-    let rows: JsonMap[];
-    try {
-      const payload = await this.listDrawers({ wing, room, limit, offset: 0 });
-      const root = this.asObject(payload);
-      const pool = Array.isArray(root.drawers)
-        ? (root.drawers as unknown[])
-        : Array.isArray(root.results)
-          ? (root.results as unknown[])
-          : [];
-      rows = pool.slice(0, limit).map((row) => this.asObject(row));
-    } catch {
-      return []; // non-fatal: the render degrades to "no pending section"
+    const pageRes = await this.invoke("listDrawers", { wing, room, limit, offset: 0 });
+    if (pageRes.ok === false) {
+      // non-fatal: the render degrades to "no pending section" (logged). A failed
+      // room page must not look like "there are no reminders".
+      console.warn(`[memgraph] listReminders room page (${wing}/${room}) failed (kind=${pageRes.kind}), rendering no pending section: ${pageRes.detail}`);
+      return [];
     }
+    const root = this.asObject(pageRes.value);
+    const pool = Array.isArray(root.drawers)
+      ? (root.drawers as unknown[])
+      : Array.isArray(root.results)
+        ? (root.results as unknown[])
+        : [];
+    const rows = pool.slice(0, limit).map((row) => this.asObject(row));
 
     const ids = rows
       .map((row) => this.asString(row.drawer_id || row.node_id || row.id).trim())
@@ -2076,20 +2210,20 @@ export class MemgraphClient {
           status: "unknown",
           conditions: [],
         };
-        try {
-          const result = await this.kgQuery({ entity: id, direction: "outgoing" });
-          for (const fact of this.parseKgFacts(result)) {
-            if (!this.asBoolean(fact.current, true)) continue;
-            const predicate = this.asString(fact.predicate).trim();
-            const object = this.asString(fact.object).trim();
-            if (!object) continue;
-            if (predicate === "triggers-on") item.conditions.push(object);
-            else if (predicate === "es-reminder-status") item.status = object.toLowerCase();
-            else if (predicate === "es-reminder-expires-at") item.expires_at = object;
-            else if (predicate === "es-reminder-satisfied-at") item.satisfied_at = object;
-          }
-        } catch {
-          // non-fatal: a failed edge read reads as "no facts" for this drawer
+        // Degrade to "no facts" on edge-read failure (logged).
+        const result = await this.kgQueryIgnoringFailure(
+          { entity: id, direction: "outgoing" },
+          `listReminders(${id}) edge read failure degrades to no facts`,
+        );
+        for (const fact of this.parseKgFacts(result)) {
+          if (!this.asBoolean(fact.current, true)) continue;
+          const predicate = this.asString(fact.predicate).trim();
+          const object = this.asString(fact.object).trim();
+          if (!object) continue;
+          if (predicate === "triggers-on") item.conditions.push(object);
+          else if (predicate === "es-reminder-status") item.status = object.toLowerCase();
+          else if (predicate === "es-reminder-expires-at") item.expires_at = object;
+          else if (predicate === "es-reminder-satisfied-at") item.satisfied_at = object;
         }
         out.push(item);
       }
@@ -2145,21 +2279,17 @@ export class MemgraphClient {
     const out: SourceDrawerWorkItem[] = [];
 
     for (const item of candidates) {
-      try {
-        const outgoing = await this.kgQuery({
-          entity: item.drawer_id,
-          direction: "outgoing",
-          predicate: "synthesized-from",
-          recurse: false,
-          max_depth: 1,
-        });
-        const sourceIds = this.uniqueFromFactsByDirection(this.parseKgFacts(outgoing), "outgoing");
-        if (sourceIds.length === 0) {
-          out.push(item);
-        }
-      } catch {
-        // Conservative fallback: if lineage inspection fails, keep the item in
-        // the raw worklist so consolidation does not silently miss evidence.
+      // Conservative fallback (logged): if lineage inspection fails, keep the item in
+      // the raw worklist so consolidation does not silently miss evidence.
+      const result = await this.kgQueryIgnoringFailure({
+        entity: item.drawer_id,
+        direction: "outgoing",
+        predicate: "synthesized-from",
+        recurse: false,
+        max_depth: 1,
+      }, `listSourceDrawersByScope(${item.drawer_id}) lineage read failure keeps item in worklist`);
+      const sourceIds = this.uniqueFromFactsByDirection(this.parseKgFacts(result), "outgoing");
+      if (sourceIds.length === 0) {
         out.push(item);
       }
     }
@@ -2172,13 +2302,9 @@ export class MemgraphClient {
     const out: SourceDrawerWorkItem[] = [];
 
     for (const item of rawItems) {
-      try {
-        if (!(await this.isSourceDrawerConsolidated(item.drawer_id))) out.push(item);
-      } catch {
-        // Conservative fallback: if lineage inspection fails, keep the item in
-        // the worklist so consolidation does not silently miss a raw memory.
-        out.push(item);
-      }
+      // isSourceDrawerConsolidated already degrades read failures to "unconsolidated"
+      // (logged), so a broken substrate re-surfaces the drawer rather than dropping it.
+      if (!(await this.isSourceDrawerConsolidated(item.drawer_id))) out.push(item);
     }
 
     return out;

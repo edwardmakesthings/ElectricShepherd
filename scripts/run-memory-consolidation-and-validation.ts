@@ -1466,7 +1466,7 @@ async function main(): Promise<void> {
 
   const client = createMemgraphClient({
     callTool: (name, args) =>
-      (isGraphWriteToolName(name) ? writeMCP : readMCP).callTool(name, args),
+      (isGraphWriteToolName(name) ? writeMCP : readMCP).callToolResult(name, args),
     toolPrefix,
   });
 

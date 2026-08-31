@@ -188,7 +188,7 @@ async function main(): Promise<void> {
   await mcp.initialize();
 
   const client = createMemgraphClient({
-    callTool: (name, toolArgs) => mcp.callTool(name, toolArgs),
+    callTool: (name, toolArgs) => mcp.callToolResult(name, toolArgs),
     toolPrefix,
   });
 

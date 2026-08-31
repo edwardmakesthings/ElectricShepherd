@@ -57,7 +57,7 @@ import {
 import type { AutoConsolidationTrigger, MemcoreInjectionRecord } from "../adapter/turn-guard-helpers.ts"
 import { loadPackagedAssets, mergeWithoutOverride, loadInstructionPaths, dedupeAppendInstructions } from "../adapter/asset-loader.ts"
 import { loadRuntimeConfig, getRuntimeConfigEnvMap, DEFAULT_MCP_URL, DEFAULT_MCP_TOOL_PREFIX } from "../adapter/runtime-config.ts"
-import { MCPHttpClient, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-client.ts"
+import { MCPHttpClient, SubstrateError, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-client.ts"
 import { createMemgraphClient } from "../adapter/memgraph.ts"
 import { retrieveSimilarWorkedExamples, formatWorkedExampleDemonstration, WORKED_EXAMPLE_MAX_INJECT, WORKED_EXAMPLE_RELEVANCE_FLOOR, extractWorkedExampleShape, buildWorkedExampleEntry, WORKED_EXAMPLE_FILE_AGENT_TYPES, WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS, CAPABILITY_TIER_BY_SUBAGENT, CAPABILITY_SUBAGENT_BY_TIER, mapTaskStatusToCapabilityOutcome, buildCapabilityCanonicalShape, buildCapabilityBucketId, canonicalModelId, buildFailureBucketId, buildFailurePatchId, FAILURE_PATCH_TEXT_MAX_CHARS, parseSelfReportedConfidence, buildCalibrationBucketId, INTERVENTION_REPLAY_HEADING, formatInterventionBlock } from "../adapter/retrieval-expansion.ts"
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts"
@@ -1398,7 +1398,9 @@ export const TurnGuard = async ({ client, directory }: any) => {
         })
         await mcp.initialize()
         return createMemgraphClient({
-          callTool: (name: string, args?: Record<string, unknown>) => mcp.callTool(name, args),
+          // Return the SubstrateResult directly so memgraph's typed failure handling
+          // (slice 2) can branch on ok/kind instead of treating a failure as an empty result.
+          callTool: async (name: string, args?: Record<string, unknown>) => mcp.callToolResult(name, args),
           toolPrefix,
         })
       })().catch((err) => {
@@ -1420,19 +1422,24 @@ export const TurnGuard = async ({ client, directory }: any) => {
           maxRetries: 0,
         })
         await mcp.initialize()
+        const callRaw = async (toolName: string, args?: Record<string, unknown>) => {
+          const result = await mcp.callToolResult(toolName, args)
+          if (!result.ok) throw new SubstrateError(result.kind, result.detail)
+          return result.value
+        }
         return {
           search: (q: string, limit?: number, wing?: string, room?: string) =>
-            mcp.callTool(`${toolPrefix}search`, { query: q, limit, wing, room }),
+            callRaw(`${toolPrefix}search`, { query: q, limit, wing, room }),
           getDrawer: (args: { drawer_id: string }) =>
-            mcp.callTool(`${toolPrefix}get_drawer`, args),
+            callRaw(`${toolPrefix}get_drawer`, args),
           // Phase 13 CREATE: write path for filing worked examples + stamping.
           diaryWrite: (args: Record<string, unknown>) =>
-            mcp.callTool(`${toolPrefix}diary_write`, args),
+            mcp.callToolResult(`${toolPrefix}diary_write`, args),
           kgAdd: (args: Record<string, unknown>) =>
-            mcp.callTool(`${toolPrefix}kg_add`, args),
+            mcp.callToolResult(`${toolPrefix}kg_add`, args),
           // Phase 15 CONSUME: bounded one-hop KG read for failure-mode patches.
           kgQuery: (args: Record<string, unknown>) =>
-            mcp.callTool(`${toolPrefix}kg_query`, args),
+            mcp.callToolResult(`${toolPrefix}kg_query`, args),
         }
       })().catch((err) => {
         console.log(`[turn-guard] worked-example injection: palace client init failed: ${String(err)}`)
@@ -1494,28 +1501,36 @@ export const TurnGuard = async ({ client, directory }: any) => {
       if (!palaceClient || typeof palaceClient.diaryWrite !== "function") return
 
       // File the worked example.
-      const result: any = await palaceClient.diaryWrite({
+      const writeResult: any = await palaceClient.diaryWrite({
         wing,
         room,
         entry,
         agent_name: "turn-guard",
         topic: `worked-example-${subagentType}`,
       })
+      if (!writeResult?.ok) {
+        console.log(
+          `[turn-guard] worked-example filing: diary_write failed (${writeResult?.kind ?? "unknown"}): ${String(writeResult?.detail ?? writeResult)} sid=${sid}`
+        )
+        return
+      }
+      const result = writeResult.value
 
       // Stamp es-source-type: worked-example via kg_add (best-effort — a stamp
       // failure does not invalidate the filed example; absence of stamp is not a
       // rejection on the CONSUME side).
       const drawerId = String(result?.drawer_id ?? result?.id ?? "").trim()
       if (drawerId && typeof palaceClient.kgAdd === "function") {
-        try {
-          await palaceClient.kgAdd({
-            subject: drawerId,
-            predicate: "es-source-type",
-            object: "worked-example",
-            source_closet: drawerId,
-          })
-        } catch (stampErr) {
-          console.log(`[turn-guard] worked-example filing: stamp failed (non-fatal): ${String(stampErr)}`)
+        const stampResult: any = await palaceClient.kgAdd({
+          subject: drawerId,
+          predicate: "es-source-type",
+          object: "worked-example",
+          source_closet: drawerId,
+        })
+        if (!stampResult?.ok) {
+          console.log(
+            `[turn-guard] worked-example filing: stamp failed (non-fatal; ${stampResult?.kind ?? "unknown"}): ${String(stampResult?.detail ?? stampResult)} sid=${sid}`
+          )
         }
       }
 
@@ -1579,35 +1594,43 @@ export const TurnGuard = async ({ client, directory }: any) => {
       if (!palaceClient || typeof palaceClient.kgAdd !== "function") return
 
       // Record the outcome edge (the core of the capability tuple).
-      await palaceClient.kgAdd({
+      const outcomeResult: any = await palaceClient.kgAdd({
         subject: bucketId,
         predicate: "es-capability-outcome",
         object: outcome,
         valid_from: new Date().toISOString(),
         source_closet: bucketId,
       })
+      if (!outcomeResult?.ok) {
+        console.log(
+          `[turn-guard] capability recording: failed (${outcomeResult?.kind ?? "unknown"}): ${String(outcomeResult?.detail ?? outcomeResult)} sid=${sid}`
+        )
+        return
+      }
 
       // Best-effort shape metadata for explainability (one-time per bucket; a
       // duplicate stamp is harmless and idempotent on the read side).
-      try {
-        await palaceClient.kgAdd({
-          subject: bucketId,
-          predicate: "es-capability-shape",
-          object: canonicalShape.slice(0, 200),
-          source_closet: bucketId,
-        })
-      } catch (shapeErr) {
-        console.log(`[turn-guard] capability recording: shape stamp failed (non-fatal): ${String(shapeErr)}`)
+      const shapeResult: any = await palaceClient.kgAdd({
+        subject: bucketId,
+        predicate: "es-capability-shape",
+        object: canonicalShape.slice(0, 200),
+        source_closet: bucketId,
+      })
+      if (!shapeResult?.ok) {
+        console.log(
+          `[turn-guard] capability recording: shape stamp failed (non-fatal; ${shapeResult?.kind ?? "unknown"}): ${String(shapeResult?.detail ?? shapeResult)} sid=${sid}`
+        )
       }
-      try {
-        await palaceClient.kgAdd({
-          subject: bucketId,
-          predicate: "es-capability-tier",
-          object: tier,
-          source_closet: bucketId,
-        })
-      } catch (tierErr) {
-        console.log(`[turn-guard] capability recording: tier stamp failed (non-fatal): ${String(tierErr)}`)
+      const tierResult: any = await palaceClient.kgAdd({
+        subject: bucketId,
+        predicate: "es-capability-tier",
+        object: tier,
+        source_closet: bucketId,
+      })
+      if (!tierResult?.ok) {
+        console.log(
+          `[turn-guard] capability recording: tier stamp failed (non-fatal; ${tierResult?.kind ?? "unknown"}): ${String(tierResult?.detail ?? tierResult)} sid=${sid}`
+        )
       }
 
       // Record the dedup key for this session.
@@ -1695,18 +1718,30 @@ export const TurnGuard = async ({ client, directory }: any) => {
       const palaceClient = await getWorkedExampleClient()
       if (palaceClient && typeof palaceClient.kgAdd === "function") {
         const patchId = buildFailurePatchId(modelId, shape.shapeKey, interventionLabel)
-        await palaceClient.kgAdd({
+        const labelResult: any = await palaceClient.kgAdd({
           subject: patchId,
           predicate: "es-intervention-label",
           object: interventionLabel,
           source_closet: patchId,
         })
-        await palaceClient.kgAdd({
+        if (!labelResult?.ok) {
+          console.log(
+            `[turn-guard] failure recording: intervention failed (${labelResult?.kind ?? "unknown"}): ${String(labelResult?.detail ?? labelResult)} sid=${sid}`
+          )
+          return
+        }
+        const textResult: any = await palaceClient.kgAdd({
           subject: patchId,
           predicate: "es-intervention-text",
           object: text,
           source_closet: patchId,
         })
+        if (!textResult?.ok) {
+          console.log(
+            `[turn-guard] failure recording: intervention failed (${textResult?.kind ?? "unknown"}): ${String(textResult?.detail ?? textResult)} sid=${sid}`
+          )
+          return
+        }
         console.log(
           `[turn-guard] failure recording: WORKED intervention ${interventionLabel} persisted ` +
             `for ${modelId} (shape=${shape.shapeKey}, patch=${patchId}) sid=${sid}`,
@@ -1762,23 +1797,30 @@ export const TurnGuard = async ({ client, directory }: any) => {
     try {
       const palaceClient = await getWorkedExampleClient()
       if (palaceClient && typeof palaceClient.kgAdd === "function") {
-        await palaceClient.kgAdd({
+        const eventResult: any = await palaceClient.kgAdd({
           subject: bucketId,
           predicate: "es-failure-event",
           object: event,
           valid_from: new Date().toISOString(),
           source_closet: bucketId,
         })
+        if (!eventResult?.ok) {
+          console.log(
+            `[turn-guard] failure recording: event failed (${eventResult?.kind ?? "unknown"}): ${String(eventResult?.detail ?? eventResult)} sid=${sid}`
+          )
+          return
+        }
         // Best-effort shape metadata for explainability (idempotent on the read side).
-        try {
-          await palaceClient.kgAdd({
-            subject: bucketId,
-            predicate: "es-failure-shape",
-            object: buildCapabilityCanonicalShape(shape).slice(0, 200),
-            source_closet: bucketId,
-          })
-        } catch (shapeErr) {
-          console.log(`[turn-guard] failure recording: shape stamp failed (non-fatal): ${String(shapeErr)}`)
+        const shapeResult: any = await palaceClient.kgAdd({
+          subject: bucketId,
+          predicate: "es-failure-shape",
+          object: buildCapabilityCanonicalShape(shape).slice(0, 200),
+          source_closet: bucketId,
+        })
+        if (!shapeResult?.ok) {
+          console.log(
+            `[turn-guard] failure recording: shape stamp failed (non-fatal; ${shapeResult?.kind ?? "unknown"}): ${String(shapeResult?.detail ?? shapeResult)} sid=${sid}`
+          )
         }
         recordedBySession.add(dedupKey)
         failureRecordedBySession.set(sid, recordedBySession)
@@ -3601,22 +3643,25 @@ export const TurnGuard = async ({ client, directory }: any) => {
                 // Bounded read: one kg_query per candidate label (max 3).
                 const patchTexts: string[] = []
                 for (const label of ["spiral-nudge", "retry-nudge", "loop-block"]) {
-                  try {
-                    const result: any = await palaceClient.kgQuery({
-                      entity: buildFailurePatchId(modelId, shape.shapeKey, label),
-                      direction: "outgoing",
-                      predicate: "es-intervention-text",
-                      recurse: false,
-                      max_depth: 1,
-                    })
-                    const facts = Array.isArray(result?.facts) ? result.facts : []
-                    for (const fact of facts) {
-                      if (fact && fact.current === false) continue
-                      const t = String(fact?.object ?? "").trim()
-                      if (t && !patchTexts.includes(t)) patchTexts.push(t)
-                    }
-                  } catch {
+                  const result: any = await palaceClient.kgQuery({
+                    entity: buildFailurePatchId(modelId, shape.shapeKey, label),
+                    direction: "outgoing",
+                    predicate: "es-intervention-text",
+                    recurse: false,
+                    max_depth: 1,
+                  })
+                  if (!result?.ok) {
                     // non-fatal: skip this label
+                    console.log(
+                      `[turn-guard] failure-patch injection: kg_query failed for ${label} (${result?.kind ?? "unknown"}): ${String(result?.detail ?? result)} sid=${sid}`
+                    )
+                    continue
+                  }
+                  const facts = Array.isArray(result.value?.facts) ? result.value.facts : []
+                  for (const fact of facts) {
+                    if (fact && fact.current === false) continue
+                    const t = String(fact?.object ?? "").trim()
+                    if (t && !patchTexts.includes(t)) patchTexts.push(t)
                   }
                 }
                 if (patchTexts.length > 0) {

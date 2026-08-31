@@ -35,6 +35,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Run structural architecture checks
+        # Rung 0a (docs/2026-08_architecture-rebuild-spec.md §6.6): substrate
+        # boundary, silent-swallow ban, and layer direction. Runs before tests so
+        # an architectural regression fails the build immediately.
+        run: npm run verify:structural
+
       - name: Run unit tests
         # `npm test` collects unit + integration files. Without the gate the
         # endpoint-gated integration tests self-skip and print a loud banner;

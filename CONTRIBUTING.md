@@ -31,6 +31,11 @@ Minimum checks before opening a PR:
 # Ensure package contents are correct
 npm pack --dry-run
 
+# Structural architecture checks (Rung 0a, docs/2026-08_architecture-rebuild-spec.md §6.6):
+# substrate boundary, silent-swallow ban, layer direction. Fast and offline; fails
+# the build on any violation. Runs in CI before tests.
+npm run verify:structural
+
 # Run the full suite — unit + integration files. Integration tests self-skip
 # without a MemPalace endpoint and ESHEPHERD_TEST_INTEGRATION=1, so this stays
 # fast and offline by default. (Unit-only: npm run test:unit)
