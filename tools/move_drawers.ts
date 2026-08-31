@@ -13,7 +13,7 @@ import {
   runDrawerBatch,
   summarizeFailures,
   type BatchResultRow,
-} from "./bulk_drawer_ops.ts";
+} from "../core/substrate.ts";
 
 declare const process: {
   env: Record<string, string | undefined>;

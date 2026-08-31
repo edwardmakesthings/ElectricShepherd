@@ -12,7 +12,7 @@ import {
   runDrawerBatch,
   summarizeFailures,
   type BatchResultRow,
-} from "./bulk_drawer_ops.ts";
+} from "../core/substrate.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
 
 declare const process: {
