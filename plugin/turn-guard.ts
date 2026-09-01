@@ -66,6 +66,7 @@ import { loadRuntimeEnv } from "../scripts/runtime-env.ts"
 
 import { createHookHeadHandlers } from "./session-policy/hook-head.ts"
 import { createToolRegistry } from "./session-policy/registry.ts"
+import { getText, hasFinalReviewSignal, hasActionPart, isAssistantStop, isSerenaMemoryToolTurn } from "./session-policy/analysis.ts"
 
 // Absolute path to the ElectricShepherd install root (the plugin's own repo).
 // Runtime scripts must run from HERE — not the consumer project's cwd — so
@@ -778,13 +779,6 @@ async function runSourceCaptureCommand(
   }
 }
 
-function getText(parts: any[]): string {
-  return parts
-    .filter((p) => p?.type === "text" && typeof p?.text === "string")
-    .map((p) => p.text)
-    .join("\n")
-    .trim()
-}
 
 function hasUsefulPayload(msg: MessageWithParts): boolean {
   const parts = msg.parts ?? []
@@ -798,19 +792,7 @@ function hasUsefulPayload(msg: MessageWithParts): boolean {
   return false
 }
 
-function hasFinalReviewSignal(msg: MessageWithParts): boolean {
-  const text = getText(msg.parts ?? []).toLowerCase()
-  if (!text) return false
-  return /review|summary|what i did|what changed|result|blocker|next step|next action/.test(text)
-}
 
-function hasActionPart(msg: MessageWithParts | null | undefined): boolean {
-  const parts = msg?.parts ?? []
-  return parts.some((p: any) => {
-    const type = String(p?.type ?? "")
-    return type === "tool" || type === "patch" || type === "file" || type === "subtask"
-  })
-}
 
 function isCapabilityQuestion(text: string): boolean {
   const normalized = String(text || "").trim().toLowerCase()
@@ -835,23 +817,11 @@ function endsMidIntent(msg: MessageWithParts): boolean {
   return danglingColon || announcesAction
 }
 
-function isAssistantStop(msg: MessageWithParts): boolean {
-  return msg?.info?.role === "assistant" && msg?.info?.finish === "stop"
-}
 
 function isAssistantToolCallFinish(msg: MessageWithParts): boolean {
   return msg?.info?.role === "assistant" && msg?.info?.finish === "tool-calls"
 }
 
-function isSerenaMemoryToolTurn(msg: MessageWithParts | null | undefined): boolean {
-  if (!msg) return false
-  const parts = msg.parts ?? []
-  return parts.some((p: any) => {
-    if (p?.type !== "tool") return false
-    const name = String(p?.tool ?? "").toLowerCase()
-    return /^serena_/.test(name) && /memory/.test(name)
-  })
-}
 
 function partTypes(msg: MessageWithParts | null | undefined): string {
   const parts = msg?.parts ?? []
