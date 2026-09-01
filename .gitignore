@@ -221,6 +221,7 @@ __marimo__/
 .opencode-plugin-health/
 .electric-shepherd/
 .electric-shepherd-cadence-state.json
+eshepherd-config.jsonc
 # Rendered mem-core output only (synthesized personal memory — never commit).
 # Note: this does NOT ignore the entire .electric-shepherd tree.
 .electric-shepherd/memory/

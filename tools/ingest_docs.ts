@@ -3,8 +3,8 @@
  * project wing's `reference` room and stamp every ingested drawer
  * `es-source-type: doc`.
  *
- * Mining is delegated to the substrate `mempalace_mine` (mode "projects", wing pinned),
- * which stamps absolute `source_file` so `mempalace_sync` can prune deletions later.
+ * Mining is delegated to the substrate mine tool (mode "projects", wing pinned),
+ * which stamps absolute `source_file` so the substrate sync tool can prune deletions later.
  * What ES adds on top (the miner knows nothing about the source-type axis):
  *   1. room selection under the naming contract — `get_taxonomy`, reuse an existing
  *      reference-like room before minting `reference`;
@@ -587,7 +587,7 @@ function clampNumber(value: unknown, fallback: number, min: number, max: number)
 
 export default tool({
   description:
-    "Phase 3 doc ingestion: mine a docs directory into the project wing's `reference` room via substrate mempalace_mine (projects mode), stamp every ingested drawer es-source-type: doc, and on re-ingest invalidate stale KG facts on changed drawers (bounded pre/post ID snapshot + id-diff) and soft-flag syntheses that concern a changed doc with es-staleness: source-changed (flag only — never invalidates a synthesis). Reuses an existing reference-like room via get_taxonomy before minting one. Dry-run by default — the first call makes no mutating MCP call; pass dry_run:false to apply.",
+    "Phase 3 doc ingestion: mine a docs directory into the project wing's `reference` room via the substrate mine tool (projects mode), stamp every ingested drawer es-source-type: doc, and on re-ingest invalidate stale KG facts on changed drawers (bounded pre/post ID snapshot + id-diff) and soft-flag syntheses that concern a changed doc with es-staleness: source-changed (flag only — never invalidates a synthesis). Reuses an existing reference-like room via get_taxonomy before minting one. Dry-run by default — the first call makes no mutating MCP call; pass dry_run:false to apply.",
   args: {
     path: tool.schema.string().describe("Directory of docs to mine (required)."),
     wing: tool.schema.string().optional().describe("Wing to mine into. Defaults to this project's wing."),

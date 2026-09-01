@@ -182,7 +182,7 @@ project that enables the plugin — no need to run OpenCode from inside this rep
 
 User-defined entries always win: if you declare an agent or command with the same name, yours
 overrides the bundled one. Opt out of instruction injection with `assets.injectInstructions=false`
-in `.electric-shepherd/config.jsonc`.
+in `eshepherd-config.jsonc`.
 
 ### What loads automatically vs. what is provided
 
@@ -195,7 +195,7 @@ markdown files at startup and injects them into the resolved config:
 | Plugin (`plugin/turn-guard.ts`) | Yes | Yes | `"plugin": ["electric-shepherd"]` |
 | Agents (`agents/*.md`) | Yes | Yes | Injected into `config.agent` by the plugin's `config` hook |
 | Commands (`command/*.md`) | Yes | Yes | Injected into `config.command` by the plugin's `config` hook |
-| Instructions (`instructions/agent-discipline.md`) | Yes | Yes | Absolute paths appended to `config.instructions` (opt out: `assets.injectInstructions=false` in `.electric-shepherd/config.jsonc`) |
+| Instructions (`instructions/agent-discipline.md`) | Yes | Yes | Absolute paths appended to `config.instructions` (opt out: `assets.injectInstructions=false` in `eshepherd-config.jsonc`) |
 | Skills (`skills/*/SKILL.md`) | Yes | No | OpenCode has no config-injection path for skills — place in your own `.opencode/skills/<name>/SKILL.md` if you want it |
 | Snippets (`snippets/*.md`) | Yes | No | OpenChamber snippet assets; not an OpenCode auto-load concept |
 
@@ -331,7 +331,7 @@ electric-shepherd/
 
 Runtime behavior is now config-file-first.
 
-1. Copy `electric-shepherd.config.example.jsonc` to `.electric-shepherd/config.jsonc`.
+1. Copy `eshepherd-config.example.jsonc` to `eshepherd-config.jsonc`.
 2. Edit behavior there (capture mode, consolidation cadence, guard thresholds, command overrides).
 3. Keep `.env` for secrets only.
 
@@ -349,11 +349,11 @@ Secret env vars:
 | `MEMPALACE_MCP_BEARER_TOKEN` | unset | Optional bearer token (alternate to API-key header style) |
 | `MEMPALACE_MCP_HEADERS_JSON` | unset | Optional JSON map of additional MCP HTTP headers |
 
-MCP endpoint URL, tool prefix, auth header name, and auth scheme are configured in `.electric-shepherd/config.jsonc` (`mcp.url`, `mcp.toolPrefix`, `mcp.authHeader`, `mcp.authScheme`). When `mcp.autoDiscover` is true and `mcp.url` is unset, runtime scripts auto-discover a live MemPalace hub endpoint/token from MemPalace's local server registry.
+MCP endpoint URL, tool prefix, auth header name, and auth scheme are configured in `eshepherd-config.jsonc` (`mcp.url`, `mcp.toolPrefix`, `mcp.authHeader`, `mcp.authScheme`). When `mcp.autoDiscover` is true and `mcp.url` is unset, runtime scripts auto-discover a live MemPalace hub endpoint/token from MemPalace's local server registry.
 
 Standalone consolidation runs prefer a native MemPalace-backed coordinator (`scripts/native-consolidation-coord.py`) and fall back to the local lockfile path if native coordination is unavailable. Native coordination is best-effort and activates when the configured Python (`mcp.pythonBin`) can import MemPalace runtime modules. Use `consolidation.lock.nativeCoordinatorDisabled` (or CLI `--no-native-coord`) to force lockfile-only behavior.
 
-By default, runtime scripts and plugin paths do not consume behavior toggles from env; they read `.electric-shepherd/config.jsonc` and apply built-in defaults when a key is missing.
+By default, runtime scripts and plugin paths do not consume behavior toggles from env; they read `eshepherd-config.jsonc` and apply built-in defaults when a key is missing.
 
 For trigger semantics and operational caveats, see QUICKSTART section 3f.
 

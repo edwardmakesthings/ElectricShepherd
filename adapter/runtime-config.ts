@@ -1,5 +1,9 @@
 import { existsSync, readFileSync } from "node:fs"
 import { basename, resolve } from "node:path"
+// The substrate tool-name prefix and default endpoint are defined in core/ (the
+// binding rule keeps the `mempalace_` literal there). Re-exported here so the
+// config-spec table and existing importers keep their names unchanged.
+import { SUBSTRATE_DEFAULT_URL, SUBSTRATE_TOOL_PREFIX } from "../core/substrate-client.ts"
 
 export type RuntimeEnv = Record<string, string | undefined>
 
@@ -14,8 +18,9 @@ type RuntimeConfigSpec = {
   allowedValues?: readonly string[]
 }
 
-export const DEFAULT_MCP_URL = "http://localhost:8093/mcp"
-export const DEFAULT_MCP_TOOL_PREFIX = "mempalace_"
+// Back-compat aliases — the literals live in core/substrate-client.ts.
+export const DEFAULT_MCP_URL = SUBSTRATE_DEFAULT_URL
+export const DEFAULT_MCP_TOOL_PREFIX = SUBSTRATE_TOOL_PREFIX
 
 export type LoadedRuntimeConfig = {
   configPath?: string
@@ -85,7 +90,7 @@ export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
   { envKey: "ESHEPHERD_SOURCE_CAPTURE_WING", path: "sourceCapture.wing", kind: "string", defaultValue: "opencode" },
   { envKey: "ESHEPHERD_SOURCE_CAPTURE_ROOM", path: "sourceCapture.room", kind: "string", defaultValue: "source-transcripts" },
   { envKey: "ESHEPHERD_SOURCE_CAPTURE_ADDED_BY", path: "sourceCapture.addedBy", kind: "string", defaultValue: "electric-shepherd-capture" },
-  { envKey: "ESHEPHERD_SOURCE_CAPTURE_TOOL_PREFIX", path: "sourceCapture.toolPrefix", kind: "string", defaultValue: "mempalace_" },
+  { envKey: "ESHEPHERD_SOURCE_CAPTURE_TOOL_PREFIX", path: "sourceCapture.toolPrefix", kind: "string", defaultValue: DEFAULT_MCP_TOOL_PREFIX },
   {
     envKey: "ESHEPHERD_SOURCE_CAPTURE_MODE",
     path: "sourceCapture.mode",
@@ -373,8 +378,8 @@ function resolveConfigPath(cwd: string, env: RuntimeEnv): { path?: string; warni
   }
 
   const candidates = [
-    resolve(cwd, ".electric-shepherd", "config.jsonc"),
-    resolve(cwd, "electric-shepherd.config.jsonc"),
+    resolve(cwd, "eshepherd-config.jsonc"),
+    resolve(cwd, "eshepherd-config.example.jsonc"),
   ]
 
   for (const candidate of candidates) {

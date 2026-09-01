@@ -1,6 +1,6 @@
 {
   // ElectricShepherd runtime config (JSONC)
-  // Copy to: .electric-shepherd/config.jsonc
+  // Copy to: eshepherd-config.jsonc
   // Full option surface and defaults are defined in:
   //   adapter/runtime-config.ts (RUNTIME_CONFIG_SPECS)
 

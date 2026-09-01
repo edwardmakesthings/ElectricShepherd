@@ -1,5 +1,6 @@
 import { tool } from "@opencode-ai/plugin";
-import { MCPHttpClient, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-client.ts";
+// Substrate transport is constructed ONLY through the core/ seam (Check A2).
+import { createSubstrateClient } from "../core/substrate-client.ts";
 import { applyRuntimeConfigToEnv, DEFAULT_MCP_TOOL_PREFIX, DEFAULT_MCP_URL, loadRuntimeConfig } from "../adapter/runtime-config.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
 import {
@@ -133,7 +134,7 @@ export default tool({
     tool_prefix: tool.schema
       .string()
       .optional()
-      .describe("Optional MCP tool prefix override (example: mygateway_mempalace_)."),
+      .describe("Optional MCP tool prefix override (example: mygateway_<prefix>)."),
   },
   async execute(args, context) {
     const cwd = context.worktree || context.directory;
@@ -195,15 +196,17 @@ export default tool({
 
     try {
       const mcpURL = resolveMemPalaceMCPUrl(process.env, "ESHEPHERD_MOVE_MCP_URL", String(runtimeConfig.valuesByPath.mcp?.url || DEFAULT_MCP_URL));
-      const headers = mcpURL.includes("localhost:8093") ? {} : resolveMCPHeadersFromEnv(process.env);
-      const mcp = new MCPHttpClient(mcpURL, headers, {
+      // Construct through the core/ seam (Check A2): it owns transport + initialize
+      // and resolves headers for the effective URL (loopback stays unauthenticated).
+      const { client: mcp } = await createSubstrateClient({
+        env: process.env,
         clientName: "electric-shepherd-move-drawers-tool",
+        urlOverride: mcpURL,
         requestTimeoutMs: Number(runtimeConfig.valuesByPath.mcp?.requestTimeoutMs || "60000"),
         maxRetries: Number(runtimeConfig.valuesByPath.mcp?.maxRetries || "2"),
         retryBackoffMs: Number(runtimeConfig.valuesByPath.mcp?.retryBackoffMs || "800"),
         retryMaxBackoffMs: Number(runtimeConfig.valuesByPath.mcp?.retryMaxBackoffMs || "8000"),
       });
-      await mcp.initialize();
 
       const runPlan = async (plan: {
         drawerIDs: string[];

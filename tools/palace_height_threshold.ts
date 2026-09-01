@@ -86,7 +86,7 @@ export default tool({
       match_count: matches.length,
       matches: matches.sort((a, b) => Number((b as Record<string, unknown>).height || 0) - Number((a as Record<string, unknown>).height || 0)),
       evaluated: evaluated.slice(0, 200),
-      note: "Height comes from mempalace_get_height (synthesized-from DAG).",
+      note: "Height comes from the substrate get-height tool (synthesized-from DAG).",
     });
   },
 });

@@ -177,30 +177,51 @@ function stripCommentsAndStrings(
 // ---------------------------------------------------------------------------
 
 /**
- * Substrate invocation signatures. These are the two ways ES reaches MemPalace:
- * the shared client factory (adapter/palace-tools.ts) and the raw JSON-RPC
- * transport (adapter/mcp-http-client.ts). The call sites that actually invoke
- * substrate tools are `callTool` calls; constructing the factory or the raw
- * transport marks a file as reaching the substrate outside the seam.
+ * Substrate boundary signatures. The spec's binding rule (§3.1) is that a
+ * capability/tool reaches the substrate ONLY through core/, and mechanically
+ * that means the literal tool-name prefix `mempalace_` may appear in exactly one
+ * directory: core/. These are the two things that let non-core code reach the
+ * substrate WITHOUT going through core/:
+ *
+ *   A2 — constructing the raw JSON-RPC transport (`new MCPHttpClient`) directly,
+ *        bypassing the core/substrate-client.ts seam.
+ *   A4 — spelling the `mempalace_` tool-name prefix anywhere outside core/. This
+ *        is the spec's ACTUAL rule, not a proxy: it catches any code that names a
+ *        substrate tool directly (the only way to reach the substrate without a
+ *        core-provided client or an injected callback).
+ *
+ * The old A1 (`callTool(`) check was dropped because it over-matched: it flagged
+ * injected-callback invocations (adapter/memgraph.ts's `this.callTool(...)`, where
+ * callTool is a ToolCaller function handed in via the constructor — memgraph does
+ * not know MemPalace exists) and under-specified (it missed `callToolResult` and
+ * any renamed dispatch). A non-core file that holds a core-provided client and
+ * calls its methods, or that invokes an injected callback, is reaching THROUGH
+ * core — which the rule permits. Only naming the tool (A4) or building the
+ * transport (A2) reaches PAST it.
  *
  * The patterns below are built without literal identifier characters so this
  * script does not match its own enforcement rules when it scans scripts/.
  */
 const SUBSTRATE_PATTERNS: { id: string; re: RegExp; message: string }[] = [
   {
-    id: "A1",
-    re: new RegExp("\\bcallTool\\s*" + "\\("),
-    message: "invokes a substrate tool (callTool) — only core/ may do this",
-  },
-  {
     id: "A2",
     re: new RegExp("\\bnew\\s+" + "MCP" + "HttpClient\\b"),
     message: "constructs the raw MCP transport directly — use the core/ substrate seam",
   },
   {
-    id: "A3",
-    re: new RegExp("\\b" + "create" + "Palace" + "Client" + "\\b"),
-    message: "invokes the substrate client factory outside core/",
+    // The spec's binding rule (§3.1): the `mempalace_` tool-name prefix lives only
+    // in core/. Match the bare literal so ANY naming of it — a direct tool name
+    // (mempalace_search), a namespaced one (gateway_mempalace_get_height), or a
+    // help-text mention — is caught outside core/. Built without the literal so
+    // this script does not match its own rule when scanning scripts/ (its own
+    // occurrences are in string literals, which stripCommentsAndStrings blanks out).
+    id: "A4",
+    // Match the bare literal ANYWHERE, including mid-identifier (a namespaced tool
+    // name like gateway_mempalace_get_height has no word boundary before it). A
+    // leading \b would miss those; the substring match is what the spec's rule
+    // ("the string mempalace_ may appear in exactly one directory") actually says.
+    re: new RegExp("mempalace" + "_"),
+    message: "names the substrate tool-name prefix (mempalace_) outside core/ — route through core/",
   },
 ];
 
@@ -246,30 +267,41 @@ function checkSubstrateBoundary(files: string[], violations: Violation[]): void 
 function blockIsEmpty(bodyStart: string, openBraceIdx: number): boolean {
   // Walk from the opening brace to its matching close; if nothing but comments or
   // whitespace sits inside, the block swallows silently.
+  //
+  // Position is advanced EXPLICITLY in every branch (no shared trailing i++). The
+  // old version relied on a final `i++` after the comment-skip branches, which
+  // over-stepped: skipping a `//` line comment left i on the newline, and the
+  // trailing i++ then jumped onto the next line's indentation — so a block whose
+  // first real statement was indented (the normal case) was misread as empty.
   let depth = 0;
   let i = openBraceIdx;
   const n = bodyStart.length;
   while (i < n) {
     const ch = bodyStart[i];
-    if (ch === "{") depth++;
-    else if (ch === "}") {
+    if (ch === "{") {
+      depth++;
+      i++;
+    } else if (ch === "}") {
       depth--;
+      i++;
       if (depth === 0) break;
-    } else if (depth > 1) {
+    } else if (depth >= 1) {
       // Inside the block: only comments/whitespace allowed.
       if (ch === "/" && bodyStart[i + 1] === "/") {
-        while (i < n && bodyStart[i] !== "\n") i++;
-        continue;
+        while (i < n && bodyStart[i] !== "\n") i++; // stop ON the newline
+        continue; // do not advance past it here; next loop sees \n as whitespace
       }
       if (ch === "/" && bodyStart[i + 1] === "*") {
         i += 2;
         while (i < n && !(bodyStart[i] === "*" && bodyStart[i + 1] === "/")) i++;
-        i += 2;
+        i += 2; // step past the closing */
         continue;
       }
       if (!/\s/.test(ch)) return false; // a real statement exists
+      i++; // whitespace
+    } else {
+      i++; // depth 0/1: the opening brace region or between braces — just advance
     }
-    i++;
   }
   return true;
 }
@@ -390,9 +422,8 @@ function main(): void {
   console.log("Architecture Check: " + (violations.length === 0 ? "PASS" : "FAIL"));
   console.log("");
   const ruleNames: Record<string, string> = {
-    A1: "Check A: Substrate call leak (callTool outside core/)",
     A2: "Check A: Raw MCP transport constructed outside core/",
-    A3: "Check A: Substrate client factory invoked outside core/",
+    A4: "Check A: Substrate tool-name prefix (mempalace_) named outside core/",
     B1: "Check B: Bare catch block in core/capability",
     B2: "Check B: Empty .catch handler in core/capability",
     C1: "Check C: Upward dependency (core/ imports capability/)",
@@ -404,7 +435,7 @@ function main(): void {
     }
   }
   if (violations.length === 0) {
-    console.log("[PASS] Check A: No substrate calls outside core/");
+    console.log("[PASS] Check A: No raw transport construction or mempalace_ tool names outside core/");
     console.log("[PASS] Check B: No silent catches in core/capability");
     console.log("[PASS] Check C: No capability/ imports into core/");
   }

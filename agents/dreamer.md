@@ -67,7 +67,7 @@ Rules:
 Finding transcripts to consolidate (the signal is an ABSENT edge, not a timestamp):
 
 1. Resolve the project wing first:
-   - Prefer `.electric-shepherd/config.jsonc` -> `memory.projectWing` when present.
+   - Prefer `eshepherd-config.jsonc` -> `memory.projectWing` when present.
    - Otherwise derive from the project directory name using ElectricShepherd normalization: lowercase, replace spaces/hyphens with `_`, trim outer `_`, then strip one leading numeric prefix segment when present (example: `001-SampleProject` -> `001_sampleproject` -> `sampleproject`).
    - Use this normalized alias as the default wing; do not freeform-guess unrelated wing names.
 2. Probe the primary capture room for ONE page only: `list_drawers` using `wing=<project wing>`, `room=source-transcripts`, `limit=25`, `offset=0`. Do NOT page to exhaustion.

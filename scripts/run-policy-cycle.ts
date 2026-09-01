@@ -1,5 +1,6 @@
 import { createMemgraphClient } from "../adapter/memgraph.ts";
-import { MCPHttpClient, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-client.ts";
+// Substrate transport is constructed ONLY through the core/ seam (Check A2).
+import { createSubstrateClient } from "../core/substrate-client.ts";
 import {
   DEFAULT_MCP_TOOL_PREFIX,
   DEFAULT_MCP_URL,
@@ -175,17 +176,19 @@ async function main(): Promise<void> {
 
   const mcpURL = String(runtimeConfig.valuesByPath.mcp?.url || "").trim() || DEFAULT_MCP_URL;
   const toolPrefix = String(runtimeConfig.valuesByPath.mcp?.toolPrefix || "").trim() || DEFAULT_MCP_TOOL_PREFIX;
-  const mcpHeaders = resolveMCPHeadersFromEnv(runtimeProcess.env);
   const args = parseArgs(runtimeProcess.argv.slice(2), runtimeConfig);
 
-  const mcp = new MCPHttpClient(mcpURL, mcpHeaders, {
+  // Construct through the core/ seam (Check A2): it owns transport + initialize and
+  // resolves headers for the effective URL (loopback stays unauthenticated).
+  const { client: mcp } = await createSubstrateClient({
+    env: runtimeProcess.env,
     clientName: "electric-shepherd-policy",
+    urlOverride: mcpURL,
     requestTimeoutMs: Number(runtimeConfig.valuesByPath.mcp?.requestTimeoutMs || "60000"),
     maxRetries: Number(runtimeConfig.valuesByPath.mcp?.maxRetries || "2"),
     retryBackoffMs: Number(runtimeConfig.valuesByPath.mcp?.retryBackoffMs || "800"),
     retryMaxBackoffMs: Number(runtimeConfig.valuesByPath.mcp?.retryMaxBackoffMs || "8000"),
   });
-  await mcp.initialize();
 
   const client = createMemgraphClient({
     callTool: (name, toolArgs) => mcp.callToolResult(name, toolArgs),

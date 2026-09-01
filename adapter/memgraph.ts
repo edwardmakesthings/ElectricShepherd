@@ -1,5 +1,8 @@
 import { DEFAULT_MCP_TOOL_PREFIX } from "./runtime-config.ts";
 import type { SubstrateResult } from "./mcp-http-client.ts";
+// The namespaced update-drawer fallback names carry the `mempalace_` literal, so
+// they live in core/ (binding rule: the prefix appears only there). Imported here.
+import { UPDATE_DRAWER_FALLBACK_NAMES } from "../core/substrate-client.ts";
 
 export type JsonMap = Record<string, unknown>;
 
@@ -1089,10 +1092,7 @@ export class MemgraphClient {
       if (!this.shouldRetryWithDreamNamespacedTool(new Error(primary.detail))) throw new Error(`substrate call failed (${this.tools.updateDrawer}, kind=${primary.kind}): ${primary.detail}`);
       // The server rejected the prefixed name (not-found / not-allowed): try the
       // namespaced fallback tool names. Each failure is explicit; the last one wins.
-      const fallbackNames = [
-        "mempalace-mempalace_update_drawer",
-        "dream_mempalace-mempalace_update_drawer",
-      ];
+      const fallbackNames: string[] = [...UPDATE_DRAWER_FALLBACK_NAMES];
       lastDetail = primary.detail;
       for (const toolName of fallbackNames) {
         const res = await this.invoke(toolName, args);

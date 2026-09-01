@@ -1,16 +1,24 @@
 /**
  * Shared helpers for the MemPalace inspection / relocation tools.
  *
- * These exist because MemPalace is a black box from inside a session: the only
- * read primitives are "dump everything about one drawer" or "page a room", and
- * neither answers the questions a user actually asks ("what is in this wing?",
- * "how much of it is already consolidated?"). The tools built on these helpers
- * do the paging/aggregation OUTSIDE the model's context and return a small
- * digest instead of raw content.
+ * The substrate client factory moved to core/substrate-client.ts (Rung 3, spec
+ * §4.1) so that transport construction sits inside the substrate boundary
+ * (Check A: no `new MCPHttpClient` or client factory outside core/). This file
+ * keeps the pure parsing/aggregation helpers — they contain no substrate calls
+ * — and re-exports a byte-compatible `createPalaceClient` over the core seam so
+ * the ~19 tool importers keep working unchanged. New code should import from
+ * core/substrate-client.ts directly.
+ *
+ * These helpers exist because MemPalace is a black box from inside a session:
+ * the only read primitives are "dump everything about one drawer" or "page a
+ * room", and neither answers the questions a user actually asks ("what is in
+ * this wing?", "how much of it is already consolidated?"). The tools built on
+ * these helpers do the paging/aggregation OUTSIDE the model's context and
+ * return a small digest instead of raw content.
  */
 
-import { MCPHttpClient, resolveMCPHeadersFromEnv } from "./mcp-http-client.ts";
-import { DEFAULT_MCP_TOOL_PREFIX, DEFAULT_MCP_URL } from "./runtime-config.ts";
+import { MCPHttpClient } from "../core/mcp-transport.ts";
+import { createSubstrateClient as coreCreateSubstrateClient } from "../core/substrate-client.ts";
 
 export type PalaceEnv = Record<string, string | undefined>;
 
@@ -19,18 +27,8 @@ export type PalaceEndpoint = {
   headers: Record<string, string>;
 };
 
-// Loopback endpoints are the unauthenticated direct MemPalace server; sending
-// gateway credentials there would leak them to a process that never needs them.
-const LOOPBACK_URL = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i;
-
-export function resolvePalaceEndpoint(env: PalaceEnv): PalaceEndpoint {
-  const url = String(env.MEMPALACE_MCP_URL || "").trim() || DEFAULT_MCP_URL;
-  return { url, headers: LOOPBACK_URL.test(url) ? {} : resolveMCPHeadersFromEnv(env) };
-}
-
-export function palaceToolPrefix(env: PalaceEnv, override?: string): string {
-  return String(override || env.MEMGRAPH_TOOL_PREFIX || DEFAULT_MCP_TOOL_PREFIX).trim() || DEFAULT_MCP_TOOL_PREFIX;
-}
+// Re-exported from core so the seam is defined exactly once.
+export { resolvePalaceEndpoint, palaceToolPrefix } from "../core/substrate-client.ts";
 
 export async function createPalaceClient(args: {
   env: PalaceEnv;
@@ -38,13 +36,12 @@ export async function createPalaceClient(args: {
   toolPrefix?: string;
   requestTimeoutMs?: number;
 }): Promise<{ client: MCPHttpClient; prefix: string; url: string }> {
-  const endpoint = resolvePalaceEndpoint(args.env);
-  const client = new MCPHttpClient(endpoint.url, endpoint.headers, {
+  return coreCreateSubstrateClient({
+    env: args.env,
     clientName: args.clientName,
+    toolPrefix: args.toolPrefix,
     requestTimeoutMs: args.requestTimeoutMs,
   });
-  await client.initialize();
-  return { client, prefix: palaceToolPrefix(args.env, args.toolPrefix), url: endpoint.url };
 }
 
 export function asObject(value: unknown): Record<string, unknown> {
@@ -308,4 +305,3 @@ export function resolveDiffWindows(args: {
     durationMs,
   };
 }
-

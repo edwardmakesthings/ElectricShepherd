@@ -2,7 +2,8 @@ import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isTranscriptLikeRoom, parseTaxonomy } from "../adapter/palace-tools.ts";
-import { MCPHttpClient, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-client.ts";
+// Substrate transport is constructed ONLY through the core/ seam (Check A2).
+import { createSubstrateClient } from "../core/substrate-client.ts";
 import { DEFAULT_MCP_TOOL_PREFIX, DEFAULT_MCP_URL, loadRuntimeConfig } from "../adapter/runtime-config.ts";
 import { loadRuntimeEnv } from "./runtime-env.ts";
 
@@ -76,9 +77,13 @@ async function resolveRooms(
 
   const mcpURL = String(runtimeConfig.valuesByPath.mcp?.url || "").trim() || DEFAULT_MCP_URL;
   const toolPrefix = String(runtimeConfig.valuesByPath.mcp?.toolPrefix || "").trim() || DEFAULT_MCP_TOOL_PREFIX;
-  const headers = mcpURL.includes("localhost:8093") ? {} : resolveMCPHeadersFromEnv(env);
-  const client = new MCPHttpClient(mcpURL, headers, { clientName: "electric-shepherd-nontranscript-backfill" });
-  await client.initialize();
+  // Construct through the core/ seam (Check A2): owns transport + initialize and
+  // resolves headers for the effective URL (loopback stays unauthenticated).
+  const { client } = await createSubstrateClient({
+    env,
+    clientName: "electric-shepherd-nontranscript-backfill",
+    urlOverride: mcpURL,
+  });
 
   const taxonomyRaw = await client.callTool(`${toolPrefix}get_taxonomy`, {});
   const wingEntry = parseTaxonomy(taxonomyRaw).find((entry) => entry.wing === args.wing);

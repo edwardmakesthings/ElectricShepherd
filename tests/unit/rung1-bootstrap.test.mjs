@@ -522,9 +522,8 @@ function makeBulkFakeTransport({ drawers = {}, listings = {} } = {}) {
  * JSON report plus the recorded transport-level tool calls. */
 async function runBulkToolHermetically(tool, args) {
   const dir = mkdtempSync(join(tmpdir(), "rung1-bulk-"));
-  mkdirSync(join(dir, ".electric-shepherd"), { recursive: true });
   writeFileSync(
-    join(dir, ".electric-shepherd", "config.jsonc"),
+    join(dir, "eshepherd-config.jsonc"),
     `{
       "mcp": {
         "url": "http://localhost:8093/mcp",

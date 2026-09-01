@@ -33,7 +33,7 @@
  * ----------
  * Env discovery mirrors the runtime scripts (ESHEPHERD_ENV_FILE -> repo
  * .env/.env.local -> ../docker/.env) by reusing `loadRuntimeEnv`, then runtime
- * behavior is applied from `.electric-shepherd/config.jsonc` via
+ * behavior is applied from `eshepherd-config.jsonc` via
  * `loadRuntimeConfig`. If no MCP URL is configured the fixture reports
  * `available: false` with a reason so callers can skip gracefully instead of
  * hard-failing.

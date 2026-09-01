@@ -1,5 +1,6 @@
 import { createMemgraphClient, type SourceDrawerWorkItem } from "../adapter/memgraph.ts";
-import { MCPHttpClient, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-client.ts";
+// Substrate transport is constructed ONLY through the core/ seam (Check A2).
+import { createSubstrateClient } from "../core/substrate-client.ts";
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
@@ -1439,30 +1440,36 @@ async function main(): Promise<void> {
   const mcpURL = String(runtimeConfig.valuesByPath.mcp?.url || discoveredMCP?.url || DEFAULT_MCP_URL).trim();
   const { readURL: readMCPURL, writeURL: writeMCPURL } = resolveConsolidationMCPURLs(mcpURL);
   const toolPrefix = String(runtimeConfig.valuesByPath.mcp?.toolPrefix || "").trim() || DEFAULT_MCP_TOOL_PREFIX;
-  const mcpHeaders = resolveMCPHeadersFromEnv(process.env);
   const mcpHttpOptions = parseMCPHttpOptions((runtimeConfig.valuesByPath.mcp || {}) as Record<string, any>);
   const activeRouting = getActivePromptRoutingFromEnv(process.env);
   const subagentTimeoutMs = resolveSubagentTimeoutMs(process.env);
 
-  const readMCP = new MCPHttpClient(readMCPURL, mcpHeaders, {
+  // Construct through the core/ seam (Check A2): owns transport + initialize and
+  // resolves headers per effective URL (loopback stays unauthenticated).
+  const { client: readMCP } = await createSubstrateClient({
+    env: process.env,
     clientName: "electric-shepherd-memory-system",
+    urlOverride: readMCPURL,
     requestTimeoutMs: mcpHttpOptions.requestTimeoutMs,
     maxRetries: mcpHttpOptions.maxRetries,
     retryBackoffMs: mcpHttpOptions.retryBackoffMs,
     retryMaxBackoffMs: mcpHttpOptions.retryMaxBackoffMs,
   });
-  await readMCP.initialize();
 
-  const writeMCP = writeMCPURL === readMCPURL
-    ? readMCP
-    : new MCPHttpClient(writeMCPURL, mcpHeaders, {
-        clientName: "electric-shepherd-memory-system-write",
-        requestTimeoutMs: mcpHttpOptions.requestTimeoutMs,
-        maxRetries: mcpHttpOptions.maxRetries,
-        retryBackoffMs: mcpHttpOptions.retryBackoffMs,
-        retryMaxBackoffMs: mcpHttpOptions.retryMaxBackoffMs,
-      });
-  if (writeMCP !== readMCP) await writeMCP.initialize();
+  const writeMCP =
+    writeMCPURL === readMCPURL
+      ? readMCP
+      : (
+          await createSubstrateClient({
+            env: process.env,
+            clientName: "electric-shepherd-memory-system-write",
+            urlOverride: writeMCPURL,
+            requestTimeoutMs: mcpHttpOptions.requestTimeoutMs,
+            maxRetries: mcpHttpOptions.maxRetries,
+            retryBackoffMs: mcpHttpOptions.retryBackoffMs,
+            retryMaxBackoffMs: mcpHttpOptions.retryMaxBackoffMs,
+          })
+        ).client;
 
   const client = createMemgraphClient({
     callTool: (name, args) =>

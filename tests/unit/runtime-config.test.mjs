@@ -10,12 +10,11 @@ function makeTempDir(prefix) {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 
-test("runtime config reads .electric-shepherd/config.jsonc and exposes values by path/env map", () => {
+test("runtime config reads eshepherd-config.jsonc and exposes values by path/env map", () => {
   const root = makeTempDir("eshepherd-config-");
-  mkdirSync(join(root, ".electric-shepherd"), { recursive: true });
 
   writeFileSync(
-    join(root, ".electric-shepherd", "config.jsonc"),
+    join(root, "eshepherd-config.jsonc"),
     `{
       // JSONC comment support
       "env": {
@@ -119,9 +118,8 @@ test("wing defaults strip sortable numeric prefixes from project directory names
 
 test("an explicit config wing wins over the computed project-name default", () => {
   const root = makeTempDir("eshepherd-config-wing-explicit-");
-  mkdirSync(join(root, ".electric-shepherd"), { recursive: true });
   writeFileSync(
-    join(root, ".electric-shepherd", "config.jsonc"),
+    join(root, "eshepherd-config.jsonc"),
     `{ "sourceCapture": { "wing": "shared-wing" } }`,
     "utf8",
   );
@@ -135,9 +133,8 @@ test("an explicit config wing wins over the computed project-name default", () =
 test("an explicit empty-string config wing still falls back to the computed default", () => {
   const root = makeTempDir("eshepherd-config-wing-blank-");
   const expectedWing = basename(root).toLowerCase().replace(/[ -]/g, "_").replace(/^_+|_+$/g, "");
-  mkdirSync(join(root, ".electric-shepherd"), { recursive: true });
   writeFileSync(
-    join(root, ".electric-shepherd", "config.jsonc"),
+    join(root, "eshepherd-config.jsonc"),
     `{ "sourceCapture": { "wing": "" } }`,
     "utf8",
   );

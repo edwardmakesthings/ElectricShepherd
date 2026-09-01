@@ -38,7 +38,7 @@ export default tool({
       .number()
       .optional()
       .describe("How many drawers to check for consolidation edges (default 25)."),
-    tool_prefix: tool.schema.string().optional().describe("MCP tool prefix override (example: mygateway_mempalace_)."),
+    tool_prefix: tool.schema.string().optional().describe("MCP tool prefix override (example: mygateway_<prefix>)."),
   },
   async execute(args, context) {
     const cwd = context.worktree || context.directory;

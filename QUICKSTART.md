@@ -34,7 +34,7 @@ ElectricShepherd is a plugin, so it loads the same way wherever it is enabled. T
 - Agents (`agents/*.md`): yes — injected into `config.agent` by the `config` hook
 - Commands (`command/*.md`): yes — injected into `config.command` by the `config` hook
 - Instructions (`instructions/agent-discipline.md`): yes — absolute paths appended to `config.instructions`
-  (opt out with `assets.injectInstructions=false` in `.electric-shepherd/config.jsonc`)
+  (opt out with `assets.injectInstructions=false` in `eshepherd-config.jsonc`)
 
 Not config-injectable:
 
@@ -53,12 +53,11 @@ Not config-injectable:
 Create runtime behavior config and machine-local secrets:
 
 ```bash
-mkdir -p .electric-shepherd
-cp electric-shepherd.config.example.jsonc .electric-shepherd/config.jsonc
+cp eshepherd-config.example.jsonc eshepherd-config.jsonc
 cp .env.example .env
 ```
 
-Use `.electric-shepherd/config.jsonc` for non-secret behavior settings.
+Use `eshepherd-config.jsonc` for non-secret behavior settings.
 Use `.env` for secrets (API keys/tokens) only.
 
 Runtime scripts auto-load env files in this order:
@@ -98,7 +97,7 @@ prefix in any agent prompt that calls MemPalace tools directly, or load `skills/
 as an additional instruction so the agent knows which names to use.
 
 For the TypeScript adapter (`adapter/memgraph.ts`), set the prefix in
-`.electric-shepherd/config.jsonc`:
+`eshepherd-config.jsonc`:
 
 ```jsonc
 {
@@ -271,7 +270,7 @@ Recommended setup:
 
 ```bash
 # 1) Runtime behavior: config file
-cp electric-shepherd.config.example.jsonc .electric-shepherd/config.jsonc
+cp eshepherd-config.example.jsonc eshepherd-config.jsonc
 
 # 2) Secrets only: env
 export MEMPALACE_MCP_API_KEY="<your-key-or-token>"
@@ -290,7 +289,7 @@ Plugin status/verification output is written to `./.electric-shepherd/turn-guard
 > understand the triggers below.** Everything it does is logged to
 > `./.electric-shepherd/turn-guard-status.json` (`type: "auto-consolidation-*"` entries).
 
-Control it in `.electric-shepherd/config.jsonc`:
+Control it in `eshepherd-config.jsonc`:
 
 ```jsonc
 {
@@ -484,7 +483,7 @@ npm test
 
 Integration tests exercise the adapters against a real MemPalace MCP endpoint and
 are gated behind `ESHEPHERD_TEST_INTEGRATION=1`. They use `mcp.url` from
-`.electric-shepherd/config.jsonc` (or `MEMPALACE_MCP_URL` if you intentionally
+`eshepherd-config.jsonc` (or `MEMPALACE_MCP_URL` if you intentionally
 override in env) — the configured endpoint must expose the full tool surface
 (lineage graph traversal, scoped-node lookup, single/bulk delete). Without the gate
 they are collected but self-skip, so `npm test` still runs offline.

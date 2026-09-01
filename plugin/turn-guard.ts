@@ -57,7 +57,9 @@ import {
 import type { AutoConsolidationTrigger, MemcoreInjectionRecord } from "../adapter/turn-guard-helpers.ts"
 import { loadPackagedAssets, mergeWithoutOverride, loadInstructionPaths, dedupeAppendInstructions } from "../adapter/asset-loader.ts"
 import { loadRuntimeConfig, getRuntimeConfigEnvMap, DEFAULT_MCP_URL, DEFAULT_MCP_TOOL_PREFIX } from "../adapter/runtime-config.ts"
-import { MCPHttpClient, SubstrateError, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-client.ts"
+// Substrate transport is constructed ONLY through the core/ seam (Check A2).
+import { createSubstrateClient } from "../core/substrate-client.ts"
+import { SubstrateError, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-client.ts"
 import { createMemgraphClient } from "../adapter/memgraph.ts"
 import { retrieveSimilarWorkedExamples, formatWorkedExampleDemonstration, WORKED_EXAMPLE_MAX_INJECT, WORKED_EXAMPLE_RELEVANCE_FLOOR, extractWorkedExampleShape, buildWorkedExampleEntry, WORKED_EXAMPLE_FILE_AGENT_TYPES, WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS, CAPABILITY_TIER_BY_SUBAGENT, CAPABILITY_SUBAGENT_BY_TIER, mapTaskStatusToCapabilityOutcome, buildCapabilityCanonicalShape, buildCapabilityBucketId, canonicalModelId, buildFailureBucketId, buildFailurePatchId, FAILURE_PATCH_TEXT_MAX_CHARS, parseSelfReportedConfidence, buildCalibrationBucketId, INTERVENTION_REPLAY_HEADING, formatInterventionBlock } from "../adapter/retrieval-expansion.ts"
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts"
@@ -122,6 +124,9 @@ const MEMORY_USAGE_LOG_FILE = "memory-usage.ndjson"
 // overwrite-only snapshot would only retain the last.
 const EVENT_LOG_FILE = "turn-guard-events.ndjson"
 const TURN_GUARD_INSTANCE_DIRS_KEY = "__ESHEPHERD_TURN_GUARD_INSTANCE_DIRS__"
+// Test seam: set to true on globalThis before calling TurnGuard to clear the
+// per-directory instance dedupe (tests run the real handler in-process).
+const TURN_GUARD_INSTANCE_RESET_KEY = "__ESHEPHERD_TURN_GUARD_INSTANCE_RESET__"
 const DEFAULT_MEMCORE_MAX_CHARS = 12000
 const DEFAULT_MEMCORE_MAX_SCOPES = 6
 const DEFAULT_INJECTION_COOLDOWN_MS = 15000
@@ -1174,13 +1179,20 @@ export const TurnGuard = async ({ client, directory }: any) => {
     console.log(`${START_BANNER}: duplicate plugin load detected for directory=${rootDirectory}; skipping secondary instance`)
     return {}
   }
+  // Test seam: tests run the real handler in-process and need a fresh instance
+  // per temp project dir; the plugin dedupes on globalThis, so allow an explicit
+  // reset from test code (never set in production).
+  if ((globalState as any)[TURN_GUARD_INSTANCE_RESET_KEY]) {
+    delete (globalState as any)[TURN_GUARD_INSTANCE_RESET_KEY]
+    instanceDirs.clear()
+  }
   instanceDirs.add(rootDirectory)
 
   console.log(`${START_BANNER}: plugin loaded (directory=${directory})`)
   if (runtimeConfig.configPath) {
     console.log(`[turn-guard] runtime config loaded: ${runtimeConfig.configPath}`)
   } else {
-    console.log("[turn-guard] runtime config loaded: defaults (no .electric-shepherd/config.jsonc found)")
+    console.log("[turn-guard] runtime config loaded: defaults (no config file found: checked eshepherd-config.jsonc, eshepherd-config.example.jsonc)")
   }
   for (const warning of runtimeConfig.warnings) {
     console.warn(`[turn-guard] runtime config warning: ${warning}`)
@@ -1390,13 +1402,19 @@ export const TurnGuard = async ({ client, directory }: any) => {
       routingEvidenceClientPromise = (async () => {
         const mcpURL = String(cfgRaw("mcp.url") || "").trim() || DEFAULT_MCP_URL
         const toolPrefix = String(cfgRaw("mcp.toolPrefix") || "").trim() || DEFAULT_MCP_TOOL_PREFIX
+        // Pre-Rung-3 this path resolved headers directly from env with NO loopback
+        // strip (it always sent gateway credentials). Pass them explicitly so the
+        // core/ seam stays byte-identical to the old behavior.
         const headers = resolveMCPHeadersFromEnv(runtimeEnv)
-        const mcp = new MCPHttpClient(mcpURL, headers, {
+        // Construct through the core/ seam (Check A2): owns transport + initialize.
+        const { client: mcp } = await createSubstrateClient({
+          env: runtimeEnv,
           clientName: "electric-shepherd-turn-guard-routing",
+          urlOverride: mcpURL,
+          headersOverride: headers,
           requestTimeoutMs: workedExampleSearchTimeoutMs,
           maxRetries: 0,
         })
-        await mcp.initialize()
         return createMemgraphClient({
           // Return the SubstrateResult directly so memgraph's typed failure handling
           // (slice 2) can branch on ok/kind instead of treating a failure as an empty result.
@@ -1415,13 +1433,19 @@ export const TurnGuard = async ({ client, directory }: any) => {
       workedExampleClientPromise = (async () => {
         const mcpURL = String(cfgRaw("mcp.url") || "").trim() || DEFAULT_MCP_URL
         const toolPrefix = String(cfgRaw("mcp.toolPrefix") || "").trim() || DEFAULT_MCP_TOOL_PREFIX
+        // Pre-Rung-3 this path resolved headers directly from env with NO loopback
+        // strip (it always sent gateway credentials). Pass them explicitly so the
+        // core/ seam stays byte-identical to the old behavior.
         const headers = resolveMCPHeadersFromEnv(runtimeEnv)
-        const mcp = new MCPHttpClient(mcpURL, headers, {
+        // Construct through the core/ seam (Check A2): owns transport + initialize.
+        const { client: mcp } = await createSubstrateClient({
+          env: runtimeEnv,
           clientName: "electric-shepherd-turn-guard",
+          urlOverride: mcpURL,
+          headersOverride: headers,
           requestTimeoutMs: workedExampleSearchTimeoutMs,
           maxRetries: 0,
         })
-        await mcp.initialize()
         const callRaw = async (toolName: string, args?: Record<string, unknown>) => {
           const result = await mcp.callToolResult(toolName, args)
           if (!result.ok) throw new SubstrateError(result.kind, result.detail)
@@ -2122,10 +2146,48 @@ export const TurnGuard = async ({ client, directory }: any) => {
     anchor?: MessageWithParts | null
     force?: boolean
   }): Promise<boolean> {
-    if (!memcoreInjectEnabled) return false
-    if (args.reason === "idle" && !memcoreInjectOnIdle) return false
-    if (args.reason === "compacted" && !memcoreInjectOnCompacted) return false
-    if (args.reason === "started" && !memcoreInjectOnStart) return false
+    // Rung 2 (R2-05): every gating refusal must be observable. A silent `return false`
+    // made disabled reinjection indistinguishable from "nothing happened" in the
+    // status/context logs; each refusal now records an explicit `because` reason.
+    if (!memcoreInjectEnabled) {
+      appendMemcoreContextLog(projectRoot, {
+        type: "memcore-reinject",
+        sid: args.sid,
+        reason: args.reason,
+        injected: false,
+        because: "reinject-disabled",
+      })
+      writeStatusFile(projectRoot, statusSnapshot({
+        type: "memcore-reinject",
+        sid: args.sid,
+        reason: args.reason,
+        injected: false,
+        because: "reinject-disabled",
+      }))
+      return false
+    }
+    const perReasonFlag =
+      args.reason === "idle" ? memcoreInjectOnIdle
+      : args.reason === "compacted" ? memcoreInjectOnCompacted
+      : memcoreInjectOnStart
+    if (!perReasonFlag) {
+      appendMemcoreContextLog(projectRoot, {
+        type: "memcore-reinject",
+        sid: args.sid,
+        reason: args.reason,
+        injected: false,
+        because: `reinject-${args.reason}-disabled`,
+      })
+      writeStatusFile(projectRoot, statusSnapshot({
+        type: "memcore-reinject",
+        sid: args.sid,
+        reason: args.reason,
+        injected: false,
+        because: `reinject-${args.reason}-disabled`,
+      }))
+      return false
+    }
+
 
     let scopeDir = resolveScopeDirFromEvent(args.event, rootDirectory, cfgRaw("memcore.scopeDir"))
     const pathFromMessages = extractPathFromMessageParts(args.messages || [])
@@ -2148,7 +2210,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
         reason: args.reason,
         scopeDir,
         injected: false,
-        note: "no-memcore-markdown",
+        because: "no-memcore-markdown",
       })
       writeStatusFile(projectRoot, statusSnapshot({
         type: "memcore-reinject",
@@ -2156,12 +2218,20 @@ export const TurnGuard = async ({ client, directory }: any) => {
         reason: args.reason,
         scopeDir,
         injected: false,
+        because: "no-memcore-markdown",
         loaderInfo,
       }))
       return false
     }
 
-    const clipped = clipText(markdown, memcoreMaxChars)
+    // R2-04: the ENTIRE injected payload (marker + intro + render) must fit within
+    // memcore.maxChars. Budget the fixed prelude out of maxChars before clipping so
+    // the final text respects the configured budget end-to-end, not just the render.
+    const reinjectPrelude =
+      `${MEMCORE_REINJECT_MARKER} Refreshing scoped mem-core for this session (reason=${args.reason}). ` +
+      `Use this as the currently active resident memory for scope: ${scopeDir}. ` +
+      "This is derived render output from derived memory; do not hand-edit mem-core files.\n\n"
+    const clipped = clipText(markdown, Math.max(0, memcoreMaxChars - reinjectPrelude.length))
     const signature = computeMemcoreSignature(scopeDir, clipped)
     const now = Date.now()
     const previous = memcoreInjectionBySession.get(args.sid)
@@ -2182,8 +2252,18 @@ export const TurnGuard = async ({ client, directory }: any) => {
         scopeDir,
         injected: false,
         signature,
-        note: "dedup-or-cooldown-skip",
+        because: "dedup-or-cooldown-skip",
       })
+      writeStatusFile(projectRoot, statusSnapshot({
+        type: "memcore-reinject",
+        sid: args.sid,
+        reason: args.reason,
+        scopeDir,
+        injected: false,
+        signature,
+        because: "dedup-or-cooldown-skip",
+        loaderInfo,
+      }))
       return false
     }
 
@@ -2193,11 +2273,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
         parts: [
           {
             type: "text",
-            text:
-              `${MEMCORE_REINJECT_MARKER} Refreshing scoped mem-core for this session (reason=${args.reason}). ` +
-              `Use this as the currently active resident memory for scope: ${scopeDir}. ` +
-              "This is derived render output from derived memory; do not hand-edit mem-core files.\n\n" +
-              clipped,
+            text: reinjectPrelude + clipped,
           },
         ],
       }
@@ -2240,6 +2316,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
         scopeDir,
         injected: false,
         signature,
+        because: "injection-error",
         error: String(err),
       })
       writeStatusFile(projectRoot, statusSnapshot({
@@ -2248,6 +2325,8 @@ export const TurnGuard = async ({ client, directory }: any) => {
         reason: args.reason,
         scopeDir,
         injected: false,
+        signature,
+        because: "injection-error",
         error: String(err),
         loaderInfo,
       }))
