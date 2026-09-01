@@ -67,6 +67,7 @@ import { loadRuntimeEnv } from "../scripts/runtime-env.ts"
 import { createHookHeadHandlers } from "./session-policy/hook-head.ts"
 import { createToolRegistry } from "./session-policy/registry.ts"
 import { getText, hasFinalReviewSignal, hasActionPart, isAssistantStop, isSerenaMemoryToolTurn } from "./session-policy/analysis.ts"
+import { buildSourceCaptureEnv, buildConsolidationEnv } from "./session-policy/env.ts"
 
 // Absolute path to the ElectricShepherd install root (the plugin's own repo).
 // Runtime scripts must run from HERE — not the consumer project's cwd — so
@@ -733,15 +734,7 @@ async function runSourceCaptureCommand(
       maxBuffer: 2 * 1024 * 1024,
       timeout: options.timeoutMs,
       killSignal: "SIGKILL",
-      env: {
-        ...process.env,
-        ESHEPHERD_SESSION_ID: sid,
-        ESHEPHERD_EVENT_TYPE: eventType,
-        // Script cwd is the plugin install (see above); tell it where the real
-        // consumer project lives so wing/room config resolves against THAT
-        // project, not the plugin's own directory.
-        ESHEPHERD_PROJECT_ROOT: projectRoot,
-      },
+      env: buildSourceCaptureEnv({ sid, eventType, projectRoot }),
     })
     // execFile's promisified result is { stdout, stderr }, NOT a string —
     // String(output) on it produced "[object Object]" in the event log. Read
@@ -2349,21 +2342,14 @@ export const TurnGuard = async ({ client, directory }: any) => {
 
     try {
       const routing = await resolveSessionPromptRouting(sid)
-      const childEnv = {
-        ...process.env,
-        ESHEPHERD_SESSION_ID: sid,
-        ESHEPHERD_EVENT_TYPE: `auto-consolidation:${trigger}`,
-        // The plugin already holds the shared lock; tell the child runner not to
-        // re-acquire (or release) it so the plugin->script handoff doesn't
-        // deadlock against itself. Standalone cron/n8n runs lack this flag and
-        // take the lock themselves.
-        ESHEPHERD_CONSOLIDATION_LOCK_INHERITED: "1",
-        // cwd is the plugin install; the consumer project owns the memory artifacts.
-        ESHEPHERD_PROJECT_ROOT: projectRoot,
-        ESHEPHERD_ACTIVE_AGENT: routing.agent,
-        ESHEPHERD_ACTIVE_MODEL_PROVIDER_ID: routing.model?.providerID,
-        ESHEPHERD_ACTIVE_MODEL_ID: routing.model?.modelID,
-      }
+      const childEnv = buildConsolidationEnv({
+        sid,
+        trigger,
+        projectRoot,
+        agent: routing.agent,
+        modelProviderID: routing.model?.providerID,
+        modelID: routing.model?.modelID,
+      })
       // detached:true makes the child a process-group leader on POSIX so the
       // watchdog can kill the entire tree (see killProcessTree); harmless on
       // Windows where taskkill /T handles the tree instead.
