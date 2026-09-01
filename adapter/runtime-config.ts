@@ -200,9 +200,7 @@ export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
     defaultValue: false,
   },
 
-  { envKey: "ESHEPHERD_PRECOMPACT_PROBE", path: "compaction.precompactProbeEnabled", kind: "boolean", defaultValue: false },
   { envKey: "ESHEPHERD_COMPACT_ARCHIVE", path: "compaction.archiveEnabled", kind: "boolean", defaultValue: true },
-  { envKey: "ESHEPHERD_COMPACT_PROMPT_OVERRIDE", path: "compaction.promptOverrideEnabled", kind: "boolean", defaultValue: true },
   { envKey: "ESHEPHERD_INJECT_INSTRUCTIONS", path: "assets.injectInstructions", kind: "boolean", defaultValue: true },
 
   { envKey: "ESHEPHERD_SOURCE_CAPTURE_CMD", path: "commands.sourceCapture.command", kind: "string", defaultValue: "" },

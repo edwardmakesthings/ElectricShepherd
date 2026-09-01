@@ -104,7 +104,7 @@ const MEMORY_USAGE_LOG_FILE = "memory-usage.ndjson"
 // JSON object per line) in addition to overwriting the single-status snapshot.
 // The snapshot answers "current state"; this log answers "what fired, in order,
 // on this event" — which matters because one compaction emits several snapshots
-// (probe, pre-compact-hook, compact-archive, source-capture-verify) and the
+// (compact-archive, source-capture-verify) and the
 // overwrite-only snapshot would only retain the last.
 const EVENT_LOG_FILE = "turn-guard-events.ndjson"
 const TURN_GUARD_INSTANCE_DIRS_KEY = "__ESHEPHERD_TURN_GUARD_INSTANCE_DIRS__"
@@ -235,69 +235,6 @@ const DEFAULT_LOOP_MUTATION_TOOLS = [
 ]
 // Never blocked: the escape hatches the nudge itself recommends.
 const DEFAULT_LOOP_EXEMPT_TOOLS = ["compress", "dcp-compress"]
-// Replacement compaction prompt (ESHEPHERD_COMPACT_PROMPT_OVERRIDE). OpenCode's
-// default asks the summarizer to carry findings forward as prose. In this project
-// most findings are already durable -- written to .opencode/context/ by the
-// explorers, or filed in MemPalace by consolidation -- so re-transcribing them
-// burns tokens duplicating something that already persists. This version asks for
-// POINTERS to durable artifacts plus the things that genuinely only exist in the
-// conversation: what was ruled out, and what is still open.
-//
-// Deliberately shrink-oriented. Mem-core is re-injected AFTER compaction for the
-// continuation turn, not into the compaction prompt itself, so this template can
-// stay focused on concise pointers and open work state.
-const COMPACT_PROMPT_TEMPLATE = `Write a handoff summary that lets work continue after the older turns are dropped.
-
-If an anchored summary from a previous compaction is present above, UPDATE it rather than writing a fresh one: keep still-true details, drop details that have become stale, and merge in what is new. Do not restart the summary from scratch -- facts established many compactions ago must survive, or a long session slowly forgets its own beginning.
-
-This project has DURABLE MEMORY outside the conversation. Research already written to a file, or already filed in MemPalace, does not need to be reproduced here -- it needs to be POINTED AT. Preserve the thread of work and the map of where things live, not a re-transcription of findings that are already saved.
-
-Rules:
-- Keep every section, even when empty. Keep the section order unchanged.
-- Use terse bullets, not prose paragraphs.
-- Preserve exact file paths, symbols, commands, error strings, URLs, and identifiers.
-- POINT, DON'T COPY: if a finding is already written under .opencode/context/ or .opencode/audits/, record the path and one line on what it covers -- do not restate its contents.
-- Do NOT point at a file unless it was actually written this session. A pointer to something that does not exist is worse than no pointer.
-- Record what was TRIED AND REJECTED, with the reason. This is the most expensive thing to lose: without it the next turns re-attempt a dead end already ruled out.
-- Preserve open questions verbatim. A half-answered question that reads as settled causes work to proceed on a wrong assumption.
-- Do not mention the summary process or that context was compacted.
-
-Output exactly this Markdown structure, section order unchanged:
-
-## Objective
-- [one or two brief sentences describing what the user is trying to accomplish]
-
-## Important Details
-- [constraints/preferences, decisions and WHY, important facts/assumptions, or "(none)"]
-
-## Ruled Out
-- [approach tried and abandoned: what was tried, and why it failed or was rejected, or "(none)"]
-
-## Work State
-### Completed
-- [finished work, verified facts, or changes made; otherwise "(none)"]
-
-### Active
-- [current work, partial changes, or investigation state; otherwise "(none)"]
-
-### Blocked
-- [blockers, failing commands, or unknowns; otherwise "(none)"]
-
-## Open Questions
-- [anything asked but not yet answered, stated as a question, or "(none)"]
-
-## Next Move
-1. [immediate concrete action, or "(none)"]
-2. [next action if known, or "(none)"]
-
-## Relevant Files
-- [file or directory path: why it matters, or "(none)"]
-
-## Saved Research
-- [path under .opencode/context/ or .opencode/audits/ written this session: one line on what it covers and when to read it, or "(none)"]
-
-## Durable Memory
-- [MemPalace drawers/closets created or updated this session, and what they hold, or "(none)"]`
 
 const SPIRAL_GUARD_MARKER = "[Spiral Guard]"
 // Deliberation-spiral guard: the inverse of the loop guard. The loop guard
@@ -1181,7 +1118,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
   for (const warning of runtimeConfig.warnings) {
     console.warn(`[turn-guard] runtime config warning: ${warning}`)
   }
-  console.log("[turn-guard] registering hooks: event(message.updated, session.idle, session.compacted, session.started), experimental.session.compacting, tool.execute.before")
+  console.log("[turn-guard] registering hooks: event(message.updated, session.idle, session.compacted, session.started), tool.execute.before")
   console.log(
     `[turn-guard] retry guard: ${
       cfgBool("retry.enabled", DEFAULT_RETRY_ENABLED)
@@ -1193,12 +1130,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
   const memcoreInjectOnIdle = cfgBool("memcore.reinject.onIdle", false)
   const memcoreInjectOnCompacted = cfgBool("memcore.reinject.onCompact", false)
   const memcoreInjectOnStart = cfgBool("memcore.reinject.onStart", false)
-  // Diagnostic probe for the experimental.session.compacting hook input shape.
-  // Logs keys/types/lengths only (never message or prompt text). It did its job
-  // 2026-08-19 (answered: input is { sessionID } only, no messages). Default OFF
-  // now — a full config echo per compaction is noise once the shape is known;
-  // set ESHEPHERD_PRECOMPACT_PROBE=true to re-enable when debugging the hook.
-  const precompactProbeEnabled = cfgBool("compaction.precompactProbeEnabled", false)
   // Post-compaction transcript archiver: on session.compacted, read back the full
   // session log (compaction RETAINS prior messages — verified against the SDK:
   // session.messages returns them, delimited by summary:true/agent:compaction
@@ -1206,10 +1137,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
   // the summary dropped are not lost. Default ON; ESHEPHERD_COMPACT_ARCHIVE=false
   // to disable. Declared with the other env reads, above every use.
   const compactArchiveEnabled = cfgBool("compaction.archiveEnabled", true)
-  // Replace OpenCode's default compaction prompt with the pointer-oriented
-  // template above. Independent of the mem-core switches: the template is about
-  // summary SHAPE, mem-core is about what extra facts ride along.
-  const compactPromptOverrideEnabled = cfgBool("compaction.promptOverrideEnabled", true)
   const memcoreMaxChars = cfgNum("memcore.maxChars", DEFAULT_MEMCORE_MAX_CHARS)
   const injectionCooldownMs = cfgNum("memcore.injectionCooldownMs", DEFAULT_INJECTION_COOLDOWN_MS)
   const retryEnabled = cfgBool("retry.enabled", DEFAULT_RETRY_ENABLED)
@@ -3415,71 +3342,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
     })
   }
 
-  // Thin wrapper for the experimental.session.compacting pre-compaction hook.
-  // Isolated so that if OpenCode stabilises the hook shape (proposal #4317), only
-  // this function needs updating — same insulation discipline as the MemPalace
-  // tool-prefix adapter. The hook contract is (input={sessionID}, output={context[],prompt?}):
-  // you MUTATE output.context/output.prompt; the return value is ignored. We append
-  // mem-core to output.context (never replace output.prompt) so the default
-  // shrink-oriented summary prompt stays intact.
-  async function injectMemcoreIntoCompaction(input: any, output: any): Promise<void> {
-    // Diagnostic probe (ESHEPHERD_PRECOMPACT_PROBE): reveal the input shape of the
-    // experimental.session.compacting hook. Logs STRUCTURE ONLY — top-level keys,
-    // their typeof, and for arrays/objects/strings only lengths and key lists.
-    // Never logs values, message text, or prompt content (transcripts contain user
-    // code). Runs BEFORE the reinject gate so it fires even when reinject is off.
-    // Wrapped in try/catch so a probe failure can never break compaction.
-    if (precompactProbeEnabled) {
-      try {
-        const shape: Record<string, unknown> = {}
-        const keys = input && typeof input === "object" ? Object.keys(input) : []
-        for (const key of keys) {
-          const value = (input as Record<string, unknown>)[key]
-          if (Array.isArray(value)) {
-            const first = value.length > 0 ? value[0] : undefined
-            shape[key] = {
-              type: "array",
-              length: value.length,
-              firstElementKeys:
-                first && typeof first === "object" ? Object.keys(first as Record<string, unknown>) : typeof first,
-            }
-          } else if (typeof value === "string") {
-            shape[key] = { type: "string", length: value.length }
-          } else if (value && typeof value === "object") {
-            shape[key] = { type: "object", keys: Object.keys(value as Record<string, unknown>) }
-          } else {
-            shape[key] = { type: typeof value }
-          }
-        }
-        console.log(`[turn-guard] pre-compact probe: keys=${JSON.stringify(keys)} shape=${JSON.stringify(shape)}`)
-        writeStatusFile(projectRoot, statusSnapshot({ type: "pre-compact-probe", keys, shape }))
-      } catch (probeErr) {
-        console.log(`[turn-guard] pre-compact probe: error (ignored): ${probeErr}`)
-      }
-    }
-    // Prompt-shape override. Set on output.prompt (replaces the default template)
-    // rather than output.context (which only appends). Runs BEFORE the mem-core
-    // gate on purpose: the summary shape should apply whether or not mem-core is
-    // being carried along. Wrapped so a failure here can never break compaction --
-    // on error OpenCode's default prompt is simply left in place.
-    if (compactPromptOverrideEnabled && output && typeof output === "object") {
-      try {
-        output.prompt = COMPACT_PROMPT_TEMPLATE
-        console.log("[turn-guard] pre-compact: replaced compaction prompt with pointer-oriented template")
-      } catch (promptErr) {
-        console.log(`[turn-guard] pre-compact: prompt override failed (ignored): ${promptErr}`)
-      }
-    }
-
-    // Mem-core is for the continuation turn, so it is injected on session.compacted only.
-    const sid = String(input?.sessionID ?? input?.sessionId ?? findSessionID(input) ?? "")
-    writeStatusFile(projectRoot, statusSnapshot({
-      type: "pre-compact-hook",
-      sid,
-      injected: false,
-      note: "prompt-shape only; mem-core injects post-compaction",
-    }))
-  }
 
   const hookHeadHandlers = createHookHeadHandlers({
     cfgBool,
@@ -3491,13 +3353,11 @@ export const TurnGuard = async ({ client, directory }: any) => {
     onSessionIdle,
     onSessionCompacted,
     onSessionStarted,
-    injectMemcoreIntoCompaction,
   })
 
   return {
     config: hookHeadHandlers.config,
     event: hookHeadHandlers.event,
-    "experimental.session.compacting": hookHeadHandlers["experimental.session.compacting"],
     "tool.execute.before": async (input: any, output: any) => {
       if (!loopGuardEnabled) return
       const toolName = String(input?.tool ?? "").trim()

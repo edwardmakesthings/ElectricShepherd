@@ -34,7 +34,7 @@ export const MEMORY_USAGE_LOG_FILE = "memory-usage.ndjson"
 // JSON object per line) in addition to overwriting the single-status snapshot.
 // The snapshot answers "current state"; this log answers "what fired, in order,
 // on this event" — which matters because one compaction emits several snapshots
-// (probe, pre-compact-hook, compact-archive, source-capture-verify) and the
+// (compact-archive, source-capture-verify) and the
 // overwrite-only snapshot would only retain the last.
 export const EVENT_LOG_FILE = "turn-guard-events.ndjson"
 export const TURN_GUARD_INSTANCE_DIRS_KEY = "__ESHEPHERD_TURN_GUARD_INSTANCE_DIRS__"
@@ -165,69 +165,6 @@ export const DEFAULT_LOOP_MUTATION_TOOLS = [
 ]
 // Never blocked: the escape hatches the nudge itself recommends.
 export const DEFAULT_LOOP_EXEMPT_TOOLS = ["compress", "dcp-compress"]
-// Replacement compaction prompt (ESHEPHERD_COMPACT_PROMPT_OVERRIDE). OpenCode's
-// default asks the summarizer to carry findings forward as prose. In this project
-// most findings are already durable -- written to .opencode/context/ by the
-// explorers, or filed in MemPalace by consolidation -- so re-transcribing them
-// burns tokens duplicating something that already persists. This version asks for
-// POINTERS to durable artifacts plus the things that genuinely only exist in the
-// conversation: what was ruled out, and what is still open.
-//
-// Deliberately shrink-oriented. Mem-core is re-injected AFTER compaction for the
-// continuation turn, not into the compaction prompt itself, so this template can
-// stay focused on concise pointers and open work state.
-export const COMPACT_PROMPT_TEMPLATE = `Write a handoff summary that lets work continue after the older turns are dropped.
-
-If an anchored summary from a previous compaction is present above, UPDATE it rather than writing a fresh one: keep still-true details, drop details that have become stale, and merge in what is new. Do not restart the summary from scratch -- facts established many compactions ago must survive, or a long session slowly forgets its own beginning.
-
-This project has DURABLE MEMORY outside the conversation. Research already written to a file, or already filed in MemPalace, does not need to be reproduced here -- it needs to be POINTED AT. Preserve the thread of work and the map of where things live, not a re-transcription of findings that are already saved.
-
-Rules:
-- Keep every section, even when empty. Keep the section order unchanged.
-- Use terse bullets, not prose paragraphs.
-- Preserve exact file paths, symbols, commands, error strings, URLs, and identifiers.
-- POINT, DON'T COPY: if a finding is already written under .opencode/context/ or .opencode/audits/, record the path and one line on what it covers -- do not restate its contents.
-- Do NOT point at a file unless it was actually written this session. A pointer to something that does not exist is worse than no pointer.
-- Record what was TRIED AND REJECTED, with the reason. This is the most expensive thing to lose: without it the next turns re-attempt a dead end already ruled out.
-- Preserve open questions verbatim. A half-answered question that reads as settled causes work to proceed on a wrong assumption.
-- Do not mention the summary process or that context was compacted.
-
-Output exactly this Markdown structure, section order unchanged:
-
-## Objective
-- [one or two brief sentences describing what the user is trying to accomplish]
-
-## Important Details
-- [constraints/preferences, decisions and WHY, important facts/assumptions, or "(none)"]
-
-## Ruled Out
-- [approach tried and abandoned: what was tried, and why it failed or was rejected, or "(none)"]
-
-## Work State
-### Completed
-- [finished work, verified facts, or changes made; otherwise "(none)"]
-
-### Active
-- [current work, partial changes, or investigation state; otherwise "(none)"]
-
-### Blocked
-- [blockers, failing commands, or unknowns; otherwise "(none)"]
-
-## Open Questions
-- [anything asked but not yet answered, stated as a question, or "(none)"]
-
-## Next Move
-1. [immediate concrete action, or "(none)"]
-2. [next action if known, or "(none)"]
-
-## Relevant Files
-- [file or directory path: why it matters, or "(none)"]
-
-## Saved Research
-- [path under .opencode/context/ or .opencode/audits/ written this session: one line on what it covers and when to read it, or "(none)"]
-
-## Durable Memory
-- [MemPalace drawers/closets created or updated this session, and what they hold, or "(none)"]`
 
 export const SPIRAL_GUARD_MARKER = "[Spiral Guard]"
 // Deliberation-spiral guard: the inverse of the loop guard. The loop guard

@@ -11,7 +11,6 @@ export function createHookHeadHandlers(deps: any) {
     onSessionIdle,
     onSessionCompacted,
     onSessionStarted,
-    injectMemcoreIntoCompaction,
   } = deps
 
   return {
@@ -79,9 +78,6 @@ export function createHookHeadHandlers(deps: any) {
       if (event.type === "session.started" || event.type === "session.created") {
         await onSessionStarted(event)
       }
-    },
-    "experimental.session.compacting": async (input: any, output: any) => {
-      await injectMemcoreIntoCompaction(input, output)
     },
   }
 }

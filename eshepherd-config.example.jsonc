@@ -64,9 +64,7 @@
   },
 
   "compaction": {
-    "archiveEnabled": true,
-    "promptOverrideEnabled": true,
-    "precompactProbeEnabled": false
+    "archiveEnabled": true
   },
 
   "retry": {

@@ -18,9 +18,7 @@ export interface TurnGuardContext {
   memcoreInjectOnIdle: boolean
   memcoreInjectOnCompacted: boolean
   memcoreInjectOnStart: boolean
-  precompactProbeEnabled: boolean
   compactArchiveEnabled: boolean
-  compactPromptOverrideEnabled: boolean
   memcoreMaxChars: number
   injectionCooldownMs: number
   retryEnabled: boolean
