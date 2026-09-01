@@ -63,25 +63,9 @@ import { SubstrateError, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-cl
 import { createMemgraphClient } from "../adapter/memgraph.ts"
 import { retrieveSimilarWorkedExamples, formatWorkedExampleDemonstration, WORKED_EXAMPLE_MAX_INJECT, WORKED_EXAMPLE_RELEVANCE_FLOOR, extractWorkedExampleShape, buildWorkedExampleEntry, WORKED_EXAMPLE_FILE_AGENT_TYPES, WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS, CAPABILITY_TIER_BY_SUBAGENT, CAPABILITY_SUBAGENT_BY_TIER, mapTaskStatusToCapabilityOutcome, buildCapabilityCanonicalShape, buildCapabilityBucketId, canonicalModelId, buildFailureBucketId, buildFailurePatchId, FAILURE_PATCH_TEXT_MAX_CHARS, parseSelfReportedConfidence, buildCalibrationBucketId, INTERVENTION_REPLAY_HEADING, formatInterventionBlock } from "../adapter/retrieval-expansion.ts"
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts"
-import deleteDrawersTool from "../tools/delete_drawers.ts"
-import moveDrawersTool from "../tools/move_drawers.ts"
-import captureTranscriptTool from "../tools/capture_transcript.ts"
-import palaceReportTool from "../tools/palace_report.ts"
-import palaceFlockStatusTool from "../tools/palace_flock_status.ts"
-import palaceDiffTool from "../tools/palace_diff.ts"
-import palaceListDrawersMultiRoomTool from "../tools/palace_list_drawers_multi_room.ts"
-import palaceHeightThresholdTool from "../tools/palace_height_threshold.ts"
-import palaceOrganizeMemoriesTool from "../tools/palace_organize_memories.ts"
-import exportDrawerTool from "../tools/export_drawer.ts"
-import relocateMemoryTool from "../tools/relocate_memory.ts"
-import palaceStampSourceTypeTool from "../tools/palace_stamp_source_type.ts"
-import ingestDocsTool from "../tools/ingest_docs.ts"
-import proposeConcernsTool from "../tools/propose_concerns.ts"
-import fileSkillTool from "../tools/file_skill.ts"
-import proposeRefinementsTool from "../tools/propose_refinements.ts"
-import recordOutcomeTool from "../tools/record_outcome.ts"
-import promoteSkillTool from "../tools/promote_skill.ts"
-import remindTool from "../tools/remind.ts"
+
+import { createHookHeadHandlers } from "./session-policy/hook-head.ts"
+import { createToolRegistry } from "./session-policy/registry.ts"
 
 // Absolute path to the ElectricShepherd install root (the plugin's own repo).
 // Runtime scripts must run from HERE — not the consumer project's cwd — so
@@ -3497,75 +3481,23 @@ export const TurnGuard = async ({ client, directory }: any) => {
     }))
   }
 
-  return {
-    config: async (config: any) => {
-      // Safety default: destructive drawer deletion must prompt for approval.
-      const permission = config?.permission
-      if (typeof permission === "string") {
-        config.permission = {
-          "*": permission,
-          delete_drawers: "ask",
-          move_drawers: "ask",
-        }
-      } else {
-        const currentPermission = permission && typeof permission === "object" ? permission : {}
-        if (!Object.prototype.hasOwnProperty.call(currentPermission, "delete_drawers")) {
-          currentPermission.delete_drawers = "ask"
-        }
-        if (!Object.prototype.hasOwnProperty.call(currentPermission, "move_drawers")) {
-          currentPermission.move_drawers = "ask"
-        }
-        config.permission = currentPermission
-      }
+  const hookHeadHandlers = createHookHeadHandlers({
+    cfgBool,
+    loadPackagedAssets,
+    mergeWithoutOverride,
+    loadInstructionPaths,
+    dedupeAppendInstructions,
+    onMessageUpdated,
+    onSessionIdle,
+    onSessionCompacted,
+    onSessionStarted,
+    injectMemcoreIntoCompaction,
+  })
 
-      // Make the bundled agents and slash commands load like the rest of the
-      // plugin. OpenCode only auto-discovers agents/ and command/ folders when a
-      // repo is the active project, which never happens for an installed plugin.
-      // Reading the markdown files here and injecting them into the resolved
-      // config means they load in any consumer project — while each agent and
-      // command stays in its own standalone file. User-defined entries win.
-      try {
-        const { agents, commands } = loadPackagedAssets()
-        config.agent = mergeWithoutOverride(agents, config.agent)
-        config.command = mergeWithoutOverride(commands, config.command)
-        let injectedInstructions = 0
-        // Instructions (agent discipline) are part of the plugin's behavior,
-        // so inject their absolute paths too. Opt out with
-        // ESHEPHERD_INJECT_INSTRUCTIONS=false.
-        if (cfgBool("assets.injectInstructions", true)) {
-          const instructionPaths = loadInstructionPaths()
-          config.instructions = dedupeAppendInstructions(config.instructions, instructionPaths)
-          injectedInstructions = instructionPaths.length
-        }
-        console.log(
-          `[turn-guard] config hook injected ${Object.keys(agents).length} agents, ` +
-            `${Object.keys(commands).length} commands, ${injectedInstructions} instructions`,
-        )
-      } catch (err) {
-        console.log(`[turn-guard] config hook asset injection failed: ${String(err)}`)
-      }
-    },
-    event: async ({ event }: any) => {
-      if (!event?.type) return
-      if (event.type === "message.updated") {
-        await onMessageUpdated(event)
-        return
-      }
-      if (event.type === "session.idle") {
-        await onSessionIdle(event)
-        return
-      }
-      if (event.type === "session.compacted") {
-        await onSessionCompacted(event)
-        return
-      }
-      if (event.type === "session.started" || event.type === "session.created") {
-        await onSessionStarted(event)
-      }
-    },
-    "experimental.session.compacting": async (input: any, output: any) => {
-      await injectMemcoreIntoCompaction(input, output)
-    },
+  return {
+    config: hookHeadHandlers.config,
+    event: hookHeadHandlers.event,
+    "experimental.session.compacting": hookHeadHandlers["experimental.session.compacting"],
     "tool.execute.before": async (input: any, output: any) => {
       if (!loopGuardEnabled) return
       const toolName = String(input?.tool ?? "").trim()
@@ -4100,27 +4032,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
 
       throw new Error(nudgeText)
     },
-    tool: {
-      delete_drawers: deleteDrawersTool,
-      move_drawers: moveDrawersTool,
-      capture_transcript: captureTranscriptTool,
-      palace_report: palaceReportTool,
-      palace_flock_status: palaceFlockStatusTool,
-      palace_diff: palaceDiffTool,
-      palace_list_drawers_multi_room: palaceListDrawersMultiRoomTool,
-      palace_height_threshold: palaceHeightThresholdTool,
-      palace_organize_memories: palaceOrganizeMemoriesTool,
-      export_drawer: exportDrawerTool,
-      relocate_memory: relocateMemoryTool,
-      palace_stamp_source_type: palaceStampSourceTypeTool,
-      ingest_docs: ingestDocsTool,
-      propose_concerns: proposeConcernsTool,
-      file_skill: fileSkillTool,
-      propose_refinements: proposeRefinementsTool,
-      record_outcome: recordOutcomeTool,
-      promote_skill: promoteSkillTool,
-      remind: remindTool,
-    },
+    tool: createToolRegistry(),
   } as any
 }
 
