@@ -123,6 +123,59 @@ export function computeMemcoreSignature(scopeDir: string, clipped: string): stri
   return `${scopeDir}|${hashText(clipped)}`
 }
 
+export type MemcoreReinjectReason = "idle" | "compacted" | "compacting" | "started"
+
+export interface MemcoreReinjectConfig {
+  enabled: boolean
+  onIdle: boolean
+  onCompact: boolean
+  onStart: boolean
+}
+
+/**
+ * Single chokepoint for the mem-core re-injection decision (spec §5.1).
+ * Absorbs enablement + per-reason gating + dedup/cooldown into one pure call so
+ * no bypass path can inject before the global `memcore.reinject.enabled` check.
+ *
+ * Returns `{ inject, because }`:
+ *   - inject=false with a `because` string for every refusal reason (R2-05).
+ *   - inject=true only when enabled AND per-reason flag is on AND dedup/cooldown
+ *     allow it (or force is set).
+ */
+export function decideMemcoreInjectionWithGating(args: {
+  reason: MemcoreReinjectReason
+  config: MemcoreReinjectConfig
+  scopeDir: string
+  signature: string
+  now: number
+  previous?: MemcoreInjectionRecord | null
+  cooldownMs: number
+  force?: boolean
+}): { inject: boolean; because: string } {
+  if (!args.config.enabled) {
+    return { inject: false, because: "reinject-disabled" }
+  }
+  const perReasonFlag =
+    args.reason === "idle" ? args.config.onIdle
+    : args.reason === "compacted" || args.reason === "compacting" ? args.config.onCompact
+    : args.config.onStart
+  if (!perReasonFlag) {
+    return { inject: false, because: `reinject-${args.reason}-disabled` }
+  }
+  const decision = decideMemcoreInjection({
+    scopeDir: args.scopeDir,
+    signature: args.signature,
+    now: args.now,
+    previous: args.previous ?? null,
+    cooldownMs: args.cooldownMs,
+    force: args.force,
+  })
+  if (!decision.shouldInject) {
+    return { inject: false, because: "dedup-or-cooldown-skip" }
+  }
+  return { inject: true, because: "" }
+}
+
 export function decideMemcoreInjection(args: {
   scopeDir: string
   signature: string

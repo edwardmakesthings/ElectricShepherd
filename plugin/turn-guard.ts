@@ -40,13 +40,10 @@ import { fileURLToPath } from "node:url"
 import {
   buildCommandExecutionPlan,
   buildCalibrationEscalationNote,
-  clipText,
-  computeMemcoreSignature,
   computeToolSignature,
   decideAutoConsolidation,
   decideCapabilityReroute,
   decideLoopIntervention,
-  decideMemcoreInjection,
   detectDeliberationSpiral,
   isDeliberationExemptPrompt,
   pruneAutoConsolidationTracking,
@@ -69,12 +66,16 @@ import { createToolRegistry } from "./session-policy/registry.ts"
 import { getText, hasFinalReviewSignal, hasActionPart, isAssistantStop, isSerenaMemoryToolTurn } from "./session-policy/analysis.ts"
 import { buildSourceCaptureEnv, buildConsolidationEnv } from "./session-policy/env.ts"
 import {
-  findSessionID, resolveScopeDirFromEvent, extractPathFromMessageParts, findProjectRoot,
-  writeStatusFile, appendAutoConsolidationLog, appendMemcoreContextLog, appendMemoryUsageLog,
-  acquireAutoConsolidationLock, releaseAutoConsolidationLock, killProcessTree, loadMemcoreMarkdown,
-  getToolNames, containsConsolidationWriteTool, getAgentIdentity, classifyMemoryTools,
-  runSourceCaptureCommand,
+  findProjectRoot,
+  writeStatusFile, appendAutoConsolidationLog, appendMemoryUsageLog,
+  acquireAutoConsolidationLock, releaseAutoConsolidationLock, killProcessTree,
+  getToolNames, containsConsolidationWriteTool, classifyMemoryTools,
 } from "./session-policy/pure-helpers.ts"
+import { findSessionID, getAgentIdentity, getActiveModel, getActiveAgent, getPromptRouting, normalizeModelSpec } from "./session-policy/routing.ts"
+import { maybeInjectMemcoreWithGating } from "./session-policy/interventions.ts"
+import { maybeFileWorkedExampleWithGating } from "./session-policy/worked-example.ts"
+import { maybeRecordCapabilityTupleWithGating } from "./session-policy/capability.ts"
+import { runSourceCaptureCommand } from "./session-policy/source-capture.ts"
 
 // Absolute path to the ElectricShepherd install root (the plugin's own repo).
 // Runtime scripts must run from HERE — not the consumer project's cwd — so
@@ -89,7 +90,6 @@ type MessageWithParts = {
 
 const AUTO_RETRY_MARKER = "[Auto-Retry Guard]"
 const CHECKPOINT_MARKER = "[Memory Checkpoint]"
-const MEMCORE_REINJECT_MARKER = "[Mem-core Reinjection]"
 const WRITE_AUTHORITY_MARKER = "[Write-Authority Gate]"
 const MIN_USEFUL_TEXT = 24
 const START_BANNER = "[turn-guard] START"
@@ -396,73 +396,9 @@ function unwrapMessageResult(res: any): MessageWithParts | null {
   return null
 }
 
-function getActiveModel(msg: MessageWithParts | null | undefined): { providerID: string; modelID: string } | null {
-  if (!msg?.info) return null
 
-  const embedded = msg.info.model
-  if (embedded && typeof embedded === "object") {
-    const providerID = String(embedded.providerID ?? "")
-    const modelID = String(embedded.modelID ?? "")
-    if (providerID && modelID) return { providerID, modelID }
-  }
 
-  const providerID = String(msg.info.providerID ?? "")
-  const modelID = String(msg.info.modelID ?? "")
-  if (providerID && modelID) return { providerID, modelID }
 
-  return null
-}
-
-function getActiveAgent(msg: MessageWithParts | null | undefined): string | null {
-  if (!msg?.info) return null
-  const explicitAgent = String(msg.info.agent ?? "").trim()
-  if (explicitAgent) return explicitAgent
-  const modeFallback = String(msg.info.mode ?? "").trim()
-  if (modeFallback) return modeFallback
-  return null
-}
-
-function getPromptRouting(...candidates: Array<MessageWithParts | null | undefined>): {
-  agent?: string
-  model?: { providerID: string; modelID: string }
-} {
-  let agent: string | undefined
-  let model: { providerID: string; modelID: string } | undefined
-
-  for (const msg of candidates) {
-    if (!agent) {
-      const resolvedAgent = getActiveAgent(msg)
-      if (resolvedAgent) agent = resolvedAgent
-    }
-    if (!model) {
-      const resolvedModel = getActiveModel(msg)
-      if (resolvedModel) model = resolvedModel
-    }
-    if (agent && model) break
-  }
-
-  const routing: {
-    agent?: string
-    model?: { providerID: string; modelID: string }
-  } = {}
-  if (agent) routing.agent = agent
-  if (model) routing.model = model
-  return routing
-}
-
-function normalizeModelSpec(candidate: any): { providerID: string; modelID: string } | null {
-  if (!candidate || typeof candidate !== "object") return null
-
-  const providerID = String(
-    candidate.providerID ?? candidate.providerId ?? candidate.provider ?? "",
-  ).trim()
-  const modelID = String(
-    candidate.modelID ?? candidate.modelId ?? candidate.model ?? candidate.id ?? "",
-  ).trim()
-
-  if (providerID && modelID) return { providerID, modelID }
-  return null
-}
 
 function resolveTaskSwapTarget(args: {
   current?: { providerID: string; modelID: string } | undefined
@@ -917,88 +853,23 @@ export const TurnGuard = async ({ client, directory }: any) => {
     prompt: string
     output: string
   }): Promise<void> {
-    const { sid, subagentType, description, prompt, output } = args
-
-    const isTargetSubagentType = WORKED_EXAMPLE_FILE_AGENT_TYPES.has(subagentType)
-    if (
-      !shouldFileWorkedExample({
-        enabled: workedExampleFilingEnabled,
-        isTargetSubagentType,
-        output,
-        minSubstantiveChars: WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS,
-      })
-    ) {
-      return
-    }
-    const trimmedOutput = String(output || "").trim()
-
-    // Gate 3: in-session near-duplicate suppression by shape key.
-    const shape = extractWorkedExampleShape(`${description}\n${prompt}`)
-    const filedBySession = workedExampleFiledByShape.get(sid) ?? new Map<string, number>()
-    const nowMs = Date.now()
-    const lastFiledAt = Number(filedBySession.get(shape.shapeKey) ?? 0)
-    if (shouldSkipWorkedExampleByCooldown({ nowMs, lastFiledAtMs: lastFiledAt, cooldownMs: 30 * 60 * 1000 })) {
-      console.log(
-        `[turn-guard] worked-example filing: skipping near-duplicate shape ${shape.shapeKey} ` +
-          `(filed ${Math.round((nowMs - lastFiledAt) / 1000)}s ago) sid=${sid}`,
-      )
-      return
-    }
-
-    const entry = buildWorkedExampleEntry({ subagentType, description, output: trimmedOutput, shape })
-    const wing = String(cfgRaw("memory.projectWing") || "").trim() || "opencode"
-    const room = "apprenticeship"
-
-    try {
-      const palaceClient = await getWorkedExampleClient()
-      if (!palaceClient || typeof palaceClient.diaryWrite !== "function") return
-
-      // File the worked example.
-      const writeResult: any = await palaceClient.diaryWrite({
-        wing,
-        room,
-        entry,
-        agent_name: "turn-guard",
-        topic: `worked-example-${subagentType}`,
-      })
-      if (!writeResult?.ok) {
-        console.log(
-          `[turn-guard] worked-example filing: diary_write failed (${writeResult?.kind ?? "unknown"}): ${String(writeResult?.detail ?? writeResult)} sid=${sid}`
-        )
-        return
-      }
-      const result = writeResult.value
-
-      // Stamp es-source-type: worked-example via kg_add (best-effort — a stamp
-      // failure does not invalidate the filed example; absence of stamp is not a
-      // rejection on the CONSUME side).
-      const drawerId = String(result?.drawer_id ?? result?.id ?? "").trim()
-      if (drawerId && typeof palaceClient.kgAdd === "function") {
-        const stampResult: any = await palaceClient.kgAdd({
-          subject: drawerId,
-          predicate: "es-source-type",
-          object: "worked-example",
-          source_closet: drawerId,
-        })
-        if (!stampResult?.ok) {
-          console.log(
-            `[turn-guard] worked-example filing: stamp failed (non-fatal; ${stampResult?.kind ?? "unknown"}): ${String(stampResult?.detail ?? stampResult)} sid=${sid}`
-          )
-        }
-      }
-
-      // Record the filing for in-session dedup.
-      filedBySession.set(shape.shapeKey, nowMs)
-      workedExampleFiledByShape.set(sid, filedBySession)
-
-      console.log(
-        `[turn-guard] worked-example filing: filed ${subagentType} example ` +
-          `(shape=${shape.workClass}/${shape.shapeKey}, drawer=${drawerId || "?"}) sid=${sid}`,
-      )
-    } catch (err) {
-      // Filing failure must never break the turn.
-      console.log(`[turn-guard] worked-example filing: failed, continuing: ${String(err)}`)
-    }
+    await maybeFileWorkedExampleWithGating({
+      sid: args.sid,
+      subagentType: args.subagentType,
+      description: args.description,
+      prompt: args.prompt,
+      output: args.output,
+      workedExampleFilingEnabled,
+      workedExampleFileAgentTypes: WORKED_EXAMPLE_FILE_AGENT_TYPES,
+      workedExampleMinSubstantiveChars: WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS,
+      workedExampleFiledByShape,
+      getWorkedExampleClient,
+      cfgRaw,
+      shouldFileWorkedExample,
+      extractWorkedExampleShape,
+      shouldSkipWorkedExampleByCooldown,
+      buildWorkedExampleEntry,
+    })
   }
 
   // Phase 14 CREATE: record a capability tuple (task shape, tier, outcome) when a
@@ -1015,89 +886,21 @@ export const TurnGuard = async ({ client, directory }: any) => {
     prompt: string
     status: string
   }): Promise<void> {
-    if (!capabilityRecordingEnabled) return
-    const { sid, subagentType, description, prompt, status } = args
-
-    // Gate 1: only routing tiers are recorded (utility/analysis subagents skipped).
-    const tier = CAPABILITY_TIER_BY_SUBAGENT[subagentType]
-    if (!tier) return
-
-    // Gate 2: closed outcome set — unknown statuses are skipped, not guessed.
-    const outcome = mapTaskStatusToCapabilityOutcome(status)
-    if (!outcome) return
-
-    // Gate 3: session-local dedup — same (message, part) must not double-record on
-    // repeated idle events. Keyed by subagentType + shapeKey (the part's identity
-    // within the message is stable across idle passes for the same completion).
-    const shape = extractWorkedExampleShape(`${description}\n${prompt}`)
-    const dedupKey = `${subagentType}:${shape.shapeKey}`
-    const recordedBySession = capabilityRecordedBySession.get(sid) ?? new Set<string>()
-    if (recordedBySession.has(dedupKey)) {
-      console.log(
-        `[turn-guard] capability recording: skipping duplicate ${dedupKey} sid=${sid}`,
-      )
-      return
-    }
-
-    const bucketId = buildCapabilityBucketId(shape.shapeKey, tier)
-    const canonicalShape = buildCapabilityCanonicalShape(shape)
-
-    try {
-      const palaceClient = await getWorkedExampleClient()
-      if (!palaceClient || typeof palaceClient.kgAdd !== "function") return
-
-      // Record the outcome edge (the core of the capability tuple).
-      const outcomeResult: any = await palaceClient.kgAdd({
-        subject: bucketId,
-        predicate: "es-capability-outcome",
-        object: outcome,
-        valid_from: new Date().toISOString(),
-        source_closet: bucketId,
-      })
-      if (!outcomeResult?.ok) {
-        console.log(
-          `[turn-guard] capability recording: failed (${outcomeResult?.kind ?? "unknown"}): ${String(outcomeResult?.detail ?? outcomeResult)} sid=${sid}`
-        )
-        return
-      }
-
-      // Best-effort shape metadata for explainability (one-time per bucket; a
-      // duplicate stamp is harmless and idempotent on the read side).
-      const shapeResult: any = await palaceClient.kgAdd({
-        subject: bucketId,
-        predicate: "es-capability-shape",
-        object: canonicalShape.slice(0, 200),
-        source_closet: bucketId,
-      })
-      if (!shapeResult?.ok) {
-        console.log(
-          `[turn-guard] capability recording: shape stamp failed (non-fatal; ${shapeResult?.kind ?? "unknown"}): ${String(shapeResult?.detail ?? shapeResult)} sid=${sid}`
-        )
-      }
-      const tierResult: any = await palaceClient.kgAdd({
-        subject: bucketId,
-        predicate: "es-capability-tier",
-        object: tier,
-        source_closet: bucketId,
-      })
-      if (!tierResult?.ok) {
-        console.log(
-          `[turn-guard] capability recording: tier stamp failed (non-fatal; ${tierResult?.kind ?? "unknown"}): ${String(tierResult?.detail ?? tierResult)} sid=${sid}`
-        )
-      }
-
-      // Record the dedup key for this session.
-      recordedBySession.add(dedupKey)
-      capabilityRecordedBySession.set(sid, recordedBySession)
-
-      console.log(
-        `[turn-guard] capability recording: recorded ${subagentType} -> ${tier} (${outcome}) ` +
-          `(shape=${shape.workClass}/${shape.sizeBucket}/${shape.shapeKey}, bucket=${bucketId}) sid=${sid}`,
-      )
-    } catch (err) {
-      // Recording failure must never break the turn.
-      console.log(`[turn-guard] capability recording: failed, continuing: ${String(err)}`)
-    }
+    await maybeRecordCapabilityTupleWithGating({
+      sid: args.sid,
+      subagentType: args.subagentType,
+      description: args.description,
+      prompt: args.prompt,
+      status: args.status,
+      capabilityRecordingEnabled,
+      capabilityTierBySubagent: CAPABILITY_TIER_BY_SUBAGENT,
+      capabilityRecordedBySession,
+      getWorkedExampleClient,
+      mapTaskStatusToCapabilityOutcome,
+      extractWorkedExampleShape,
+      buildCapabilityBucketId,
+      buildCapabilityCanonicalShape,
+    })
   }
 
   // Phase 16 CREATE: capture the self-reported confidence label from a completed
@@ -1570,198 +1373,34 @@ export const TurnGuard = async ({ client, directory }: any) => {
   async function maybeInjectMemcore(args: {
     sid: string
     event: any
-    reason: "idle" | "compacted" | "started"
+    reason: "idle" | "compacted" | "compacting" | "started"
     messages?: MessageWithParts[]
     anchor?: MessageWithParts | null
     force?: boolean
   }): Promise<boolean> {
-    // Rung 2 (R2-05): every gating refusal must be observable. A silent `return false`
-    // made disabled reinjection indistinguishable from "nothing happened" in the
-    // status/context logs; each refusal now records an explicit `because` reason.
-    if (!memcoreInjectEnabled) {
-      appendMemcoreContextLog(projectRoot, {
-        type: "memcore-reinject",
-        sid: args.sid,
-        reason: args.reason,
-        injected: false,
-        because: "reinject-disabled",
-      })
-      writeStatusFile(projectRoot, statusSnapshot({
-        type: "memcore-reinject",
-        sid: args.sid,
-        reason: args.reason,
-        injected: false,
-        because: "reinject-disabled",
-      }))
-      return false
-    }
-    const perReasonFlag =
-      args.reason === "idle" ? memcoreInjectOnIdle
-      : args.reason === "compacted" ? memcoreInjectOnCompacted
-      : memcoreInjectOnStart
-    if (!perReasonFlag) {
-      appendMemcoreContextLog(projectRoot, {
-        type: "memcore-reinject",
-        sid: args.sid,
-        reason: args.reason,
-        injected: false,
-        because: `reinject-${args.reason}-disabled`,
-      })
-      writeStatusFile(projectRoot, statusSnapshot({
-        type: "memcore-reinject",
-        sid: args.sid,
-        reason: args.reason,
-        injected: false,
-        because: `reinject-${args.reason}-disabled`,
-      }))
-      return false
-    }
-
-
-    let scopeDir = resolveScopeDirFromEvent(args.event, rootDirectory, cfgRaw("memcore.scopeDir"))
-    const pathFromMessages = extractPathFromMessageParts(args.messages || [])
-    if (pathFromMessages) {
-      scopeDir = existsSync(pathFromMessages) && !pathFromMessages.endsWith(".md") && !pathFromMessages.endsWith(".ts")
-        ? pathFromMessages
-        : dirname(pathFromMessages)
-    }
-
-    const { markdown, loaderInfo } = await loadMemcoreMarkdown(projectRoot, scopeDir, {
-      maxScopes: cfgNum("memcore.maxScopes", DEFAULT_MEMCORE_MAX_SCOPES),
-      directFileName: cfgRaw("memcore.directFileName") || "memory.md",
-      storeRoots: cfgCSV("memcore.storeRoots").length > 0 ? cfgCSV("memcore.storeRoots") : [".electric-shepherd/memory"],
-      timeoutMs: cfgNum("commands.memcoreLoader.timeoutMs", DEFAULT_MEMCORE_LOADER_TIMEOUT_MS),
-    })
-    if (!markdown) {
-      appendMemcoreContextLog(projectRoot, {
-        type: "memcore-reinject",
-        sid: args.sid,
-        reason: args.reason,
-        scopeDir,
-        injected: false,
-        because: "no-memcore-markdown",
-      })
-      writeStatusFile(projectRoot, statusSnapshot({
-        type: "memcore-reinject",
-        sid: args.sid,
-        reason: args.reason,
-        scopeDir,
-        injected: false,
-        because: "no-memcore-markdown",
-        loaderInfo,
-      }))
-      return false
-    }
-
-    // R2-04: the ENTIRE injected payload (marker + intro + render) must fit within
-    // memcore.maxChars. Budget the fixed prelude out of maxChars before clipping so
-    // the final text respects the configured budget end-to-end, not just the render.
-    const reinjectPrelude =
-      `${MEMCORE_REINJECT_MARKER} Refreshing scoped mem-core for this session (reason=${args.reason}). ` +
-      `Use this as the currently active resident memory for scope: ${scopeDir}. ` +
-      "This is derived render output from derived memory; do not hand-edit mem-core files.\n\n"
-    const clipped = clipText(markdown, Math.max(0, memcoreMaxChars - reinjectPrelude.length))
-    const signature = computeMemcoreSignature(scopeDir, clipped)
-    const now = Date.now()
-    const previous = memcoreInjectionBySession.get(args.sid)
-    const { shouldInject } = decideMemcoreInjection({
-      scopeDir,
-      signature,
-      now,
-      previous,
-      cooldownMs: injectionCooldownMs,
+    return maybeInjectMemcoreWithGating({
+      sid: args.sid,
+      event: args.event,
+      reason: args.reason,
+      messages: args.messages,
+      anchor: args.anchor,
       force: args.force,
+      rootDirectory,
+      projectRoot,
+      directory,
+      client,
+      cfgRaw,
+      cfgNum,
+      cfgCSV,
+      memcoreInjectEnabled,
+      memcoreInjectOnIdle,
+      memcoreInjectOnCompacted,
+      memcoreInjectOnStart,
+      memcoreMaxChars,
+      injectionCooldownMs,
+      memcoreInjectionBySession,
+      statusSnapshot,
     })
-
-    if (!shouldInject) {
-      appendMemcoreContextLog(projectRoot, {
-        type: "memcore-reinject",
-        sid: args.sid,
-        reason: args.reason,
-        scopeDir,
-        injected: false,
-        signature,
-        because: "dedup-or-cooldown-skip",
-      })
-      writeStatusFile(projectRoot, statusSnapshot({
-        type: "memcore-reinject",
-        sid: args.sid,
-        reason: args.reason,
-        scopeDir,
-        injected: false,
-        signature,
-        because: "dedup-or-cooldown-skip",
-        loaderInfo,
-      }))
-      return false
-    }
-
-    try {
-      const routing = getPromptRouting(args.anchor)
-      const body: any = {
-        parts: [
-          {
-            type: "text",
-            text: reinjectPrelude + clipped,
-          },
-        ],
-      }
-      if (routing.agent) body.agent = routing.agent
-      if (routing.model) body.model = routing.model
-
-      await client.session.prompt({
-        path: { id: args.sid },
-        query: { directory },
-        body,
-      })
-
-      memcoreInjectionBySession.set(args.sid, { signature, at: now, scopeDir })
-      appendMemcoreContextLog(projectRoot, {
-        type: "memcore-reinject",
-        sid: args.sid,
-        reason: args.reason,
-        scopeDir,
-        injected: true,
-        signature,
-        chars: clipped.length,
-        preview: clipText(clipped, 1800),
-      })
-      writeStatusFile(projectRoot, statusSnapshot({
-        type: "memcore-reinject",
-        sid: args.sid,
-        reason: args.reason,
-        scopeDir,
-        injected: true,
-        signature,
-        loaderInfo,
-      }))
-      console.log(`[turn-guard] mem-core re-injected sid=${args.sid} reason=${args.reason} scope=${scopeDir}`)
-      return true
-    } catch (err) {
-      appendMemcoreContextLog(projectRoot, {
-        type: "memcore-reinject",
-        sid: args.sid,
-        reason: args.reason,
-        scopeDir,
-        injected: false,
-        signature,
-        because: "injection-error",
-        error: String(err),
-      })
-      writeStatusFile(projectRoot, statusSnapshot({
-        type: "memcore-reinject",
-        sid: args.sid,
-        reason: args.reason,
-        scopeDir,
-        injected: false,
-        signature,
-        because: "injection-error",
-        error: String(err),
-        loaderInfo,
-      }))
-      console.error(`[turn-guard] failed mem-core re-injection sid=${args.sid}:`, err)
-      return false
-    }
   }
 
   async function maybeWarnWriteAuthority(sid: string, msg: MessageWithParts): Promise<boolean> {

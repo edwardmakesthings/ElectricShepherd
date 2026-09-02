@@ -453,7 +453,7 @@ test("rung1: dry-run remind writes nothing (create / update / close)", async () 
 // calls to update_drawer / delete_drawer / add_drawer / kg_add. No live endpoint,
 // no network, fixed data — deterministic.
 
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 

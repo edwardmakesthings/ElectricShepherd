@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { expandScopedRetrieval, emptyOutcomeCounts } from "../../adapter/retrieval-expansion.ts";
+import { expandScopedRetrieval } from "../../adapter/retrieval-expansion.ts";
 
 /**
  * Phase 9 (unified memory): negative-knowledge labelling in scoped retrieval.

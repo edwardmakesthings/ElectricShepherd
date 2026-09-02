@@ -9,47 +9,11 @@ import {
 import { promisify } from "node:util"
 import {
   STATUS_DIR, STATUS_FILE, AUTOCONSOLIDATION_LOG_FILE, MEMCORE_CONTEXT_LOG_FILE, MEMORY_USAGE_LOG_FILE,
-  EVENT_LOG_FILE, AUTOCONSOLIDATION_LOCK_FILE, MIN_USEFUL_TEXT, CONSOLIDATION_WRITE_TOOL_NAMES, ESHEPHERD_ROOT,
+  EVENT_LOG_FILE, AUTOCONSOLIDATION_LOCK_FILE, MIN_USEFUL_TEXT, CONSOLIDATION_WRITE_TOOL_NAMES,
   normalizePathForHost,
 } from "./constants.ts"
 import type { MessageWithParts } from "./constants.ts"
-import { buildSourceCaptureEnv } from "./env.ts"
 
-export function findSessionID(event: any): string {
-  return String(
-    event?.sessionID ??
-    event?.sessionId ??
-    event?.properties?.sessionID ??
-    event?.properties?.sessionId ??
-    event?.info?.sessionID ??
-    event?.message?.info?.sessionID ??
-    "",
-  )
-}
-
-export function resolveScopeDirFromEvent(event: any, fallbackDirectory: string, configuredScopeDir?: string): string {
-  const candidates = [
-    event?.properties?.cwd,
-    event?.properties?.workingDirectory,
-    event?.properties?.directory,
-    event?.properties?.path,
-    event?.properties?.info?.cwd,
-    event?.message?.info?.cwd,
-    configuredScopeDir,
-    fallbackDirectory,
-    process.cwd(),
-  ]
-    .map((value) => String(value || "").trim())
-    .filter(Boolean)
-
-  for (const candidate of candidates) {
-    const normalized = normalizePathForHost(candidate)
-    if (normalized && existsSync(normalized)) {
-      return normalized
-    }
-  }
-  return normalizePathForHost(fallbackDirectory) || process.cwd()
-}
 
 export function extractPathFromMessageParts(messages: MessageWithParts[]): string | null {
   const pathLikeRegex = /([A-Za-z]:[\\/][^\s"'`]+|\/[^\s"'`]+\.[A-Za-z0-9_]+)/g
@@ -353,6 +317,7 @@ export async function loadMemcoreMarkdown(
   }
 }
 
+
 export function getToolNames(msg: MessageWithParts): string[] {
   const parts = msg?.parts ?? []
   const names: string[] = []
@@ -371,10 +336,6 @@ export function containsConsolidationWriteTool(toolNames: string[]): boolean {
   })
 }
 
-export function getAgentIdentity(msg: MessageWithParts | null | undefined): string {
-  const fromInfo = String(msg?.info?.agent ?? msg?.info?.mode ?? "").trim().toLowerCase()
-  return fromInfo
-}
 
 // Distinguishes retrieval from writes: "is stored memory actually being consumed?" is the open question.
 export function classifyMemoryTools(toolNames: string[]): { reads: string[]; writes: string[] } {
@@ -394,79 +355,6 @@ export function classifyMemoryTools(toolNames: string[]): { reads: string[]; wri
   return { reads, writes }
 }
 
-export async function runSourceCaptureCommand(
-  projectRoot: string,
-  sid: string,
-  eventType: string,
-  options: { command: string; timeoutMs: number },
-): Promise<{
-  attempted: boolean;
-  ok: boolean;
-  output?: string;
-  error?: string;
-  status?: string;
-  mode?: string;
-  wing?: string;
-  room?: string;
-  source_file?: string;
-  drawer_id?: string;
-  location?: string;
-}> {
-  const configured = String(options.command || "").trim()
-  // Default script resolves inside the ElectricShepherd install (ESHEPHERD_ROOT),
-  // not the consumer project's root — the script ships with the plugin and
-  // sources its env from there (repo .env -> sibling docker/.env fallback).
-  const defaultScript = join(ESHEPHERD_ROOT, "scripts", "capture-source-transcripts.sh")
-  const command = configured || (existsSync(defaultScript) ? `bash "${defaultScript}"` : "")
-  if (!command) {
-    return { attempted: false, ok: false, error: "capture command not set and default script missing" }
-  }
-
-  const execFileAsync = promisify(execFile)
-  try {
-    const output = await execFileAsync("/bin/sh", ["-c", command], {
-      cwd: ESHEPHERD_ROOT,
-      encoding: "utf8",
-      maxBuffer: 2 * 1024 * 1024,
-      timeout: options.timeoutMs,
-      killSignal: "SIGKILL",
-      env: buildSourceCaptureEnv({ sid, eventType, projectRoot }),
-    })
-    // execFile's promisified result is { stdout, stderr }, NOT a string —
-    // String(output) on it produced "[object Object]" in the event log. Read
-    // .stdout explicitly (fall back to stderr if stdout is empty).
-    const text = String(output?.stdout ?? "").trim() || String(output?.stderr ?? "").trim()
-    const lines = text
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
-    const location = lines.find((line) => line.startsWith("mempalace://"))
-    const jsonLine = lines.find((line) => line.startsWith("{") && line.endsWith("}"))
-    let parsed: Record<string, unknown> = {}
-    if (jsonLine) {
-      try {
-        const candidate = JSON.parse(jsonLine)
-        if (candidate && typeof candidate === "object") parsed = candidate as Record<string, unknown>
-      } catch {
-        // keep parsed empty on malformed line
-      }
-    }
-    return {
-      attempted: true,
-      ok: true,
-      output: text.slice(-2000),
-      status: typeof parsed.status === "string" ? parsed.status : undefined,
-      mode: typeof parsed.mode === "string" ? parsed.mode : undefined,
-      wing: typeof parsed.wing === "string" ? parsed.wing : undefined,
-      room: typeof parsed.room === "string" ? parsed.room : undefined,
-      source_file: typeof parsed.source_file === "string" ? parsed.source_file : undefined,
-      drawer_id: typeof parsed.drawer_id === "string" ? parsed.drawer_id : undefined,
-      location,
-    }
-  } catch (err) {
-    return { attempted: true, ok: false, error: String(err) }
-  }
-}
 
 export function getText(parts: any[]): string {
   return parts
@@ -568,70 +456,10 @@ export function unwrapMessageResult(res: any): MessageWithParts | null {
   return null
 }
 
-export function getActiveModel(msg: MessageWithParts | null | undefined): { providerID: string; modelID: string } | null {
-  if (!msg?.info) return null
 
-  const embedded = msg.info.model
-  if (embedded && typeof embedded === "object") {
-    const providerID = String(embedded.providerID ?? "")
-    const modelID = String(embedded.modelID ?? "")
-    if (providerID && modelID) return { providerID, modelID }
-  }
-
-  const providerID = String(msg.info.providerID ?? "")
-  const modelID = String(msg.info.modelID ?? "")
-  if (providerID && modelID) return { providerID, modelID }
-
-  return null
-}
-
-export function getActiveAgent(msg: MessageWithParts | null | undefined): string | null {
-  if (!msg?.info) return null
-  const explicitAgent = String(msg.info.agent ?? "").trim()
-  if (explicitAgent) return explicitAgent
-  const modeFallback = String(msg.info.mode ?? "").trim()
-  if (modeFallback) return modeFallback
-  return null
-}
-
-export function getPromptRouting(...candidates: Array<MessageWithParts | null | undefined>): {
-  agent?: string
-  model?: { providerID: string; modelID: string }
-} {
-  let agent: string | undefined
-  let model: { providerID: string; modelID: string } | undefined
-
-  for (const msg of candidates) {
-    if (!agent) {
-      const resolvedAgent = getActiveAgent(msg)
-      if (resolvedAgent) agent = resolvedAgent
-    }
-    if (!model) {
-      const resolvedModel = getActiveModel(msg)
-      if (resolvedModel) model = resolvedModel
-    }
-    if (agent && model) break
-  }
-
-  const routing: {
-    agent?: string
-    model?: { providerID: string; modelID: string }
-  } = {}
-  if (agent) routing.agent = agent
-  if (model) routing.model = model
-  return routing
-}
-
-export function normalizeModelSpec(candidate: any): { providerID: string; modelID: string } | null {
-  if (!candidate || typeof candidate !== "object") return null
-
-  const providerID = String(
-    candidate.providerID ?? candidate.providerId ?? candidate.provider ?? "",
-  ).trim()
-  const modelID = String(
-    candidate.modelID ?? candidate.modelId ?? candidate.model ?? candidate.id ?? "",
-  ).trim()
-
-  if (providerID && modelID) return { providerID, modelID }
-  return null
-}
+// ── compatibility re-exports (moved to domain-category modules) ─────────────
+export { maybeFileWorkedExampleWithGating } from "./worked-example.ts"
+export { maybeRecordCapabilityTupleWithGating } from "./capability.ts"
+export { maybeInjectMemcoreWithGating } from "./interventions.ts"
+export { findSessionID, resolveScopeDirFromEvent, getAgentIdentity, getActiveModel, getActiveAgent, getPromptRouting, normalizeModelSpec } from "./routing.ts"
+export { runSourceCaptureCommand } from "./source-capture.ts"

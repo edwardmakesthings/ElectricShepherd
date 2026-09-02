@@ -81,7 +81,7 @@ function makeSharedFakePalace({ rooms = {}, kgFacts = {} } = {}) {
       // Mirror the real KG query: filter by entity + direction + predicate.
       // `outgoing`: subject === entity. `incoming`: object === entity.
       const allFacts = [];
-      for (const [entityId, facts] of Object.entries(kgFacts)) {
+      for (const [_entityId, facts] of Object.entries(kgFacts)) {
         if (!Array.isArray(facts)) continue;
         for (const f of facts) {
           if (f.current === false) continue;
@@ -225,7 +225,7 @@ function makeProve4Palace() {
   const palace = makeSharedFakePalace({
     rooms: { [`${WING}/${SRC_ROOM}`]: [{ drawer_id: SRC_ID, wing: WING, room: SRC_ROOM, desc: "session transcript" }] },
   });
-  const { call, state, kgFacts } = palace;
+  const { state, kgFacts } = palace;
 
   // The source drawer consolidates into the synthesis (the status tool's population).
   kgFacts[SRC_ID] = [fact(SRC_ID, "consolidated-into", `drawer_${WING}_synth_1`)];

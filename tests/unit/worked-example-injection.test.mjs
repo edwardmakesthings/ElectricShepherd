@@ -5,7 +5,6 @@ import {
   retrieveSimilarWorkedExamples,
   formatWorkedExampleDemonstration,
   WORKED_EXAMPLE_MAX_INJECT,
-  WORKED_EXAMPLE_RELEVANCE_FLOOR,
   WORKED_EXAMPLE_MAX_CHARS,
 } from "../../adapter/retrieval-expansion.ts";
 

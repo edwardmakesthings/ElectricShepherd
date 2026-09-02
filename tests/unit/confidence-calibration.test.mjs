@@ -26,7 +26,6 @@ const {
   parseSelfReportedConfidence,
   buildCalibrationBucketId,
   canonicalModelId,
-  extractWorkedExampleShape,
 } = await import("../../adapter/retrieval-expansion.ts");
 
 // The real CONSUME client.

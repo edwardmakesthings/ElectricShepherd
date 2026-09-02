@@ -452,6 +452,14 @@ are redistributed:
 | Status file writing (`writeStatusFile`, `statusSnapshot`) | `core/status.ts` |
 | Asset/instruction injection (`loadPackagedAssets`, `mergeWithoutOverride`, `loadInstructionPaths`, `dedupeAppendInstructions`) | `surface/assets.ts` (already isolated in `adapter/asset-loader.ts`) |
 
+Extraction note (2026-09): the in-flight decomposition does not funnel domain logic
+into a single `pure-helpers.ts` catch-all. Domain-specific helpers are extracted into
+category modules under `plugin/session-policy/` — `worked-example.ts`, `capability.ts`,
+`interventions.ts`, `routing.ts`, `source-capture.ts` — and `turn-guard.ts` imports the
+moved symbols from those category files directly. `pure-helpers.ts` keeps only generic
+utilities (status/log writes, locks, process-tree kill) and re-exports the moved symbols
+for backward compatibility with existing closure imports.
+
 ### 5.1 The single injection chokepoint
 
 This is the concrete fix for §2.5, and the pattern every other trigger follows.

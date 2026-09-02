@@ -179,7 +179,7 @@ test("non-procedural and default intents never call getRefinedBy (no regression)
   assert.equal(def.filters.refined_expansion, undefined);
 
   // historical intent: no refined-by expansion.
-  const hist = await expandScopedRetrieval(client, { ...BASE_OPTIONS, intent: "historical" });
+  await expandScopedRetrieval(client, { ...BASE_OPTIONS, intent: "historical" });
   assert.equal(refinedByCalls, 0, `getRefinedBy must not be called on historical intent (calls=${refinedByCalls})`);
 });
 

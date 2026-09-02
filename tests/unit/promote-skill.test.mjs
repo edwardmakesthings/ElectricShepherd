@@ -375,13 +375,6 @@ test("stamp and edge failures are counted independently with retry next_steps", 
   assert.match(bothReport.next_step, /UNSTAMPED/);
 
   // Only the edge fails.
-  const edgeOnly = makeFakePalace({
-    taxonomy: { proj: { skills: 2 } },
-    drawers: { [ORIGIN_ID]: originDrawer() },
-    sourceTypeFor: { [ORIGIN_ID]: "skill" },
-    domainFor: { [ORIGIN_ID]: "code" },
-    failKgAddFor: new Set([`drawer_${SHARED_WING}_skills_new`]),
-  });
   // Same fixture as both (all kg_adds hit the same subject) — to isolate the edge,
   // we instead assert the happy path has no failure counters.
   const clean = makeFakePalace({
