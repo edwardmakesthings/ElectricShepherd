@@ -1,7 +1,16 @@
 // @ts-nocheck
 
 
-import { resolve } from "node:path"
+import { dirname, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
+
+// Absolute path to the ElectricShepherd install root (the plugin's own repo).
+// Runtime scripts must run from HERE — not the consumer project's cwd — so
+// loadRuntimeEnv finds ElectricShepherd/.env (or the sibling docker/.env) and
+// scripts resolve their sibling adapter modules. Single source of truth: this
+// file lives at plugin/session-policy/, so ".." is the plugin dir and "../.."
+// is the install root.
+export const ESHEPHERD_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..")
 
 export type MessageWithParts = {
   info?: any

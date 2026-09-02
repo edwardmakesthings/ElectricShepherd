@@ -10,8 +10,10 @@ import { promisify } from "node:util"
 import {
   STATUS_DIR, STATUS_FILE, AUTOCONSOLIDATION_LOG_FILE, MEMCORE_CONTEXT_LOG_FILE, MEMORY_USAGE_LOG_FILE,
   EVENT_LOG_FILE, AUTOCONSOLIDATION_LOCK_FILE, MIN_USEFUL_TEXT, CONSOLIDATION_WRITE_TOOL_NAMES, ESHEPHERD_ROOT,
+  normalizePathForHost,
 } from "./constants.ts"
 import type { MessageWithParts } from "./constants.ts"
+import { buildSourceCaptureEnv } from "./env.ts"
 
 export function findSessionID(event: any): string {
   return String(
@@ -428,15 +430,7 @@ export async function runSourceCaptureCommand(
       maxBuffer: 2 * 1024 * 1024,
       timeout: options.timeoutMs,
       killSignal: "SIGKILL",
-      env: {
-        ...process.env,
-        ESHEPHERD_SESSION_ID: sid,
-        ESHEPHERD_EVENT_TYPE: eventType,
-        // Script cwd is the plugin install (see above); tell it where the real
-        // consumer project lives so wing/room config resolves against THAT
-        // project, not the plugin's own directory.
-        ESHEPHERD_PROJECT_ROOT: projectRoot,
-      },
+      env: buildSourceCaptureEnv({ sid, eventType, projectRoot }),
     })
     // execFile's promisified result is { stdout, stderr }, NOT a string —
     // String(output) on it produced "[object Object]" in the event log. Read
