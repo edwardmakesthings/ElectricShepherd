@@ -459,7 +459,8 @@ export function unwrapMessageResult(res: any): MessageWithParts | null {
 
 // ── compatibility re-exports (moved to domain-category modules) ─────────────
 export { maybeFileWorkedExampleWithGating } from "./worked-example.ts"
-export { maybeRecordCapabilityTupleWithGating } from "./capability.ts"
-export { maybeInjectMemcoreWithGating } from "./interventions.ts"
-export { findSessionID, resolveScopeDirFromEvent, getAgentIdentity, getActiveModel, getActiveAgent, getPromptRouting, normalizeModelSpec } from "./routing.ts"
-export { runSourceCaptureCommand } from "./source-capture.ts"
+export { maybeRecordCapabilityTupleWithGating, maybeCaptureCalibrationTupleWithGating } from "./capability.ts"
+export { maybeInjectMemcoreWithGating, persistWorkedInterventionWithGating, maybeRecordModelFailureWithGating, queuePendingInterventionWithGating, confirmPendingInterventionsWithGating } from "./interventions.ts"
+export { findSessionID, resolveScopeDirFromEvent, getAgentIdentity, getActiveModel, getActiveAgent, getPromptRouting, normalizeModelSpec, resolveSessionPromptRoutingWithGating, resolveLoopGuardRoutingWithGating, maybeWarnWriteAuthorityWithGating } from "./routing.ts"
+export { runSourceCaptureCommand, verifySourceCaptureWithGating, runConsolidationCommandWithGating } from "./source-capture.ts"
+export { maybeFileWorkedExamplesFromMessageWithGating } from "./worked-example.ts"

@@ -1,5 +1,26 @@
 // @ts-nocheck
 
+// Domain category: lifecycle event handlers (message.updated, session.idle,
+// session.compacted, session.started). Extracted from turn-guard.ts as exported
+// *WithGating* functions using dependency injection.
+
+import { join } from "node:path"
+import { mkdirSync, writeFileSync } from "node:fs"
+import type { MessageWithParts } from "./constants.ts"
+import {
+  STATUS_DIR, START_BANNER, AUTO_RETRY_MARKER, CHECKPOINT_MARKER, SPIRAL_GUARD_MARKER,
+  MAX_RETRIES_PER_PARENT, MIN_TERMINAL_MESSAGES_BEFORE_CHECKPOINT, CHECKPOINT_MODES,
+} from "./constants.ts"
+import { getPromptRouting, findSessionID, getAgentIdentity } from "./routing.ts"
+import {
+  getText, hasFinalReviewSignal, hasActionPart, isAssistantStop,
+  isSerenaMemoryToolTurn,
+} from "./analysis.ts"
+import {
+  getToolNames, classifyMemoryTools, appendMemoryUsageLog, writeStatusFile,
+  hasUsefulPayload, isCapabilityQuestion,
+} from "./pure-helpers.ts"
+
 
 // turns that still contained structured tool_calls, causing premature agent-loop
 // exit (opencode#20719). With llama-server (or any correctly-signalling backend),
@@ -410,29 +431,122 @@ const maybeCheckpoint = async (sid: string, last: MessageWithParts): Promise<boo
   return true
 }
 
-async function onMessageUpdated(event: any): Promise<void> {
+/** Shared P3-1 pruning: bound all session-keyed state to prevent memory leaks. */
+function pruneAllSessionState(args: {
+  retriedParentBySession: Map<string, Map<string, number>>
+  retriesTotalBySession: Map<string, number>
+  retryChainBySession: Map<string, number>
+  startupConfirmedBySession: Set<string>
+  inspectedStopBySession: Map<string, Set<string>>
+  toolWindowBySession: Map<string, string[]>
+  loopInterventionsBySession: Map<string, number>
+  taskWindowBySession: Map<string, string[]>
+  taskEscalationsBySession: Map<string, number>
+  taskRecentLaunchBySession: Map<string, Map<string, number>>
+  workedExampleFiledByShape: Map<string, Map<string, number>>
+  capabilityRecordedBySession: Map<string, Set<string>>
+  failureRecordedBySession: Map<string, Set<string>>
+  pendingCalibrationBySession: Map<string, Array<{ modelId: string; shapeKey: string; confidence: string }>>
+  pendingInterventionBySession: Map<string, Array<{ key: string; label: string; text: string }>>
+  spiralNudgedBySession: Map<string, number>
+  spiralInspectedBySession: Map<string, Set<string>>
+  checkpointedSessions: Set<string>
+  terminalCountBySession: Map<string, number>
+  memcoreInjectionBySession: Map<string, { signature: string; at: number; scopeDir: string }>
+  activeRoutingBySession: Map<string, { agent?: string; model?: { providerID: string; modelID: string } }>
+  sourceCaptureBySession: Map<string, { totalEvents: number; lastEvent: string; lastAt: string; lastSuccess: boolean }>
+  compactionPathBySession: Map<string, { path: "post-compact-fallback"; at: string }>
+  autoConsolidationMaxTrackedSessions: number
+  pruneToMax: (collection: Map<string, any> | Set<string>, max: number) => void
+}): void {
+  const { pruneToMax, autoConsolidationMaxTrackedSessions } = args
+  pruneToMax(args.retriedParentBySession, autoConsolidationMaxTrackedSessions)
+  pruneToMax(args.retriesTotalBySession, autoConsolidationMaxTrackedSessions)
+  pruneToMax(args.retryChainBySession, autoConsolidationMaxTrackedSessions)
+  pruneToMax(args.startupConfirmedBySession, autoConsolidationMaxTrackedSessions)
+  pruneToMax(args.inspectedStopBySession, autoConsolidationMaxTrackedSessions)
+  pruneToMax(args.toolWindowBySession, autoConsolidationMaxTrackedSessions)
+  pruneToMax(args.loopInterventionsBySession, autoConsolidationMaxTrackedSessions)
+  pruneToMax(args.taskWindowBySession, autoConsolidationMaxTrackedSessions)
+  pruneToMax(args.taskEscalationsBySession, autoConsolidationMaxTrackedSessions)
+  pruneToMax(args.taskRecentLaunchBySession, autoConsolidationMaxTrackedSessions)
+  pruneToMax(args.workedExampleFiledByShape, autoConsolidationMaxTrackedSessions)
+  pruneToMax(args.capabilityRecordedBySession, autoConsolidationMaxTrackedSessions)
+  pruneToMax(args.failureRecordedBySession, autoConsolidationMaxTrackedSessions)
+  pruneToMax(args.pendingCalibrationBySession, autoConsolidationMaxTrackedSessions)
+  pruneToMax(args.pendingInterventionBySession, autoConsolidationMaxTrackedSessions)
+  pruneToMax(args.spiralNudgedBySession, autoConsolidationMaxTrackedSessions)
+  pruneToMax(args.spiralInspectedBySession, autoConsolidationMaxTrackedSessions)
+  pruneToMax(args.checkpointedSessions, autoConsolidationMaxTrackedSessions)
+  pruneToMax(args.terminalCountBySession, autoConsolidationMaxTrackedSessions)
+  pruneToMax(args.memcoreInjectionBySession, autoConsolidationMaxTrackedSessions)
+  pruneToMax(args.activeRoutingBySession, autoConsolidationMaxTrackedSessions)
+  pruneToMax(args.sourceCaptureBySession, autoConsolidationMaxTrackedSessions)
+  pruneToMax(args.compactionPathBySession, autoConsolidationMaxTrackedSessions)
+}
+
+export async function onMessageUpdatedWithGating(args: {
+  event: any
+  client: any
+  directory: string
+  projectRoot: string
+  retryChainBySession: Map<string, number>
+  startupConfirmedBySession: Set<string>
+  terminalCountBySession: Map<string, number>
+  activeRoutingBySession: Map<string, { agent?: string; model?: { providerID: string; modelID: string } }>
+  memoryReadSessions: Set<string>
+  noteAutoConsolidationActivity: (sid: string, info: any) => void
+  maybeWarnWriteAuthority: (sid: string, msg: MessageWithParts) => Promise<boolean>
+  verifySourceCapture: (sid: string, eventType: string) => Promise<void>
+  issueRetry: (sid: string, last: MessageWithParts, prev: MessageWithParts | null) => Promise<boolean>
+  maybeSpiralNudge: (sid: string, last: MessageWithParts, prev: MessageWithParts | null) => Promise<boolean>
+  retryEnabled: boolean
+  spiralGuardEnabled: boolean
+  unwrapMessageResult: (res: any) => MessageWithParts | null
+  autoConsolidationMaxTrackedSessions: number
+  pruneToMax: (collection: Map<string, any> | Set<string>, max: number) => void
+  retriedParentBySession: Map<string, Map<string, number>>
+  inspectedStopBySession: Map<string, Set<string>>
+  toolWindowBySession: Map<string, string[]>
+  loopInterventionsBySession: Map<string, number>
+  taskWindowBySession: Map<string, string[]>
+  taskEscalationsBySession: Map<string, number>
+  taskRecentLaunchBySession: Map<string, Map<string, number>>
+  workedExampleFiledByShape: Map<string, Map<string, number>>
+  capabilityRecordedBySession: Map<string, Set<string>>
+  failureRecordedBySession: Map<string, Set<string>>
+  pendingCalibrationBySession: Map<string, Array<{ modelId: string; shapeKey: string; confidence: string }>>
+  pendingInterventionBySession: Map<string, Array<{ key: string; label: string; text: string }>>
+  spiralNudgedBySession: Map<string, number>
+  spiralInspectedBySession: Map<string, Set<string>>
+  checkpointedSessions: Set<string>
+  memcoreInjectionBySession: Map<string, { signature: string; at: number; scopeDir: string }>
+  sourceCaptureBySession: Map<string, { totalEvents: number; lastEvent: string; lastAt: string; lastSuccess: boolean }>
+  compactionPathBySession: Map<string, { path: "post-compact-fallback"; at: string }>
+}): Promise<void> {
+  const event = args.event
   const info = event?.properties?.info
   const sid = String(info?.sessionID ?? findSessionID(event))
   if (!sid) return
 
   // A real (non-injected) user message resets the retry chain counter.
   if (info?.role === "user") {
-    retryChainBySession.delete(sid)
+    args.retryChainBySession.delete(sid)
   }
 
-  if (!startupConfirmedBySession.has(sid)) {
-    startupConfirmedBySession.add(sid)
+  if (!args.startupConfirmedBySession.has(sid)) {
+    args.startupConfirmedBySession.add(sid)
     console.log(`${START_BANNER}: message hook active`)
   }
 
   // Count terminal assistant messages only (finish set) for the checkpoint gate.
   if (info?.role === "assistant" && info?.finish) {
-    terminalCountBySession.set(sid, (terminalCountBySession.get(sid) ?? 0) + 1)
+    args.terminalCountBySession.set(sid, (args.terminalCountBySession.get(sid) ?? 0) + 1)
   }
 
   // Auto-consolidation: a new message cancels any pending idle run and advances the
   // volume counter; harmless no-op when auto-consolidation is disabled.
-  noteAutoConsolidationActivity(sid, info)
+  args.noteAutoConsolidationActivity(sid, info)
 
   try {
     const messageID = String(info?.id ?? "")
@@ -440,22 +554,22 @@ async function onMessageUpdated(event: any): Promise<void> {
     if (info?.role !== "assistant") return
     if (info?.finish !== "stop" && info?.finish !== "tool-calls") return
 
-    const currentRes: any = await client.session.message({
+    const currentRes: any = await args.client.session.message({
       path: { id: sid, messageID },
-      query: { directory },
+      query: { directory: args.directory },
     })
-    const current = unwrapMessageResult(currentRes)
+    const current = args.unwrapMessageResult(currentRes)
     if (!current) return
 
     const currentRouting = getPromptRouting(current)
     if (currentRouting.agent || currentRouting.model) {
-      activeRoutingBySession.set(sid, currentRouting)
+      args.activeRoutingBySession.set(sid, currentRouting)
     }
 
     const memoryTools = classifyMemoryTools(getToolNames(current))
     if (memoryTools.reads.length > 0 || memoryTools.writes.length > 0) {
-      if (memoryTools.reads.length > 0) memoryReadSessions.add(sid)
-      appendMemoryUsageLog(projectRoot, {
+      if (memoryTools.reads.length > 0) args.memoryReadSessions.add(sid)
+      appendMemoryUsageLog(args.projectRoot, {
         sid,
         messageID,
         agent: getAgentIdentity(current) || undefined,
@@ -464,133 +578,93 @@ async function onMessageUpdated(event: any): Promise<void> {
       })
     }
 
-    await maybeWarnWriteAuthority(sid, current)
+    await args.maybeWarnWriteAuthority(sid, current)
 
     if (info?.finish !== "stop") return
 
     // When BOTH reactive guards are disabled, skip parent fetch and all
     // heuristic evaluation — zero extra overhead per message.
-    if (!retryEnabled && !spiralGuardEnabled) {
-      verifySourceCapture(sid, "message.stop").catch(() => {})
+    if (!args.retryEnabled && !args.spiralGuardEnabled) {
+      args.verifySourceCapture(sid, "message.stop").catch(() => {})
       return
     }
 
     const parentID = String(current?.info?.parentID ?? "")
     if (!parentID) return
 
-    const parentRes: any = await client.session.message({
+    const parentRes: any = await args.client.session.message({
       path: { id: sid, messageID: parentID },
-      query: { directory },
+      query: { directory: args.directory },
     })
-    const parent = unwrapMessageResult(parentRes)
-    verifySourceCapture(sid, "message.stop").catch(() => {})
+    const parent = args.unwrapMessageResult(parentRes)
+    args.verifySourceCapture(sid, "message.stop").catch(() => {})
 
     // message.updated owns the reactive end-of-turn guards; checkpoint is
     // idle-only. At most one injection per stop: retry owns stalls, the spiral
     // guard owns no-action deliberation (opposite failure modes).
-    const retried = await issueRetry(sid, current, parent)
-    if (!retried) await maybeSpiralNudge(sid, current, parent)
+    const retried = await args.issueRetry(sid, current, parent)
+    if (!retried) await args.maybeSpiralNudge(sid, current, parent)
   } catch (err) {
     console.error("[turn-guard] message.updated failed:", err)
   }
   // P3-1: bound all session-keyed state to prevent memory leaks in long-lived processes
-  pruneToMax(retriedParentBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(retriesTotalBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(retryChainBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(startupConfirmedBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(inspectedStopBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(toolWindowBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(loopInterventionsBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(taskWindowBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(taskEscalationsBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(taskRecentLaunchBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(workedExampleFiledByShape, autoConsolidationMaxTrackedSessions)
-  pruneToMax(capabilityRecordedBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(failureRecordedBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(pendingCalibrationBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(pendingInterventionBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(spiralNudgedBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(spiralInspectedBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(checkpointedSessions, autoConsolidationMaxTrackedSessions)
-  pruneToMax(terminalCountBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(memcoreInjectionBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(activeRoutingBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(sourceCaptureBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(compactionPathBySession, autoConsolidationMaxTrackedSessions)
+  pruneAllSessionState(args)
 }
 
-// Phase 13 CREATE: scan a message for successful task tool completions and file
-// worked examples. The task tool part carries the subagent_type in its input args
-// and the output (the subagent's final text) in its state/output field. We only
-// file when the part indicates success (no error status) and the output is
-// substantive. This runs on session.idle — by then the task has completed and
-// the message parts are finalized.
-async function maybeFileWorkedExamplesFromMessage(sid: string, msg: MessageWithParts): Promise<void> {
-  const parts = msg?.parts ?? []
-  for (const part of parts) {
-    if (part?.type !== "tool") continue
-    const toolName = String(part?.tool ?? part?.name ?? "").trim().toLowerCase()
-    if (toolName !== "task") continue
-
-    // Extract subagent_type and prompt from the task call's input args.
-    const inputArgs: any = part?.state?.input ?? part?.args ?? {}
-    const subagentType = String(inputArgs?.subagent_type ?? "").trim().toLowerCase()
-
-    // Extract the output (the subagent's final response text).
-    const state = part?.state ?? {}
-    const status = String(state?.status ?? "").trim().toLowerCase()
-
-    const description = String(inputArgs?.description ?? "").trim()
-    const prompt = String(inputArgs?.prompt ?? "").trim()
-
-    // Phase 13 CREATE: file worked examples for cloud target subagent types with
-    // substantive successful output. Success-only: skip if the task errored or was aborted.
-    if (workedExampleFilingEnabled && WORKED_EXAMPLE_FILE_AGENT_TYPES.has(subagentType)) {
-      if (status === "error" || status === "aborted" || status === "failed") continue
-
-      const outputText = String(
-        state?.output ?? part?.output ?? state?.text ?? "",
-      ).trim()
-      if (outputText.length < WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS) continue
-
-      await maybeFileWorkedExample({ sid, subagentType, description, prompt, output: outputText })
-    }
-
-    // Phase 14 CREATE: record a capability tuple for routing-tier subagents.
-    // Runs regardless of the worked-example filing gate — capability recording
-    // is its own concern (it covers local/cloud/deep tiers, not just cloud).
-    await maybeRecordCapabilityTuple({ sid, subagentType, description, prompt, status })
-
-    // Phase 16 CREATE: capture the self-reported confidence label from the
-    // subagent's terminal output. Runs for ANY task tool part with substantive
-    // output (not gated on routing tier — calibration covers all delegated units).
-    // The tuple is PENDING; it becomes durable only via record_outcome.
-    const outputText = String(state?.output ?? part?.output ?? state?.text ?? "").trim()
-    if (outputText.length >= WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS) {
-      const activeModel = getActiveModel(msg)
-      await maybeCaptureCalibrationTuple({ sid, model: activeModel, description, prompt, outputText })
-    }
-  }
-}
-
-
-
-async function onSessionIdle(event: any): Promise<void> {
+export async function onSessionIdleWithGating(args: {
+  event: any
+  client: any
+  directory: string
+  startupConfirmedBySession: Set<string>
+  retryEnabled: boolean
+  issueRetry: (sid: string, last: MessageWithParts, prev: MessageWithParts | null) => Promise<boolean>
+  maybeCheckpoint: (sid: string, last: MessageWithParts) => Promise<boolean>
+  maybeInjectMemcore: (opts: { sid: string; event: any; reason: "idle" | "compacted" | "compacting" | "started"; messages?: MessageWithParts[]; anchor?: MessageWithParts | null; force?: boolean }) => Promise<boolean>
+  maybeFileWorkedExamplesFromMessage: (sid: string, msg: MessageWithParts) => Promise<void>
+  armAutoConsolidationIdleTimer: (sid: string) => void
+  sortByCreated: (messages: MessageWithParts[]) => MessageWithParts[]
+  unwrapListResult: (res: any) => MessageWithParts[]
+  autoConsolidationMaxTrackedSessions: number
+  pruneToMax: (collection: Map<string, any> | Set<string>, max: number) => void
+  retriedParentBySession: Map<string, Map<string, number>>
+  retriesTotalBySession: Map<string, number>
+  retryChainBySession: Map<string, number>
+  inspectedStopBySession: Map<string, Set<string>>
+  toolWindowBySession: Map<string, string[]>
+  loopInterventionsBySession: Map<string, number>
+  taskWindowBySession: Map<string, string[]>
+  taskEscalationsBySession: Map<string, number>
+  taskRecentLaunchBySession: Map<string, Map<string, number>>
+  workedExampleFiledByShape: Map<string, Map<string, number>>
+  capabilityRecordedBySession: Map<string, Set<string>>
+  failureRecordedBySession: Map<string, Set<string>>
+  pendingCalibrationBySession: Map<string, Array<{ modelId: string; shapeKey: string; confidence: string }>>
+  pendingInterventionBySession: Map<string, Array<{ key: string; label: string; text: string }>>
+  spiralNudgedBySession: Map<string, number>
+  spiralInspectedBySession: Map<string, Set<string>>
+  checkpointedSessions: Set<string>
+  terminalCountBySession: Map<string, number>
+  memcoreInjectionBySession: Map<string, { signature: string; at: number; scopeDir: string }>
+  activeRoutingBySession: Map<string, { agent?: string; model?: { providerID: string; modelID: string } }>
+  sourceCaptureBySession: Map<string, { totalEvents: number; lastEvent: string; lastAt: string; lastSuccess: boolean }>
+  compactionPathBySession: Map<string, { path: "post-compact-fallback"; at: string }>
+}): Promise<void> {
+  const event = args.event
   const sid = String(event?.properties?.sessionID ?? findSessionID(event))
   if (!sid) return
 
-  if (!startupConfirmedBySession.has(sid)) {
-    startupConfirmedBySession.add(sid)
+  if (!args.startupConfirmedBySession.has(sid)) {
+    args.startupConfirmedBySession.add(sid)
     console.log(`${START_BANNER}: idle hook active for session=${sid}`)
   }
 
   try {
-    const res: any = await client.session.messages({
+    const res: any = await args.client.session.messages({
       path: { id: sid },
-      query: { directory },
+      query: { directory: args.directory },
     })
 
-    const messages = sortByCreated(unwrapListResult(res))
+    const messages = args.sortByCreated(args.unwrapListResult(res))
     if (messages.length < 2) return
 
     const last = messages[messages.length - 1]
@@ -600,12 +674,12 @@ async function onSessionIdle(event: any): Promise<void> {
     // !endsMidIntent, hasUsefulPayload) prevent it from firing on stalls even
     // without the retry gate. When retry IS enabled it runs first so stall
     // detection can still log; the checkpoint's guards exclude stalls either way.
-    if (retryEnabled) {
-      await issueRetry(sid, last, prev)
+    if (args.retryEnabled) {
+      await args.issueRetry(sid, last, prev)
     }
-    await maybeCheckpoint(sid, last)
+    await args.maybeCheckpoint(sid, last)
 
-    await maybeInjectMemcore({
+    await args.maybeInjectMemcore({
       sid,
       event,
       reason: "idle",
@@ -616,38 +690,16 @@ async function onSessionIdle(event: any): Promise<void> {
     // Phase 13 CREATE: file worked examples for successful implementation subagents.
     // Scans the last message for task tool parts with completed status and a target
     // subagent_type, then files a compact example if the output is substantive.
-    await maybeFileWorkedExamplesFromMessage(sid, last)
+    await args.maybeFileWorkedExamplesFromMessage(sid, last)
 
     // Arm the overridable idle-delay timer: consolidation fires only if the
     // session stays quiet for the full delay (a new message cancels it).
-    armAutoConsolidationIdleTimer(sid)
+    args.armAutoConsolidationIdleTimer(sid)
   } catch (err) {
     console.error("[turn-guard] failed:", err)
   }
   // P3-1: bound all session-keyed state (same as onMessageUpdated)
-  pruneToMax(retriedParentBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(retriesTotalBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(retryChainBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(startupConfirmedBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(inspectedStopBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(toolWindowBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(loopInterventionsBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(taskWindowBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(taskEscalationsBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(taskRecentLaunchBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(workedExampleFiledByShape, autoConsolidationMaxTrackedSessions)
-  pruneToMax(capabilityRecordedBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(failureRecordedBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(pendingCalibrationBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(pendingInterventionBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(spiralNudgedBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(spiralInspectedBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(checkpointedSessions, autoConsolidationMaxTrackedSessions)
-  pruneToMax(terminalCountBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(memcoreInjectionBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(activeRoutingBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(sourceCaptureBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(compactionPathBySession, autoConsolidationMaxTrackedSessions)
+  pruneAllSessionState(args)
 }
 
 // Post-compaction transcript archiver. Compaction RETAINS prior messages in the
@@ -658,14 +710,24 @@ async function onSessionIdle(event: any): Promise<void> {
 // durable file before it scrolls out of practical reach. Structure: one markdown
 // file per compaction, roles + text/tool/patch parts, no message content omitted.
 // Entirely wrapped in try/catch — an archive failure must never break compaction.
-async function archiveCompactedRegion(sid: string): Promise<void> {
-  if (!compactArchiveEnabled) return
+export async function archiveCompactedRegionWithGating(args: {
+  sid: string
+  client: any
+  directory: string
+  projectRoot: string
+  compactArchiveEnabled: boolean
+  sortByCreated: (messages: MessageWithParts[]) => MessageWithParts[]
+  unwrapListResult: (res: any) => MessageWithParts[]
+  statusSnapshot: (extra?: Record<string, unknown>) => Record<string, unknown>
+}): Promise<void> {
+  const sid = args.sid
+  if (!args.compactArchiveEnabled) return
   try {
-    const res: any = await client.session.messages({
+    const res: any = await args.client.session.messages({
       path: { id: sid },
-      query: { directory },
+      query: { directory: args.directory },
     })
-    const messages = sortByCreated(unwrapListResult(res))
+    const messages = args.sortByCreated(args.unwrapListResult(res))
     if (messages.length === 0) return
 
     // Latest compaction marker = the highest-index assistant message with
@@ -712,85 +774,317 @@ async function archiveCompactedRegion(sid: string): Promise<void> {
     }
 
     // Memory-loop output, not agent-to-agent research: keep it out of .opencode/context.
-    const dir = join(projectRoot, STATUS_DIR, "compaction-archive")
+    const dir = join(args.projectRoot, STATUS_DIR, "compaction-archive")
     mkdirSync(dir, { recursive: true })
     const ts = new Date().toISOString().replace(/[:.]/g, "-")
     const path = join(dir, `${sid}-${ts}.md`)
     writeFileSync(path, lines.join("\n"), "utf8")
     console.log(`[turn-guard] compact archive: wrote ${region.length} messages sid=${sid} -> ${path}`)
-    writeStatusFile(projectRoot, statusSnapshot({ type: "compact-archive", sid, messages: region.length, path }))
+    writeStatusFile(args.projectRoot, args.statusSnapshot({ type: "compact-archive", sid, messages: region.length, path }))
   } catch (err) {
     // Never let archiving break the compaction path.
     console.log(`[turn-guard] compact archive: error (ignored) sid=${sid}: ${err}`)
   }
 }
 
-async function onSessionCompacted(event: any): Promise<void> {
+export async function onSessionCompactedWithGating(args: {
+  event: any
+  verifySourceCapture: (sid: string, eventType: string) => Promise<void>
+  archiveCompactedRegion: (sid: string) => Promise<void>
+  compactionPathBySession: Map<string, { path: "post-compact-fallback"; at: string }>
+  maybeInjectMemcore: (opts: { sid: string; event: any; reason: "idle" | "compacted" | "compacting" | "started"; messages?: MessageWithParts[]; anchor?: MessageWithParts | null; force?: boolean }) => Promise<boolean>
+  autoConsolidationOnCompact: boolean
+  evaluateAutoConsolidation: (sid: string, trigger: string) => void
+  autoConsolidationMaxTrackedSessions: number
+  pruneToMax: (collection: Map<string, any> | Set<string>, max: number) => void
+  retriedParentBySession: Map<string, Map<string, number>>
+  retriesTotalBySession: Map<string, number>
+  retryChainBySession: Map<string, number>
+  startupConfirmedBySession: Set<string>
+  inspectedStopBySession: Map<string, Set<string>>
+  toolWindowBySession: Map<string, string[]>
+  loopInterventionsBySession: Map<string, number>
+  taskWindowBySession: Map<string, string[]>
+  taskEscalationsBySession: Map<string, number>
+  taskRecentLaunchBySession: Map<string, Map<string, number>>
+  workedExampleFiledByShape: Map<string, Map<string, number>>
+  capabilityRecordedBySession: Map<string, Set<string>>
+  failureRecordedBySession: Map<string, Set<string>>
+  pendingCalibrationBySession: Map<string, Array<{ modelId: string; shapeKey: string; confidence: string }>>
+  pendingInterventionBySession: Map<string, Array<{ key: string; label: string; text: string }>>
+  spiralNudgedBySession: Map<string, number>
+  spiralInspectedBySession: Map<string, Set<string>>
+  checkpointedSessions: Set<string>
+  terminalCountBySession: Map<string, number>
+  memcoreInjectionBySession: Map<string, { signature: string; at: number; scopeDir: string }>
+  activeRoutingBySession: Map<string, { agent?: string; model?: { providerID: string; modelID: string } }>
+  sourceCaptureBySession: Map<string, { totalEvents: number; lastEvent: string; lastAt: string; lastSuccess: boolean }>
+}): Promise<void> {
+  const event = args.event
   const sid = String(event?.properties?.sessionID ?? findSessionID(event))
   if (!sid) return
 
-  verifySourceCapture(sid, "session.compacted").catch(() => {})
+  args.verifySourceCapture(sid, "session.compacted").catch(() => {})
 
   // Archive the just-compacted region BEFORE it scrolls out of practical reach.
   // Independent of the mem-core fallback below; gated by ESHEPHERD_COMPACT_ARCHIVE.
-  await archiveCompactedRegion(sid)
+  await args.archiveCompactedRegion(sid)
 
   // Mem-core reinjection is intentionally post-compaction-only. The compaction
   // hook owns prompt shaping; this event owns continuation-memory refresh.
-  compactionPathBySession.set(sid, { path: "post-compact-fallback", at: new Date().toISOString() })
+  args.compactionPathBySession.set(sid, { path: "post-compact-fallback", at: new Date().toISOString() })
   // NOTE: do NOT force here. maybeInjectMemcore injects via client.session.prompt(),
   // which creates a real generating turn (~memcoreMaxChars). Forcing made every
   // post-compaction event re-inject the same large block, re-inflating context and
   // triggering another compaction → an infinite compact/reinject loop. Relying on
   // the signature+cooldown dedup means this fires at most once per unique mem-core
   // content, so identical mem-core after a compaction is a no-op.
-  await maybeInjectMemcore({
+  await args.maybeInjectMemcore({
     sid,
     event,
     reason: "compacted",
   })
 
   // Compaction is a natural consolidation point; run auto-consolidation if enabled.
-  if (autoConsolidationOnCompact) {
-    evaluateAutoConsolidation(sid, "compacted")
+  if (args.autoConsolidationOnCompact) {
+    args.evaluateAutoConsolidation(sid, "compacted")
   }
   // P3-1: bound all session-keyed state (same as onMessageUpdated)
-  pruneToMax(retriedParentBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(retriesTotalBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(retryChainBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(startupConfirmedBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(inspectedStopBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(toolWindowBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(loopInterventionsBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(taskWindowBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(taskEscalationsBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(taskRecentLaunchBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(workedExampleFiledByShape, autoConsolidationMaxTrackedSessions)
-  pruneToMax(capabilityRecordedBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(failureRecordedBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(pendingCalibrationBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(pendingInterventionBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(spiralNudgedBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(spiralInspectedBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(checkpointedSessions, autoConsolidationMaxTrackedSessions)
-  pruneToMax(terminalCountBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(memcoreInjectionBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(sourceCaptureBySession, autoConsolidationMaxTrackedSessions)
-  pruneToMax(compactionPathBySession, autoConsolidationMaxTrackedSessions)
+  pruneAllSessionState(args)
 }
 
-async function onSessionStarted(event: any): Promise<void> {
+export async function onSessionStartedWithGating(args: {
+  event: any
+  toolWindowBySession: Map<string, string[]>
+  loopInterventionsBySession: Map<string, number>
+  activeRoutingBySession: Map<string, { agent?: string; model?: { providerID: string; modelID: string } }>
+  maybeInjectMemcore: (opts: { sid: string; event: any; reason: "idle" | "compacted" | "compacting" | "started"; messages?: MessageWithParts[]; anchor?: MessageWithParts | null; force?: boolean }) => Promise<boolean>
+}): Promise<void> {
+  const event = args.event
   const sid = String(event?.properties?.sessionID ?? findSessionID(event))
   if (!sid) return
 
-  toolWindowBySession.delete(sid)
-  loopInterventionsBySession.delete(sid)
-  activeRoutingBySession.delete(sid)
+  args.toolWindowBySession.delete(sid)
+  args.loopInterventionsBySession.delete(sid)
+  args.activeRoutingBySession.delete(sid)
 
-  await maybeInjectMemcore({
+  await args.maybeInjectMemcore({
     sid,
     event,
     reason: "started",
     force: true,
   })
+}
+
+
+// Typed binder: composes the exported *WithGating* functions into ready-to-use
+// event handlers. turn-guard.ts instantiates this once with its closure deps and
+// passes the returned handlers to createHookHeadHandlers — no per-handler local
+// wrappers needed there anymore. Each returned function delegates verbatim to
+// the corresponding *WithGating* export (no behavior changes).
+export interface SessionPolicyHandlerDeps {
+  client: any
+  directory: string
+  projectRoot: string
+  retryEnabled: boolean
+  spiralGuardEnabled: boolean
+  autoConsolidationMaxTrackedSessions: number
+  compactArchiveEnabled: boolean
+  autoConsolidationOnCompact: boolean
+  noteAutoConsolidationActivity: (sid: string, info: any) => void
+  maybeWarnWriteAuthority: (sid: string, msg: MessageWithParts) => Promise<boolean>
+  verifySourceCapture: (sid: string, eventType: string) => Promise<void>
+  issueRetry: (sid: string, last: MessageWithParts, prev: MessageWithParts | null) => Promise<boolean>
+  maybeSpiralNudge: (sid: string, last: MessageWithParts, prev: MessageWithParts | null) => Promise<boolean>
+  unwrapMessageResult: (res: any) => MessageWithParts | null
+  pruneToMax: (collection: Map<string, any> | Set<string>, max: number) => void
+  maybeCheckpoint: (sid: string, last: MessageWithParts) => Promise<boolean>
+  maybeInjectMemcore: (opts: { sid: string; event: any; reason: "idle" | "compacted" | "compacting" | "started"; messages?: MessageWithParts[]; anchor?: MessageWithParts | null; force?: boolean }) => Promise<boolean>
+  maybeFileWorkedExamplesFromMessage: (sid: string, msg: MessageWithParts) => Promise<void>
+  armAutoConsolidationIdleTimer: (sid: string) => void
+  sortByCreated: (messages: MessageWithParts[]) => MessageWithParts[]
+  unwrapListResult: (res: any) => MessageWithParts[]
+  evaluateAutoConsolidation: (sid: string, trigger: string) => void
+  statusSnapshot: (extra?: Record<string, unknown>) => Record<string, unknown>
+  retryChainBySession: Map<string, number>
+  startupConfirmedBySession: Set<string>
+  terminalCountBySession: Map<string, number>
+  activeRoutingBySession: Map<string, { agent?: string; model?: { providerID: string; modelID: string } }>
+  memoryReadSessions: Set<string>
+  retriedParentBySession: Map<string, Map<string, number>>
+  retriesTotalBySession: Map<string, number>
+  inspectedStopBySession: Map<string, Set<string>>
+  toolWindowBySession: Map<string, string[]>
+  loopInterventionsBySession: Map<string, number>
+  taskWindowBySession: Map<string, string[]>
+  taskEscalationsBySession: Map<string, number>
+  taskRecentLaunchBySession: Map<string, Map<string, number>>
+  workedExampleFiledByShape: Map<string, Map<string, number>>
+  capabilityRecordedBySession: Map<string, Set<string>>
+  failureRecordedBySession: Map<string, Set<string>>
+  pendingCalibrationBySession: Map<string, Array<{ modelId: string; shapeKey: string; confidence: string }>>
+  pendingInterventionBySession: Map<string, Array<{ key: string; label: string; text: string }>>
+  spiralNudgedBySession: Map<string, number>
+  spiralInspectedBySession: Map<string, Set<string>>
+  checkpointedSessions: Set<string>
+  memcoreInjectionBySession: Map<string, { signature: string; at: number; scopeDir: string }>
+  sourceCaptureBySession: Map<string, { totalEvents: number; lastEvent: string; lastAt: string; lastSuccess: boolean }>
+  compactionPathBySession: Map<string, { path: "post-compact-fallback"; at: string }>
+}
+
+export function bindSessionPolicyHandlers(deps: SessionPolicyHandlerDeps) {
+  return {
+    onMessageUpdated(event: any): Promise<void> {
+      return onMessageUpdatedWithGating({
+        event,
+        client: deps.client,
+        directory: deps.directory,
+        projectRoot: deps.projectRoot,
+        retryChainBySession: deps.retryChainBySession,
+        startupConfirmedBySession: deps.startupConfirmedBySession,
+        terminalCountBySession: deps.terminalCountBySession,
+        activeRoutingBySession: deps.activeRoutingBySession,
+        memoryReadSessions: deps.memoryReadSessions,
+        noteAutoConsolidationActivity: deps.noteAutoConsolidationActivity,
+        maybeWarnWriteAuthority: deps.maybeWarnWriteAuthority,
+        verifySourceCapture: deps.verifySourceCapture,
+        issueRetry: deps.issueRetry,
+        maybeSpiralNudge: deps.maybeSpiralNudge,
+        retryEnabled: deps.retryEnabled,
+        spiralGuardEnabled: deps.spiralGuardEnabled,
+        unwrapMessageResult: deps.unwrapMessageResult,
+        autoConsolidationMaxTrackedSessions: deps.autoConsolidationMaxTrackedSessions,
+        pruneToMax: deps.pruneToMax,
+        retriedParentBySession: deps.retriedParentBySession,
+        inspectedStopBySession: deps.inspectedStopBySession,
+        toolWindowBySession: deps.toolWindowBySession,
+        loopInterventionsBySession: deps.loopInterventionsBySession,
+        taskWindowBySession: deps.taskWindowBySession,
+        taskEscalationsBySession: deps.taskEscalationsBySession,
+        taskRecentLaunchBySession: deps.taskRecentLaunchBySession,
+        workedExampleFiledByShape: deps.workedExampleFiledByShape,
+        capabilityRecordedBySession: deps.capabilityRecordedBySession,
+        failureRecordedBySession: deps.failureRecordedBySession,
+        pendingCalibrationBySession: deps.pendingCalibrationBySession,
+        pendingInterventionBySession: deps.pendingInterventionBySession,
+        spiralNudgedBySession: deps.spiralNudgedBySession,
+        spiralInspectedBySession: deps.spiralInspectedBySession,
+        checkpointedSessions: deps.checkpointedSessions,
+        memcoreInjectionBySession: deps.memcoreInjectionBySession,
+        sourceCaptureBySession: deps.sourceCaptureBySession,
+        compactionPathBySession: deps.compactionPathBySession,
+      })
+    },
+
+    onSessionIdle(event: any): Promise<void> {
+      return onSessionIdleWithGating({
+        event,
+        client: deps.client,
+        directory: deps.directory,
+        startupConfirmedBySession: deps.startupConfirmedBySession,
+        retryEnabled: deps.retryEnabled,
+        issueRetry: deps.issueRetry,
+        maybeCheckpoint: deps.maybeCheckpoint,
+        maybeInjectMemcore: deps.maybeInjectMemcore,
+        maybeFileWorkedExamplesFromMessage: deps.maybeFileWorkedExamplesFromMessage,
+        armAutoConsolidationIdleTimer: deps.armAutoConsolidationIdleTimer,
+        sortByCreated: deps.sortByCreated,
+        unwrapListResult: deps.unwrapListResult,
+        autoConsolidationMaxTrackedSessions: deps.autoConsolidationMaxTrackedSessions,
+        pruneToMax: deps.pruneToMax,
+        retriedParentBySession: deps.retriedParentBySession,
+        retriesTotalBySession: deps.retriesTotalBySession,
+        retryChainBySession: deps.retryChainBySession,
+        inspectedStopBySession: deps.inspectedStopBySession,
+        toolWindowBySession: deps.toolWindowBySession,
+        loopInterventionsBySession: deps.loopInterventionsBySession,
+        taskWindowBySession: deps.taskWindowBySession,
+        taskEscalationsBySession: deps.taskEscalationsBySession,
+        taskRecentLaunchBySession: deps.taskRecentLaunchBySession,
+        workedExampleFiledByShape: deps.workedExampleFiledByShape,
+        capabilityRecordedBySession: deps.capabilityRecordedBySession,
+        failureRecordedBySession: deps.failureRecordedBySession,
+        pendingCalibrationBySession: deps.pendingCalibrationBySession,
+        pendingInterventionBySession: deps.pendingInterventionBySession,
+        spiralNudgedBySession: deps.spiralNudgedBySession,
+        spiralInspectedBySession: deps.spiralInspectedBySession,
+        checkpointedSessions: deps.checkpointedSessions,
+        terminalCountBySession: deps.terminalCountBySession,
+        memcoreInjectionBySession: deps.memcoreInjectionBySession,
+        activeRoutingBySession: deps.activeRoutingBySession,
+        sourceCaptureBySession: deps.sourceCaptureBySession,
+        compactionPathBySession: deps.compactionPathBySession,
+      })
+    },
+
+    // Archive helper (internal to the binder): composes archiveCompactedRegionWithGating.
+    archiveCompactedRegion(sid: string): Promise<void> {
+      return archiveCompactedRegionWithGating({
+        sid,
+        client: deps.client,
+        directory: deps.directory,
+        projectRoot: deps.projectRoot,
+        compactArchiveEnabled: deps.compactArchiveEnabled,
+        sortByCreated: deps.sortByCreated,
+        unwrapListResult: deps.unwrapListResult,
+        statusSnapshot: deps.statusSnapshot,
+      })
+    },
+
+    onSessionCompacted(event: any): Promise<void> {
+      return onSessionCompactedWithGating({
+        event,
+        verifySourceCapture: deps.verifySourceCapture,
+        archiveCompactedRegion: (sid) =>
+          archiveCompactedRegionWithGating({
+            sid,
+            client: deps.client,
+            directory: deps.directory,
+            projectRoot: deps.projectRoot,
+            compactArchiveEnabled: deps.compactArchiveEnabled,
+            sortByCreated: deps.sortByCreated,
+            unwrapListResult: deps.unwrapListResult,
+            statusSnapshot: deps.statusSnapshot,
+          }),
+        compactionPathBySession: deps.compactionPathBySession,
+        maybeInjectMemcore: deps.maybeInjectMemcore,
+        autoConsolidationOnCompact: deps.autoConsolidationOnCompact,
+        evaluateAutoConsolidation: deps.evaluateAutoConsolidation,
+        autoConsolidationMaxTrackedSessions: deps.autoConsolidationMaxTrackedSessions,
+        pruneToMax: deps.pruneToMax,
+        retriedParentBySession: deps.retriedParentBySession,
+        retriesTotalBySession: deps.retriesTotalBySession,
+        retryChainBySession: deps.retryChainBySession,
+        startupConfirmedBySession: deps.startupConfirmedBySession,
+        inspectedStopBySession: deps.inspectedStopBySession,
+        toolWindowBySession: deps.toolWindowBySession,
+        loopInterventionsBySession: deps.loopInterventionsBySession,
+        taskWindowBySession: deps.taskWindowBySession,
+        taskEscalationsBySession: deps.taskEscalationsBySession,
+        taskRecentLaunchBySession: deps.taskRecentLaunchBySession,
+        workedExampleFiledByShape: deps.workedExampleFiledByShape,
+        capabilityRecordedBySession: deps.capabilityRecordedBySession,
+        failureRecordedBySession: deps.failureRecordedBySession,
+        pendingCalibrationBySession: deps.pendingCalibrationBySession,
+        pendingInterventionBySession: deps.pendingInterventionBySession,
+        spiralNudgedBySession: deps.spiralNudgedBySession,
+        spiralInspectedBySession: deps.spiralInspectedBySession,
+        checkpointedSessions: deps.checkpointedSessions,
+        terminalCountBySession: deps.terminalCountBySession,
+        memcoreInjectionBySession: deps.memcoreInjectionBySession,
+        activeRoutingBySession: deps.activeRoutingBySession,
+        sourceCaptureBySession: deps.sourceCaptureBySession,
+      })
+    },
+
+    onSessionStarted(event: any): Promise<void> {
+      return onSessionStartedWithGating({
+        event,
+        toolWindowBySession: deps.toolWindowBySession,
+        loopInterventionsBySession: deps.loopInterventionsBySession,
+        activeRoutingBySession: deps.activeRoutingBySession,
+        maybeInjectMemcore: deps.maybeInjectMemcore,
+      })
+    },
+  }
 }

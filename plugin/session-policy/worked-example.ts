@@ -218,3 +218,61 @@ export async function maybeFileWorkedExampleWithGating(args: {
   }
 
 }
+
+export async function maybeFileWorkedExamplesFromMessageWithGating(args: {
+  sid: string
+  msg: any
+  workedExampleFilingEnabled: boolean
+  workedExampleFileAgentTypes: Set<string>
+  workedExampleMinSubstantiveChars: number
+  getActiveModel: (msg: any) => { providerID: string; modelID: string } | null
+  maybeFileWorkedExampleWithGating: (input: { sid: string; subagentType: string; description: string; prompt: string; output: string }) => Promise<void>
+  maybeRecordCapabilityTupleWithGating: (input: { sid: string; subagentType: string; description: string; prompt: string; status: string }) => Promise<void>
+  maybeCaptureCalibrationTupleWithGating: (input: { sid: string; model?: { providerID: string; modelID: string } | null; description: string; prompt: string; outputText: string }) => Promise<void>
+}): Promise<void> {
+  const parts = args.msg?.parts ?? []
+  for (const part of parts) {
+    if (part?.type !== "tool") continue
+    const toolName = String(part?.tool ?? part?.name ?? "").trim().toLowerCase()
+    if (toolName !== "task") continue
+
+    // Extract subagent_type and prompt from the task call's input args.
+    const inputArgs: any = part?.state?.input ?? part?.args ?? {}
+    const subagentType = String(inputArgs?.subagent_type ?? "").trim().toLowerCase()
+
+    // Extract the output (the subagent's final response text).
+    const state = part?.state ?? {}
+    const status = String(state?.status ?? "").trim().toLowerCase()
+
+    const description = String(inputArgs?.description ?? "").trim()
+    const prompt = String(inputArgs?.prompt ?? "").trim()
+
+    // Phase 13 CREATE: file worked examples for cloud target subagent types with
+    // substantive successful output. Success-only: skip if the task errored or was aborted.
+    if (args.workedExampleFilingEnabled && args.workedExampleFileAgentTypes.has(subagentType)) {
+      if (status === "error" || status === "aborted" || status === "failed") continue
+
+      const outputText = String(
+        state?.output ?? part?.output ?? state?.text ?? "",
+      ).trim()
+      if (outputText.length < args.workedExampleMinSubstantiveChars) continue
+
+      await args.maybeFileWorkedExampleWithGating({ sid: args.sid, subagentType, description, prompt, output: outputText })
+    }
+
+    // Phase 14 CREATE: record a capability tuple for routing-tier subagents.
+    // Runs regardless of the worked-example filing gate — capability recording
+    // is its own concern (it covers local/cloud/deep tiers, not just cloud).
+    await args.maybeRecordCapabilityTupleWithGating({ sid: args.sid, subagentType, description, prompt, status })
+
+    // Phase 16 CREATE: capture the self-reported confidence label from the
+    // subagent's terminal output. Runs for ANY task tool part with substantive
+    // output (not gated on routing tier — calibration covers all delegated units).
+    // The tuple is PENDING; it becomes durable only via record_outcome.
+    const outputText = String(state?.output ?? part?.output ?? state?.text ?? "").trim()
+    if (outputText.length >= args.workedExampleMinSubstantiveChars) {
+      const activeModel = args.getActiveModel(args.msg)
+      await args.maybeCaptureCalibrationTupleWithGating({ sid: args.sid, model: activeModel, description, prompt, outputText })
+    }
+  }
+}

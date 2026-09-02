@@ -71,11 +71,12 @@ import {
   acquireAutoConsolidationLock, releaseAutoConsolidationLock, killProcessTree,
   getToolNames, containsConsolidationWriteTool, classifyMemoryTools,
 } from "./session-policy/pure-helpers.ts"
-import { findSessionID, getAgentIdentity, getActiveModel, getActiveAgent, getPromptRouting, normalizeModelSpec } from "./session-policy/routing.ts"
-import { maybeInjectMemcoreWithGating } from "./session-policy/interventions.ts"
-import { maybeFileWorkedExampleWithGating } from "./session-policy/worked-example.ts"
-import { maybeRecordCapabilityTupleWithGating } from "./session-policy/capability.ts"
-import { runSourceCaptureCommand } from "./session-policy/source-capture.ts"
+import { findSessionID, getAgentIdentity, getActiveModel, getActiveAgent, getPromptRouting, normalizeModelSpec, resolveSessionPromptRoutingWithGating, resolveLoopGuardRoutingWithGating, maybeWarnWriteAuthorityWithGating } from "./session-policy/routing.ts"
+import { maybeInjectMemcoreWithGating, persistWorkedInterventionWithGating, maybeRecordModelFailureWithGating, queuePendingInterventionWithGating, confirmPendingInterventionsWithGating } from "./session-policy/interventions.ts"
+import { maybeFileWorkedExampleWithGating, maybeFileWorkedExamplesFromMessageWithGating } from "./session-policy/worked-example.ts"
+import { maybeRecordCapabilityTupleWithGating, maybeCaptureCalibrationTupleWithGating } from "./session-policy/capability.ts"
+import { runSourceCaptureCommand, verifySourceCaptureWithGating, runConsolidationCommandWithGating } from "./session-policy/source-capture.ts"
+import { bindSessionPolicyHandlers } from "./session-policy/handlers.ts"
 
 // Absolute path to the ElectricShepherd install root (the plugin's own repo).
 // Runtime scripts must run from HERE — not the consumer project's cwd — so
@@ -916,34 +917,19 @@ export const TurnGuard = async ({ client, directory }: any) => {
     prompt: string
     outputText: string
   }): Promise<void> {
-    if (!calibrationCaptureEnabled) return
-    const { sid, model, description, prompt, outputText } = args
-
-    // Gate 1: deterministic model identity — unknown model => skip (no guessing).
-    const modelId = canonicalModelId(model?.providerID, model?.modelID)
-    if (!modelId) return
-
-    // Gate 2: shape from the SAME Phase 14/13 shape function.
-    const shape = extractWorkedExampleShape(`${description}\n${prompt}`)
-
-    // Gate 3: parse the self-reported confidence from the terminal output.
-    // Returns null when no CONFIDENCE line is present — skip, don't guess.
-    const confidence = parseSelfReportedConfidence(outputText)
-    if (!confidence) return
-
-    // Queue the pending tuple for this session. Dedup: same (modelId, shapeKey, confidence)
-    // is recorded once per session (repeated idle events on the same completion).
-    const pending = pendingCalibrationBySession.get(sid) ?? []
-    const dedupKey = `${modelId}:${shape.shapeKey}:${confidence}`
-    if (pending.some((p) => `${p.modelId}:${p.shapeKey}:${p.confidence}` === dedupKey)) return
-
-    pending.push({ modelId, shapeKey: shape.shapeKey, confidence })
-    pendingCalibrationBySession.set(sid, pending)
-
-    console.log(
-      `[turn-guard] calibration capture: queued ${modelId} / ${shape.shapeKey} / ${confidence} ` +
-        `(bucket=${buildCalibrationBucketId(modelId, shape.shapeKey, confidence)}) sid=${sid}`,
-    )
+    await maybeCaptureCalibrationTupleWithGating({
+      sid: args.sid,
+      model: args.model ?? null,
+      description: args.description,
+      prompt: args.prompt,
+      outputText: args.outputText,
+      calibrationCaptureEnabled,
+      pendingCalibrationBySession,
+      canonicalModelId,
+      extractWorkedExampleShape,
+      parseSelfReportedConfidence,
+      buildCalibrationBucketId,
+    })
   }
 
   // Phase 15 CREATE (worked-intervention persistence): stamp the prompt patch that
@@ -958,55 +944,19 @@ export const TurnGuard = async ({ client, directory }: any) => {
     interventionLabel: "spiral-nudge" | "retry-nudge" | "loop-block"
     interventionText: string
   }): Promise<void> {
-    if (!failureRecordingEnabled) return
-    const { sid, model, taskText, interventionLabel, interventionText } = args
-
-    // Gate 1: deterministic model identity — unknown model => skip (no guessing).
-    const modelId = canonicalModelId(model?.providerID, model?.modelID)
-    if (!modelId) return
-
-    // Gate 2: shape from the SAME Phase 14/13 shape function.
-    const shape = extractWorkedExampleShape(taskText)
-    const text = String(interventionText || "").trim().slice(0, FAILURE_PATCH_TEXT_MAX_CHARS)
-    if (!text) return
-
-    try {
-      const palaceClient = await getWorkedExampleClient()
-      if (palaceClient && typeof palaceClient.kgAdd === "function") {
-        const patchId = buildFailurePatchId(modelId, shape.shapeKey, interventionLabel)
-        const labelResult: any = await palaceClient.kgAdd({
-          subject: patchId,
-          predicate: "es-intervention-label",
-          object: interventionLabel,
-          source_closet: patchId,
-        })
-        if (!labelResult?.ok) {
-          console.log(
-            `[turn-guard] failure recording: intervention failed (${labelResult?.kind ?? "unknown"}): ${String(labelResult?.detail ?? labelResult)} sid=${sid}`
-          )
-          return
-        }
-        const textResult: any = await palaceClient.kgAdd({
-          subject: patchId,
-          predicate: "es-intervention-text",
-          object: text,
-          source_closet: patchId,
-        })
-        if (!textResult?.ok) {
-          console.log(
-            `[turn-guard] failure recording: intervention failed (${textResult?.kind ?? "unknown"}): ${String(textResult?.detail ?? textResult)} sid=${sid}`
-          )
-          return
-        }
-        console.log(
-          `[turn-guard] failure recording: WORKED intervention ${interventionLabel} persisted ` +
-            `for ${modelId} (shape=${shape.shapeKey}, patch=${patchId}) sid=${sid}`,
-        )
-      }
-    } catch (err) {
-      // Intervention recording failure must never break the turn.
-      console.log(`[turn-guard] failure recording: intervention failed, continuing: ${String(err)}`)
-    }
+    await persistWorkedInterventionWithGating({
+      sid: args.sid,
+      model: args.model ?? null,
+      taskText: args.taskText,
+      interventionLabel: args.interventionLabel,
+      interventionText: args.interventionText,
+      failureRecordingEnabled,
+      canonicalModelId,
+      extractWorkedExampleShape,
+      failurePatchTextMaxChars: FAILURE_PATCH_TEXT_MAX_CHARS,
+      getWorkedExampleClient,
+      buildFailurePatchId,
+    })
   }
 
   // Phase 15 CREATE (failure-event recording): record a per-model failure event
@@ -1027,84 +977,36 @@ export const TurnGuard = async ({ client, directory }: any) => {
     interventionLabel: "spiral-nudge" | "retry-nudge" | "loop-block"
     interventionText: string
   }): Promise<void> {
-    if (!failureRecordingEnabled) return
-    const { sid, model, taskText, event } = args
-
-    // Gate 1: deterministic model identity — unknown model => skip (no guessing).
-    const modelId = canonicalModelId(model?.providerID, model?.modelID)
-    if (!modelId) return
-
-    // Gate 2: shape from the SAME Phase 14/13 shape function.
-    const shape = extractWorkedExampleShape(taskText)
-
-    // Gate 3: session-local dedup — repeated identical (bucket, event) in one
-    // session records once (the pattern is already captured; a second nudge on the
-    // same bucket adds nothing to the count).
-    const bucketId = buildFailureBucketId(modelId, shape.shapeKey)
-    const dedupKey = `${bucketId}:${event}`
-    const recordedBySession = failureRecordedBySession.get(sid) ?? new Set<string>()
-    if (recordedBySession.has(dedupKey)) {
-      console.log(
-        `[turn-guard] failure recording: skipping duplicate ${dedupKey} sid=${sid}`,
-      )
-      return
-    }
-
-    try {
-      const palaceClient = await getWorkedExampleClient()
-      if (palaceClient && typeof palaceClient.kgAdd === "function") {
-        const eventResult: any = await palaceClient.kgAdd({
-          subject: bucketId,
-          predicate: "es-failure-event",
-          object: event,
-          valid_from: new Date().toISOString(),
-          source_closet: bucketId,
-        })
-        if (!eventResult?.ok) {
-          console.log(
-            `[turn-guard] failure recording: event failed (${eventResult?.kind ?? "unknown"}): ${String(eventResult?.detail ?? eventResult)} sid=${sid}`
-          )
-          return
-        }
-        // Best-effort shape metadata for explainability (idempotent on the read side).
-        const shapeResult: any = await palaceClient.kgAdd({
-          subject: bucketId,
-          predicate: "es-failure-shape",
-          object: buildCapabilityCanonicalShape(shape).slice(0, 200),
-          source_closet: bucketId,
-        })
-        if (!shapeResult?.ok) {
-          console.log(
-            `[turn-guard] failure recording: shape stamp failed (non-fatal; ${shapeResult?.kind ?? "unknown"}): ${String(shapeResult?.detail ?? shapeResult)} sid=${sid}`
-          )
-        }
-        recordedBySession.add(dedupKey)
-        failureRecordedBySession.set(sid, recordedBySession)
-        console.log(
-          `[turn-guard] failure recording: recorded ${event} for ${modelId} ` +
-            `(shape=${shape.workClass}/${shape.sizeBucket}/${shape.shapeKey}, bucket=${bucketId}) sid=${sid}`,
-        )
-      }
-    } catch (err) {
-      // Recording failure must never break the turn.
-      console.log(`[turn-guard] failure recording: event failed, continuing: ${String(err)}`)
-    }
+    await maybeRecordModelFailureWithGating({
+      sid: args.sid,
+      model: args.model ?? null,
+      taskText: args.taskText,
+      event: args.event,
+      interventionLabel: args.interventionLabel,
+      interventionText: args.interventionText,
+      failureRecordingEnabled,
+      failureRecordedBySession,
+      canonicalModelId,
+      extractWorkedExampleShape,
+      buildFailureBucketId,
+      getWorkedExampleClient,
+      buildCapabilityCanonicalShape,
+    })
   }
 
   // Phase 15 CREATE: queue an attempted intervention patch for later success
   // confirmation. Deduped by key (message id); a new nudge on the same message
   // replaces the pending entry so only the latest wording is confirmable.
   function queuePendingIntervention(sid: string, key: string, label: string, text: string): void {
-    if (!failureRecordingEnabled) return
-    const t = String(text || "").trim().slice(0, FAILURE_PATCH_TEXT_MAX_CHARS)
-    if (!t) return
-    const list = pendingInterventionBySession.get(sid) ?? []
-    const next = list.filter((p) => p.key !== key)
-    next.push({ key, label, text: t })
-    // Bound the queue: at most one pending entry per guard site (3 sites), so a
-    // pathological session cannot grow this unbounded.
-    while (next.length > 6) next.shift()
-    pendingInterventionBySession.set(sid, next)
+    queuePendingInterventionWithGating({
+      sid,
+      key,
+      label,
+      text,
+      failureRecordingEnabled,
+      pendingInterventionBySession,
+      failurePatchTextMaxChars: FAILURE_PATCH_TEXT_MAX_CHARS,
+    })
   }
 
   // Phase 15 CREATE (success signal): confirm or expire the pending intervention
@@ -1124,32 +1026,24 @@ export const TurnGuard = async ({ client, directory }: any) => {
     model?: { providerID: string; modelID: string } | null
     taskText: string
   }): Promise<void> {
-    if (!failureRecordingEnabled) return
-    const { sid, confirmedKey, model, taskText } = args
-    const list = pendingInterventionBySession.get(sid) ?? []
-    if (list.length === 0) return
-    const confirmed = confirmedKey ? list.filter((p) => p.key === confirmedKey) : []
-    const expired = list.filter((p) => !confirmedKey || p.key !== confirmedKey)
-    pendingInterventionBySession.delete(sid)
-    for (const entry of expired) {
-      console.log(
-        `[turn-guard] failure recording: intervention ${entry.label} NOT proven to work — expired, not persisted sid=${sid}`,
-      )
-    }
-    if (confirmed.length === 0) return
-    for (const entry of confirmed) {
-      try {
-        await persistWorkedIntervention({
-          sid,
-          model: model ?? null,
-          taskText,
-          interventionLabel: entry.label as "spiral-nudge" | "retry-nudge" | "loop-block",
-          interventionText: entry.text,
-        })
-      } catch (err) {
-        console.log(`[turn-guard] failure recording: confirm failed, continuing: ${String(err)}`)
-      }
-    }
+    await confirmPendingInterventionsWithGating({
+      sid: args.sid,
+      confirmedKey: args.confirmedKey,
+      model: args.model ?? null,
+      taskText: args.taskText,
+      failureRecordingEnabled,
+      pendingInterventionBySession,
+      persistWorkedInterventionWithGating: (a) =>
+        persistWorkedInterventionWithGating({
+          ...a,
+          failureRecordingEnabled,
+          canonicalModelId,
+          extractWorkedExampleShape,
+          failurePatchTextMaxChars: FAILURE_PATCH_TEXT_MAX_CHARS,
+          getWorkedExampleClient,
+          buildFailurePatchId,
+        }),
+    })
   }
 
   // Loop-guard status banner. Emitted HERE, after the consts above are
@@ -1305,69 +1199,29 @@ export const TurnGuard = async ({ client, directory }: any) => {
     agent?: string
     model?: { providerID: string; modelID: string }
   }> {
-    const fromHook = getPromptRoutingFromToolHook(input, output)
-    const cached = activeRoutingBySession.get(sid) ?? {}
-    let agent = fromHook.agent || cached.agent
-    let model = fromHook.model || cached.model
-
-    if (agent && model) {
-      return { agent, model }
-    }
-
-    const fromSession = await resolveSessionPromptRouting(sid)
-    if (!agent) agent = fromSession.agent
-    if (!model) model = fromSession.model
-
-    const resolved: {
-      agent?: string
-      model?: { providerID: string; modelID: string }
-    } = {}
-    if (agent) resolved.agent = agent
-    if (model) resolved.model = model
-    if (resolved.agent || resolved.model) {
-      activeRoutingBySession.set(sid, resolved)
-    }
-    return resolved
+    return resolveLoopGuardRoutingWithGating({
+      sid,
+      input,
+      output,
+      getPromptRoutingFromToolHook,
+      activeRoutingBySession,
+      resolveSessionPromptRouting,
+    })
   }
 
   async function resolveSessionPromptRouting(sid: string): Promise<{
     agent?: string
     model?: { providerID: string; modelID: string }
   }> {
-    const cached = activeRoutingBySession.get(sid) ?? {}
-    let agent = cached.agent
-    let model = cached.model
-
-    if (agent && model) {
-      return { agent, model }
-    }
-
-    try {
-      const res: any = await client.session.messages({
-        path: { id: sid },
-        query: { directory },
-      })
-      const messages = sortByCreated(unwrapListResult(res))
-      const tail = messages[messages.length - 1] ?? null
-      const previous = messages.length > 1 ? messages[messages.length - 2] : null
-      const fromSession = getPromptRouting(tail, previous)
-
-      if (!agent) agent = fromSession.agent
-      if (!model) model = fromSession.model
-    } catch {
-      // best-effort: keep hook/cached routing only
-    }
-
-    const resolved: {
-      agent?: string
-      model?: { providerID: string; modelID: string }
-    } = {}
-    if (agent) resolved.agent = agent
-    if (model) resolved.model = model
-    if (resolved.agent || resolved.model) {
-      activeRoutingBySession.set(sid, resolved)
-    }
-    return resolved
+    return resolveSessionPromptRoutingWithGating({
+      sid,
+      client,
+      directory,
+      activeRoutingBySession,
+      getPromptRouting,
+      unwrapListResult,
+      sortByCreated,
+    })
   }
 
   async function maybeInjectMemcore(args: {
@@ -1404,87 +1258,35 @@ export const TurnGuard = async ({ client, directory }: any) => {
   }
 
   async function maybeWarnWriteAuthority(sid: string, msg: MessageWithParts): Promise<boolean> {
-    if (!consolidationWriteGuardEnabled) return false
-
-    const msgID = String(msg?.info?.id ?? "")
-    if (msgID && warnedConsolidationWriteMessageIDs.has(msgID)) return false
-
-    const toolNames = getToolNames(msg)
-    if (toolNames.length === 0 || !containsConsolidationWriteTool(toolNames)) return false
-
-    const actor = getAgentIdentity(msg)
-    const authorized = allowedConsolidationWriters.has(actor)
-    if (authorized) return false
-
-    if (msgID) warnedConsolidationWriteMessageIDs.add(msgID)
-    const namesJoined = toolNames.join(", ")
-    console.log(`[turn-guard] write-authority alert sid=${sid} actor=${actor || "unknown"} tools=${namesJoined}`)
-
-    writeStatusFile(projectRoot, statusSnapshot({
-      type: "write-authority",
+    return maybeWarnWriteAuthorityWithGating({
       sid,
-      actor,
-      authorized,
-      toolNames,
-      messageID: msgID || undefined,
-    }))
-
-    try {
-      const routing = getPromptRouting(msg)
-      const body: any = {
-        parts: [
-          {
-            type: "text",
-            text:
-              `${WRITE_AUTHORITY_MARKER} derived memory write tools are restricted to dreamer agents (` +
-              `${[...allowedConsolidationWriters].join(", ")}). ` +
-              `This turn attempted: ${namesJoined}. ` +
-              "Do not call add_drawer/update_drawer/kg_add/kg_invalidate/apply_merge from interactive build/plan flows unless this is an explicit consolidation pass. " +
-              "Use diary_write for ordinary findings and reserve derived-memory writes for dreamer consolidation.",
-          },
-        ],
-      }
-      if (routing.agent) body.agent = routing.agent
-      if (routing.model) body.model = routing.model
-
-      await client.session.prompt({
-        path: { id: sid },
-        query: { directory },
-        body,
-      })
-    } catch (err) {
-      console.error("[turn-guard] failed write-authority prompt:", err)
-    }
-    return true
+      msg,
+      consolidationWriteGuardEnabled,
+      warnedConsolidationWriteMessageIDs,
+      allowedConsolidationWriters,
+      client,
+      directory,
+      getToolNames,
+      containsConsolidationWriteTool,
+      getAgentIdentity,
+      getPromptRouting,
+      writeStatusFile: (extra) => writeStatusFile(projectRoot, statusSnapshot(extra)),
+    })
   }
 
   async function verifySourceCapture(sid: string, eventType: string): Promise<void> {
-    if (!sourceCaptureVerifyEnabled) return
-
-    const result = await runSourceCaptureCommand(projectRoot, sid, eventType, {
-      command: cfgRaw("commands.sourceCapture.command"),
-      timeoutMs: cfgNum("commands.sourceCapture.timeoutMs", DEFAULT_SOURCE_CAPTURE_TIMEOUT_MS),
-    })
-    const prev = sourceCaptureBySession.get(sid)
-    const next = {
-      totalEvents: Number(prev?.totalEvents || 0) + 1,
-      lastEvent: eventType,
-      lastAt: new Date().toISOString(),
-      lastSuccess: result.ok,
-    }
-    sourceCaptureBySession.set(sid, next)
-
-    writeStatusFile(projectRoot, statusSnapshot({
-      type: "source-capture-verify",
+    return verifySourceCaptureWithGating({
       sid,
       eventType,
-      capture: result,
-      sessionCaptureState: next,
-    }))
-
-    if (!result.attempted) {
-      console.log("[turn-guard] source transcript capture verification: command not configured and default script not found")
-    }
+      projectRoot,
+      sourceCaptureVerifyEnabled,
+      sourceCaptureBySession,
+      runSourceCaptureCommand,
+      cfgRaw,
+      cfgNum,
+      defaultSourceCaptureTimeoutMs: DEFAULT_SOURCE_CAPTURE_TIMEOUT_MS,
+      writeStatusFile: (extra) => writeStatusFile(projectRoot, statusSnapshot(extra)),
+    })
   }
 
   // Spawn the deterministic consolidation script in the background. Deterministic
@@ -1501,114 +1303,24 @@ export const TurnGuard = async ({ client, directory }: any) => {
   //   - settle() is idempotent, so exit/error/timeout racing each other only
   //     clears state once.
   async function runConsolidationCommand(sid: string, trigger: string, onStartFailure?: () => void): Promise<void> {
-    const configured = cfgRaw("commands.autoConsolidation.command")
-    const startedAt = new Date().toISOString()
-    console.log(`[turn-guard] auto-consolidation start sid=${sid} trigger=${trigger}`)
-    writeStatusFile(projectRoot, statusSnapshot({ type: "auto-consolidation-start", sid, trigger, startedAt }))
-
-    let settled = false
-    let watchdog: ReturnType<typeof setTimeout> | null = null
-    const settle = (status: Record<string, unknown>, startFailure = false) => {
-      if (settled) return
-      settled = true
-      if (watchdog) {
-        clearTimeout(watchdog)
-        watchdog = null
-      }
-      autoConsolidationInFlight = false
-      releaseAutoConsolidationLock(projectRoot)
-      // A run that never actually started should not consume the cooldown, so a
-      // later trigger can retry promptly. A run that started and then failed/timed
-      // out keeps the cooldown (anti-thrash).
-      if (startFailure) {
-        try {
-          onStartFailure?.()
-        } catch (err) {
-          console.error("[turn-guard] auto-consolidation start-failure rollback failed:", err)
-        }
-      }
-      writeStatusFile(projectRoot, statusSnapshot({ ...status, finishedAt: new Date().toISOString() }))
-      appendAutoConsolidationLog(
-        projectRoot,
-        `${new Date().toISOString()} [finish] sid=${sid} trigger=${trigger} status=${JSON.stringify(status)}`,
-      )
-    }
-
-    try {
-      const routing = await resolveSessionPromptRouting(sid)
-      const childEnv = buildConsolidationEnv({
-        sid,
-        trigger,
-        projectRoot,
-        agent: routing.agent,
-        modelProviderID: routing.model?.providerID,
-        modelID: routing.model?.modelID,
-      })
-      // detached:true makes the child a process-group leader on POSIX so the
-      // watchdog can kill the entire tree (see killProcessTree); harmless on
-      // Windows where taskkill /T handles the tree instead.
-      const detached = process.platform !== "win32"
-      const plan = buildCommandExecutionPlan({
-        configured,
-        projectRoot: ESHEPHERD_ROOT,
-        defaultScript: join(ESHEPHERD_ROOT, "scripts", "run-memory-consolidation-and-validation.ts"),
-        // Absolute: a relative path would resolve against the plugin install, where nothing reads it.
-        memcoreFile: join(projectRoot, STATUS_DIR, "memory", "memory.md"),
-      })
-
-      if (plan.mode === "rejected") {
-        console.error(`[turn-guard] auto-consolidation rejected unsafe command: ${plan.reason}`)
-        settle({ type: "auto-consolidation-rejected", sid, trigger, reason: plan.reason }, true)
-        return
-      }
-
-      const logPath = join(projectRoot, STATUS_DIR, AUTOCONSOLIDATION_LOG_FILE)
-      appendAutoConsolidationLog(
-        projectRoot,
-        `${new Date().toISOString()} [start] sid=${sid} trigger=${trigger} command=${plan.command} args=${JSON.stringify(plan.args)} logPath=${logPath}`,
-      )
-
-      const child = spawn(plan.command, plan.args, {
-        cwd: plan.cwd,
-        shell: false,
-        stdio: ["ignore", "pipe", "pipe"],
-        env: childEnv,
-        detached,
-      })
-
-      child.stdout?.on("data", (chunk: Buffer | string) => {
-        const text = String(chunk ?? "").trim()
-        if (!text) return
-        appendAutoConsolidationLog(projectRoot, `${new Date().toISOString()} [stdout] sid=${sid} ${text}`)
-      })
-      child.stderr?.on("data", (chunk: Buffer | string) => {
-        const text = String(chunk ?? "").trim()
-        if (!text) return
-        appendAutoConsolidationLog(projectRoot, `${new Date().toISOString()} [stderr] sid=${sid} ${text}`)
-      })
-
-      watchdog = setTimeout(() => {
-        console.error(
-          `[turn-guard] auto-consolidation timeout sid=${sid} trigger=${trigger} after ${autoConsolidationTimeoutMs}ms; killing`,
-        )
-        killProcessTree(child)
-        settle({ type: "auto-consolidation-timeout", sid, trigger, timeoutMs: autoConsolidationTimeoutMs })
-      }, autoConsolidationTimeoutMs)
-      watchdog.unref?.()
-
-      child.on("error", (err: unknown) => {
-        console.error("[turn-guard] auto-consolidation spawn error:", err)
-        settle({ type: "auto-consolidation-error", sid, trigger, error: String(err) }, true)
-      })
-      child.on("exit", (code: number | null) => {
-        console.log(`[turn-guard] auto-consolidation finished sid=${sid} trigger=${trigger} code=${String(code)}`)
-        settle({ type: "auto-consolidation-finish", sid, trigger, exitCode: code })
-      })
-      child.unref?.()
-    } catch (err) {
-      console.error("[turn-guard] auto-consolidation failed to start:", err)
-      settle({ type: "auto-consolidation-error", sid, trigger, error: String(err) }, true)
-    }
+    return runConsolidationCommandWithGating({
+      sid,
+      trigger,
+      projectRoot,
+      eshepherdRoot: ESHEPHERD_ROOT,
+      autoConsolidationTimeoutMs,
+      setAutoConsolidationInFlight: (value) => { autoConsolidationInFlight = value },
+      resolveSessionPromptRouting,
+      buildConsolidationEnv,
+      buildCommandExecutionPlan,
+      spawn,
+      appendAutoConsolidationLog,
+      releaseAutoConsolidationLock,
+      killProcessTree,
+      writeStatusFile: (extra) => writeStatusFile(projectRoot, statusSnapshot(extra)),
+      cfgRaw,
+      onStartFailure,
+    })
   }
 
   // Evaluate the opt-in/cooldown/threshold gate and, if it passes, claim the
@@ -2107,114 +1819,55 @@ export const TurnGuard = async ({ client, directory }: any) => {
     return true
   }
 
-  async function onMessageUpdated(event: any): Promise<void> {
-    const info = event?.properties?.info
-    const sid = String(info?.sessionID ?? findSessionID(event))
-    if (!sid) return
-
-    // A real (non-injected) user message resets the retry chain counter.
-    if (info?.role === "user") {
-      retryChainBySession.delete(sid)
-    }
-
-    if (!startupConfirmedBySession.has(sid)) {
-      startupConfirmedBySession.add(sid)
-      console.log(`${START_BANNER}: message hook active`)
-    }
-
-    // Count terminal assistant messages only (finish set) for the checkpoint gate.
-    if (info?.role === "assistant" && info?.finish) {
-      terminalCountBySession.set(sid, (terminalCountBySession.get(sid) ?? 0) + 1)
-    }
-
-    // Auto-consolidation: a new message cancels any pending idle run and advances the
-    // volume counter; harmless no-op when auto-consolidation is disabled.
-    noteAutoConsolidationActivity(sid, info)
-
-    try {
-      const messageID = String(info?.id ?? "")
-      if (!messageID) return
-      if (info?.role !== "assistant") return
-      if (info?.finish !== "stop" && info?.finish !== "tool-calls") return
-
-      const currentRes: any = await client.session.message({
-        path: { id: sid, messageID },
-        query: { directory },
-      })
-      const current = unwrapMessageResult(currentRes)
-      if (!current) return
-
-      const currentRouting = getPromptRouting(current)
-      if (currentRouting.agent || currentRouting.model) {
-        activeRoutingBySession.set(sid, currentRouting)
-      }
-
-      const memoryTools = classifyMemoryTools(getToolNames(current))
-      if (memoryTools.reads.length > 0 || memoryTools.writes.length > 0) {
-        if (memoryTools.reads.length > 0) memoryReadSessions.add(sid)
-        appendMemoryUsageLog(projectRoot, {
-          sid,
-          messageID,
-          agent: getAgentIdentity(current) || undefined,
-          reads: memoryTools.reads,
-          writes: memoryTools.writes,
-        })
-      }
-
-      await maybeWarnWriteAuthority(sid, current)
-
-      if (info?.finish !== "stop") return
-
-      // When BOTH reactive guards are disabled, skip parent fetch and all
-      // heuristic evaluation — zero extra overhead per message.
-      if (!retryEnabled && !spiralGuardEnabled) {
-        verifySourceCapture(sid, "message.stop").catch(() => {})
-        return
-      }
-
-      const parentID = String(current?.info?.parentID ?? "")
-      if (!parentID) return
-
-      const parentRes: any = await client.session.message({
-        path: { id: sid, messageID: parentID },
-        query: { directory },
-      })
-      const parent = unwrapMessageResult(parentRes)
-      verifySourceCapture(sid, "message.stop").catch(() => {})
-
-      // message.updated owns the reactive end-of-turn guards; checkpoint is
-      // idle-only. At most one injection per stop: retry owns stalls, the spiral
-      // guard owns no-action deliberation (opposite failure modes).
-      const retried = await issueRetry(sid, current, parent)
-      if (!retried) await maybeSpiralNudge(sid, current, parent)
-    } catch (err) {
-      console.error("[turn-guard] message.updated failed:", err)
-    }
-    // P3-1: bound all session-keyed state to prevent memory leaks in long-lived processes
-    pruneToMax(retriedParentBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(retriesTotalBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(retryChainBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(startupConfirmedBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(inspectedStopBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(toolWindowBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(loopInterventionsBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(taskWindowBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(taskEscalationsBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(taskRecentLaunchBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(workedExampleFiledByShape, autoConsolidationMaxTrackedSessions)
-    pruneToMax(capabilityRecordedBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(failureRecordedBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(pendingCalibrationBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(pendingInterventionBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(spiralNudgedBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(spiralInspectedBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(checkpointedSessions, autoConsolidationMaxTrackedSessions)
-    pruneToMax(terminalCountBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(memcoreInjectionBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(activeRoutingBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(sourceCaptureBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(compactionPathBySession, autoConsolidationMaxTrackedSessions)
-  }
+  const boundHandlers = bindSessionPolicyHandlers({
+    client,
+    directory,
+    projectRoot,
+    retryEnabled,
+    spiralGuardEnabled,
+    autoConsolidationMaxTrackedSessions,
+    compactArchiveEnabled,
+    autoConsolidationOnCompact,
+    noteAutoConsolidationActivity,
+    maybeWarnWriteAuthority,
+    verifySourceCapture,
+    issueRetry,
+    maybeSpiralNudge,
+    unwrapMessageResult,
+    pruneToMax,
+    maybeCheckpoint,
+    maybeInjectMemcore,
+    maybeFileWorkedExamplesFromMessage,
+    armAutoConsolidationIdleTimer,
+    sortByCreated,
+    unwrapListResult,
+    evaluateAutoConsolidation,
+    statusSnapshot,
+    retryChainBySession,
+    startupConfirmedBySession,
+    terminalCountBySession,
+    activeRoutingBySession,
+    memoryReadSessions,
+    retriedParentBySession,
+    retriesTotalBySession,
+    inspectedStopBySession,
+    toolWindowBySession,
+    loopInterventionsBySession,
+    taskWindowBySession,
+    taskEscalationsBySession,
+    taskRecentLaunchBySession,
+    workedExampleFiledByShape,
+    capabilityRecordedBySession,
+    failureRecordedBySession,
+    pendingCalibrationBySession,
+    pendingInterventionBySession,
+    spiralNudgedBySession,
+    spiralInspectedBySession,
+    checkpointedSessions,
+    memcoreInjectionBySession,
+    sourceCaptureBySession,
+    compactionPathBySession,
+  })
 
   // Phase 13 CREATE: scan a message for successful task tool completions and file
   // worked examples. The task tool part carries the subagent_type in its input args
@@ -2223,272 +1876,49 @@ export const TurnGuard = async ({ client, directory }: any) => {
   // substantive. This runs on session.idle — by then the task has completed and
   // the message parts are finalized.
   async function maybeFileWorkedExamplesFromMessage(sid: string, msg: MessageWithParts): Promise<void> {
-    const parts = msg?.parts ?? []
-    for (const part of parts) {
-      if (part?.type !== "tool") continue
-      const toolName = String(part?.tool ?? part?.name ?? "").trim().toLowerCase()
-      if (toolName !== "task") continue
-
-      // Extract subagent_type and prompt from the task call's input args.
-      const inputArgs: any = part?.state?.input ?? part?.args ?? {}
-      const subagentType = String(inputArgs?.subagent_type ?? "").trim().toLowerCase()
-
-      // Extract the output (the subagent's final response text).
-      const state = part?.state ?? {}
-      const status = String(state?.status ?? "").trim().toLowerCase()
-
-      const description = String(inputArgs?.description ?? "").trim()
-      const prompt = String(inputArgs?.prompt ?? "").trim()
-
-      // Phase 13 CREATE: file worked examples for cloud target subagent types with
-      // substantive successful output. Success-only: skip if the task errored or was aborted.
-      if (workedExampleFilingEnabled && WORKED_EXAMPLE_FILE_AGENT_TYPES.has(subagentType)) {
-        if (status === "error" || status === "aborted" || status === "failed") continue
-
-        const outputText = String(
-          state?.output ?? part?.output ?? state?.text ?? "",
-        ).trim()
-        if (outputText.length < WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS) continue
-
-        await maybeFileWorkedExample({ sid, subagentType, description, prompt, output: outputText })
-      }
-
-      // Phase 14 CREATE: record a capability tuple for routing-tier subagents.
-      // Runs regardless of the worked-example filing gate — capability recording
-      // is its own concern (it covers local/cloud/deep tiers, not just cloud).
-      await maybeRecordCapabilityTuple({ sid, subagentType, description, prompt, status })
-
-      // Phase 16 CREATE: capture the self-reported confidence label from the
-      // subagent's terminal output. Runs for ANY task tool part with substantive
-      // output (not gated on routing tier — calibration covers all delegated units).
-      // The tuple is PENDING; it becomes durable only via record_outcome.
-      const outputText = String(state?.output ?? part?.output ?? state?.text ?? "").trim()
-      if (outputText.length >= WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS) {
-        const activeModel = getActiveModel(msg)
-        await maybeCaptureCalibrationTuple({ sid, model: activeModel, description, prompt, outputText })
-      }
-    }
-  }
-
-
-
-  async function onSessionIdle(event: any): Promise<void> {
-    const sid = String(event?.properties?.sessionID ?? findSessionID(event))
-    if (!sid) return
-
-    if (!startupConfirmedBySession.has(sid)) {
-      startupConfirmedBySession.add(sid)
-      console.log(`${START_BANNER}: idle hook active for session=${sid}`)
-    }
-
-    try {
-      const res: any = await client.session.messages({
-        path: { id: sid },
-        query: { directory },
-      })
-
-      const messages = sortByCreated(unwrapListResult(res))
-      if (messages.length < 2) return
-
-      const last = messages[messages.length - 1]
-      const prev = messages[messages.length - 2]
-
-      // Checkpoint is independent of retry — its own guards (clean stop,
-      // !endsMidIntent, hasUsefulPayload) prevent it from firing on stalls even
-      // without the retry gate. When retry IS enabled it runs first so stall
-      // detection can still log; the checkpoint's guards exclude stalls either way.
-      if (retryEnabled) {
-        await issueRetry(sid, last, prev)
-      }
-      await maybeCheckpoint(sid, last)
-
-      await maybeInjectMemcore({
-        sid,
-        event,
-        reason: "idle",
-        messages,
-        anchor: last,
-      })
-
-      // Phase 13 CREATE: file worked examples for successful implementation subagents.
-      // Scans the last message for task tool parts with completed status and a target
-      // subagent_type, then files a compact example if the output is substantive.
-      await maybeFileWorkedExamplesFromMessage(sid, last)
-
-      // Arm the overridable idle-delay timer: consolidation fires only if the
-      // session stays quiet for the full delay (a new message cancels it).
-      armAutoConsolidationIdleTimer(sid)
-    } catch (err) {
-      console.error("[turn-guard] failed:", err)
-    }
-    // P3-1: bound all session-keyed state (same as onMessageUpdated)
-    pruneToMax(retriedParentBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(retriesTotalBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(retryChainBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(startupConfirmedBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(inspectedStopBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(toolWindowBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(loopInterventionsBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(taskWindowBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(taskEscalationsBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(taskRecentLaunchBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(workedExampleFiledByShape, autoConsolidationMaxTrackedSessions)
-    pruneToMax(capabilityRecordedBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(failureRecordedBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(pendingCalibrationBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(pendingInterventionBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(spiralNudgedBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(spiralInspectedBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(checkpointedSessions, autoConsolidationMaxTrackedSessions)
-    pruneToMax(terminalCountBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(memcoreInjectionBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(activeRoutingBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(sourceCaptureBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(compactionPathBySession, autoConsolidationMaxTrackedSessions)
-  }
-
-  // Post-compaction transcript archiver. Compaction RETAINS prior messages in the
-  // session log (verified 2026-08-19: session.messages returns the full history,
-  // with summary:true + agent:"compaction" assistant markers delimiting each folded
-  // region). So the "just dropped" content is still readable right after compaction —
-  // this slices the log at the latest compaction marker and writes that region to a
-  // durable file before it scrolls out of practical reach. Structure: one markdown
-  // file per compaction, roles + text/tool/patch parts, no message content omitted.
-  // Entirely wrapped in try/catch — an archive failure must never break compaction.
-  async function archiveCompactedRegion(sid: string): Promise<void> {
-    if (!compactArchiveEnabled) return
-    try {
-      const res: any = await client.session.messages({
-        path: { id: sid },
-        query: { directory },
-      })
-      const messages = sortByCreated(unwrapListResult(res))
-      if (messages.length === 0) return
-
-      // Latest compaction marker = the highest-index assistant message with
-      // info.summary === true. Everything BEFORE it is what this compaction folded.
-      let markerIndex = -1
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const info: any = messages[i]?.info
-        if (info?.role === "assistant" && info?.summary === true) {
-          markerIndex = i
-          break
-        }
-      }
-      if (markerIndex <= 0) return // nothing before the marker to archive
-
-      // Only archive messages since the PREVIOUS marker (don't re-archive regions
-      // already captured by an earlier compaction's archive file).
-      let prevMarkerIndex = -1
-      for (let i = markerIndex - 1; i >= 0; i--) {
-        const info: any = messages[i]?.info
-        if (info?.role === "assistant" && info?.summary === true) {
-          prevMarkerIndex = i
-          break
-        }
-      }
-      const region = messages.slice(prevMarkerIndex + 1, markerIndex)
-      if (region.length === 0) return
-
-      const lines: string[] = []
-      lines.push(`# Compaction archive — session ${sid}`)
-      lines.push(`# Archived ${new Date().toISOString()} — ${region.length} messages folded by compaction`)
-      lines.push("")
-      for (const m of region) {
-        const info: any = m?.info ?? {}
-        const role = String(info.role ?? "?")
-        const parts: any[] = m?.parts ?? []
-        const text = getText(parts)
-        const toolNames = parts.filter((p) => p?.type === "tool").map((p) => p?.tool).filter(Boolean)
-        const patchCount = parts.filter((p) => p?.type === "patch").length
-        lines.push(`## [${role}]`)
-        if (text) lines.push(text)
-        if (toolNames.length > 0) lines.push(`(tools: ${toolNames.join(", ")})`)
-        if (patchCount > 0) lines.push(`(${patchCount} patch part${patchCount === 1 ? "" : "s"})`)
-        lines.push("")
-      }
-
-      // Memory-loop output, not agent-to-agent research: keep it out of .opencode/context.
-      const dir = join(projectRoot, STATUS_DIR, "compaction-archive")
-      mkdirSync(dir, { recursive: true })
-      const ts = new Date().toISOString().replace(/[:.]/g, "-")
-      const path = join(dir, `${sid}-${ts}.md`)
-      writeFileSync(path, lines.join("\n"), "utf8")
-      console.log(`[turn-guard] compact archive: wrote ${region.length} messages sid=${sid} -> ${path}`)
-      writeStatusFile(projectRoot, statusSnapshot({ type: "compact-archive", sid, messages: region.length, path }))
-    } catch (err) {
-      // Never let archiving break the compaction path.
-      console.log(`[turn-guard] compact archive: error (ignored) sid=${sid}: ${err}`)
-    }
-  }
-
-  async function onSessionCompacted(event: any): Promise<void> {
-    const sid = String(event?.properties?.sessionID ?? findSessionID(event))
-    if (!sid) return
-
-    verifySourceCapture(sid, "session.compacted").catch(() => {})
-
-    // Archive the just-compacted region BEFORE it scrolls out of practical reach.
-    // Independent of the mem-core fallback below; gated by ESHEPHERD_COMPACT_ARCHIVE.
-    await archiveCompactedRegion(sid)
-
-    // Mem-core reinjection is intentionally post-compaction-only. The compaction
-    // hook owns prompt shaping; this event owns continuation-memory refresh.
-    compactionPathBySession.set(sid, { path: "post-compact-fallback", at: new Date().toISOString() })
-    // NOTE: do NOT force here. maybeInjectMemcore injects via client.session.prompt(),
-    // which creates a real generating turn (~memcoreMaxChars). Forcing made every
-    // post-compaction event re-inject the same large block, re-inflating context and
-    // triggering another compaction → an infinite compact/reinject loop. Relying on
-    // the signature+cooldown dedup means this fires at most once per unique mem-core
-    // content, so identical mem-core after a compaction is a no-op.
-    await maybeInjectMemcore({
+    return maybeFileWorkedExamplesFromMessageWithGating({
       sid,
-      event,
-      reason: "compacted",
-    })
-
-    // Compaction is a natural consolidation point; run auto-consolidation if enabled.
-    if (autoConsolidationOnCompact) {
-      evaluateAutoConsolidation(sid, "compacted")
-    }
-    // P3-1: bound all session-keyed state (same as onMessageUpdated)
-    pruneToMax(retriedParentBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(retriesTotalBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(retryChainBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(startupConfirmedBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(inspectedStopBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(toolWindowBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(loopInterventionsBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(taskWindowBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(taskEscalationsBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(taskRecentLaunchBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(workedExampleFiledByShape, autoConsolidationMaxTrackedSessions)
-    pruneToMax(capabilityRecordedBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(failureRecordedBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(pendingCalibrationBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(pendingInterventionBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(spiralNudgedBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(spiralInspectedBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(checkpointedSessions, autoConsolidationMaxTrackedSessions)
-    pruneToMax(terminalCountBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(memcoreInjectionBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(sourceCaptureBySession, autoConsolidationMaxTrackedSessions)
-    pruneToMax(compactionPathBySession, autoConsolidationMaxTrackedSessions)
-  }
-
-  async function onSessionStarted(event: any): Promise<void> {
-    const sid = String(event?.properties?.sessionID ?? findSessionID(event))
-    if (!sid) return
-
-    toolWindowBySession.delete(sid)
-    loopInterventionsBySession.delete(sid)
-    activeRoutingBySession.delete(sid)
-
-    await maybeInjectMemcore({
-      sid,
-      event,
-      reason: "started",
-      force: true,
+      msg,
+      workedExampleFilingEnabled,
+      workedExampleFileAgentTypes: WORKED_EXAMPLE_FILE_AGENT_TYPES,
+      workedExampleMinSubstantiveChars: WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS,
+      getActiveModel,
+      maybeFileWorkedExampleWithGating: (a) =>
+        maybeFileWorkedExampleWithGating({
+          ...a,
+          workedExampleFilingEnabled,
+          workedExampleFileAgentTypes: WORKED_EXAMPLE_FILE_AGENT_TYPES,
+          workedExampleMinSubstantiveChars: WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS,
+          workedExampleFiledByShape,
+          getWorkedExampleClient,
+          cfgRaw,
+          shouldFileWorkedExample,
+          extractWorkedExampleShape,
+          shouldSkipWorkedExampleByCooldown,
+          buildWorkedExampleEntry,
+        }),
+      maybeRecordCapabilityTupleWithGating: (a) =>
+        maybeRecordCapabilityTupleWithGating({
+          ...a,
+          capabilityRecordingEnabled,
+          capabilityTierBySubagent: CAPABILITY_TIER_BY_SUBAGENT,
+          capabilityRecordedBySession,
+          getWorkedExampleClient,
+          mapTaskStatusToCapabilityOutcome,
+          extractWorkedExampleShape,
+          buildCapabilityBucketId,
+          buildCapabilityCanonicalShape,
+        }),
+      maybeCaptureCalibrationTupleWithGating: (a) =>
+        maybeCaptureCalibrationTupleWithGating({
+          ...a,
+          calibrationCaptureEnabled,
+          pendingCalibrationBySession,
+          canonicalModelId,
+          extractWorkedExampleShape,
+          parseSelfReportedConfidence,
+          buildCalibrationBucketId,
+        }),
     })
   }
 
@@ -2499,10 +1929,10 @@ export const TurnGuard = async ({ client, directory }: any) => {
     mergeWithoutOverride,
     loadInstructionPaths,
     dedupeAppendInstructions,
-    onMessageUpdated,
-    onSessionIdle,
-    onSessionCompacted,
-    onSessionStarted,
+    onMessageUpdated: boundHandlers.onMessageUpdated,
+    onSessionIdle: boundHandlers.onSessionIdle,
+    onSessionCompacted: boundHandlers.onSessionCompacted,
+    onSessionStarted: boundHandlers.onSessionStarted,
   })
 
   return {

@@ -182,3 +182,75 @@ export async function maybeRecordCapabilityTupleWithGating(args: {
   }
 
 }
+
+export async function maybeCaptureCalibrationTupleWithGating(args: {
+
+  sid: string
+
+  model?: { providerID: string; modelID: string } | null
+
+  description: string
+
+  prompt: string
+
+  outputText: string
+
+  calibrationCaptureEnabled: boolean
+
+  pendingCalibrationBySession: Map<string, Array<{ modelId: string; shapeKey: string; confidence: string }>>
+
+  canonicalModelId: (providerID?: string, modelID?: string) => string | null
+
+  extractWorkedExampleShape: (taskText: string) => { shapeKey: string; workClass: string; sizeBucket: string }
+
+  parseSelfReportedConfidence: (outputText: string) => string | null
+
+  buildCalibrationBucketId: (modelId: string, shapeKey: string, confidence: string) => string
+
+}): Promise<void> {
+
+  if (!args.calibrationCaptureEnabled) return
+
+  const { sid, model, description, prompt, outputText } = args
+
+
+  // Gate 1: deterministic model identity — unknown model => skip (no guessing).
+  const modelId = args.canonicalModelId(model?.providerID, model?.modelID)
+
+  if (!modelId) return
+
+
+  // Gate 2: shape from the SAME Phase 14/13 shape function.
+  const shape = args.extractWorkedExampleShape(`${description}\n${prompt}`)
+
+
+  // Gate 3: parse the self-reported confidence from the terminal output.
+  // Returns null when no CONFIDENCE line is present — skip, don't guess.
+  const confidence = args.parseSelfReportedConfidence(outputText)
+
+  if (!confidence) return
+
+
+  // Queue the pending tuple for this session. Dedup: same (modelId, shapeKey, confidence)
+  // is recorded once per session (repeated idle events on the same completion).
+  const pending = args.pendingCalibrationBySession.get(sid) ?? []
+
+  const dedupKey = `${modelId}:${shape.shapeKey}:${confidence}`
+
+  if (pending.some((p) => `${p.modelId}:${p.shapeKey}:${p.confidence}` === dedupKey)) return
+
+
+  pending.push({ modelId, shapeKey: shape.shapeKey, confidence })
+
+  args.pendingCalibrationBySession.set(sid, pending)
+
+
+  console.log(
+
+    `[turn-guard] calibration capture: queued ${modelId} / ${shape.shapeKey} / ${confidence} ` +
+
+      `(bucket=${args.buildCalibrationBucketId(modelId, shape.shapeKey, confidence)}) sid=${sid}`,
+
+  )
+
+}
