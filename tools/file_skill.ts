@@ -28,6 +28,7 @@ import { tool } from "@opencode-ai/plugin";
 import { SKILL_DOMAINS, type SkillDomain } from "../adapter/memgraph.ts";
 import { asObject, asText, createPalaceClient, parseRows, parseTaxonomy } from "../adapter/palace-tools.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
+import { runCheckpointWrite } from "../core/operation.ts";
 import { normalizeDryRunArg } from "../core/substrate.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
 import { pickPurposeRoom } from "./ingest_docs.ts";
@@ -164,39 +165,47 @@ export async function runSkillFiling(args: {
     // best-effort guard; proceed to filing (substrate dedup is the backstop)
   }
 
-  let created: Record<string, unknown>;
-  try {
-    created = asObject(
-      await args.call("add_drawer", {
-        wing,
-        room,
-        content,
-        desc: String(args.desc || "").trim() || undefined,
-        added_by: "electric-shepherd-file-skill",
-      }),
-    );
-  } catch (error) {
-    return {
-      ok: false,
-      wing,
-      room,
-      reused,
-      dry_run: false,
-      error: `add_drawer failed: ${asText((error as Error | undefined)?.message || error).slice(0, 500)}`,
-      next_step: "Filing aborted — nothing else ran. Re-run to retry.",
-    };
-  }
+  // AC #11: production drawer creation goes through runCheckpointWrite (the shared
+  // checkpoint write path) instead of a direct add_drawer call. Behavior is
+  // preserved: one item, same wing/room/content/desc/added_by; the duplicate guard
+  // above and the stamps below are unchanged.
+  const checkpoint = await runCheckpointWrite(
+    args.call,
+    {
+      items: [
+        {
+          wing,
+          room,
+          content,
+          desc: String(args.desc || "").trim() || undefined,
+          added_by: "electric-shepherd-file-skill",
+        },
+      ],
+    },
+    { dry_run: false },
+  );
 
-  const drawerId = asText(created.drawer_id || created.id).trim();
-  if (!drawerId) {
+  const raw = asObject(checkpoint.raw);
+  const rows = [
+    ...(Array.isArray(raw.results) ? raw.results : []),
+    ...(Array.isArray(raw.items) ? raw.items : []),
+  ].map(asObject);
+  const drawerId = asText(
+    raw.drawer_id
+      || raw.id
+      || rows.find((row) => row.ok !== false && asText(row.drawer_id || row.id).trim())?.drawer_id
+      || rows.find((row) => row.ok !== false && asText(row.drawer_id || row.id).trim())?.id,
+  ).trim();
+
+  if (!checkpoint.ok || !drawerId) {
     return {
       ok: false,
       wing,
       room,
       reused,
       dry_run: false,
-      error: "add_drawer returned no drawer_id",
-      next_step: "Inspect the raw result and re-run; identical content maps to the same deterministic drawer ID.",
+      error: `checkpoint failed${drawerId ? "" : " (no drawer_id returned)"}: ${asText(checkpoint.error || checkpoint.failure_summary).slice(0, 500)}`,
+      next_step: "Filing aborted — nothing else ran. Re-run to retry; identical content maps to the same deterministic drawer ID.",
     };
   }
 

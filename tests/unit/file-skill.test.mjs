@@ -27,6 +27,15 @@ function makeFakePalace({ taxonomy = {}, rooms = {}, duplicateOf = null, failAdd
   for (const [key, rows] of Object.entries(rooms)) state[key] = rows.map((row) => ({ ...row }));
   const calls = [];
 
+  // AC #11: production drawer creation in file_skill goes through the checkpoint
+  // write path; the fake emulates the substrate's per-item add_drawer semantics.
+  const fileItem = (item) => {
+    if (failAddDrawer) throw new Error("add_drawer exploded");
+    const id = `drawer_${item.wing}_${item.room}_new`;
+    state[`${item.wing}/${item.room}`] = [...(state[`${item.wing}/${item.room}`] || []), { drawer_id: id, content: item.content }];
+    return { drawer_id: id };
+  };
+
   const call = async (name, payload) => {
     calls.push({ name, args: payload });
     if (name === "get_taxonomy") return { taxonomy };
@@ -37,11 +46,12 @@ function makeFakePalace({ taxonomy = {}, rooms = {}, duplicateOf = null, failAdd
     if (name === "check_duplicate") {
       return duplicateOf ? { is_duplicate: true, drawer_id: duplicateOf } : { is_duplicate: false };
     }
+    if (name === "checkpoint") {
+      const results = (payload.items || []).map(fileItem);
+      return { ok: true, results };
+    }
     if (name === "add_drawer") {
-      if (failAddDrawer) throw new Error("add_drawer exploded");
-      const id = `drawer_${payload.wing}_${payload.room}_new`;
-      state[`${payload.wing}/${payload.room}`] = [...(state[`${payload.wing}/${payload.room}`] || []), { drawer_id: id, content: payload.content }];
-      return { drawer_id: id };
+      return fileItem(payload);
     }
     if (name === "kg_add") {
       if (failStampFor.has(String(payload.subject))) throw new Error(`kg_add failed for ${payload.subject}`);
@@ -114,11 +124,13 @@ test("apply files verbatim into the picked room and stamps es-source-type: skill
   assert.equal(report.ok, true);
   assert.equal(report.dry_run, false);
   assert.ok(report.drawer_id, "apply must return the new drawer id");
-  const add = fake.calls.find((c) => c.name === "add_drawer");
-  assert.equal(add.args.wing, WING);
-  assert.equal(add.args.room, SKILLS_ROOM);
-  assert.equal(add.args.content, CONTENT, "content must be filed verbatim");
-  assert.equal(add.args.desc, "doc ingest procedure");
+  // AC #11: filing goes through the checkpoint write path with one item.
+  const add = fake.calls.find((c) => c.name === "checkpoint");
+  assert.equal(add.args.items.length, 1);
+  assert.equal(add.args.items[0].wing, WING);
+  assert.equal(add.args.items[0].room, SKILLS_ROOM);
+  assert.equal(add.args.items[0].content, CONTENT, "content must be filed verbatim");
+  assert.equal(add.args.items[0].desc, "doc ingest procedure");
 
   const stamps = fake.calls.filter((c) => c.name === "kg_add");
   assert.equal(stamps.length, 2, "exactly two stamps on apply (es-source-type + es-domain)");
@@ -190,12 +202,12 @@ test("empty content throws", async () => {
   await assert.rejects(() => runSkillFiling({ call: fake.call, wing: WING, content: "   ", dryRun: true }), /content is required/);
 });
 
-test("add_drawer failure stops the pass before any stamp", async () => {
+test("filing failure stops the pass before any stamp", async () => {
   const fake = makeFakePalace({ taxonomy: { [WING]: {} }, failAddDrawer: true });
   const report = await runSkillFiling({ call: fake.call, wing: WING, content: CONTENT, dryRun: false });
 
   assert.equal(report.ok, false);
-  assert.match(report.error, /add_drawer failed/);
+  assert.match(report.error, /checkpoint failed/);
   assert.deepEqual(fake.calls.filter((c) => c.name === "kg_add"), [], "no stamp after a failed filing");
 });
 
@@ -206,9 +218,9 @@ test("stamp failure is counted with a retry next_step", async () => {
   const fake = makeFakePalace({ taxonomy: { [WING]: {} }, failStampFor });
   const originalCall = fake.call;
   fake.call = async (name, payload) => {
-    if (name === "add_drawer") {
+    if (name === "checkpoint") {
       const result = await originalCall(name, payload);
-      failStampFor.add(result.drawer_id);
+      for (const row of result.results || []) failStampFor.add(row.drawer_id);
       return result;
     }
     return originalCall(name, payload);
