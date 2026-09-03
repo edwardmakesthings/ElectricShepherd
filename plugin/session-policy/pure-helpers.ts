@@ -457,10 +457,16 @@ export function unwrapMessageResult(res: any): MessageWithParts | null {
 }
 
 
-// ── compatibility re-exports (moved to domain-category modules) ─────────────
-export { maybeFileWorkedExampleWithGating } from "./worked-example.ts"
-export { maybeRecordCapabilityTupleWithGating, maybeCaptureCalibrationTupleWithGating } from "./capability.ts"
-export { maybeInjectMemcoreWithGating, persistWorkedInterventionWithGating, maybeRecordModelFailureWithGating, queuePendingInterventionWithGating, confirmPendingInterventionsWithGating } from "./interventions.ts"
-export { findSessionID, resolveScopeDirFromEvent, getAgentIdentity, getActiveModel, getActiveAgent, getPromptRouting, normalizeModelSpec, resolveSessionPromptRoutingWithGating, resolveLoopGuardRoutingWithGating, maybeWarnWriteAuthorityWithGating } from "./routing.ts"
-export { runSourceCaptureCommand, verifySourceCaptureWithGating, runConsolidationCommandWithGating } from "./source-capture.ts"
-export { maybeFileWorkedExamplesFromMessageWithGating } from "./worked-example.ts"
+/**
+ * P3-1: Evict oldest entries from a Map or Set to keep it bounded.
+ * Used for all session-keyed state to prevent memory leaks in long-lived processes.
+ */
+export function pruneToMax(collection: Map<string, any> | Set<string>, max: number): void {
+  if (max <= 0) return
+  while (collection.size > max) {
+    const oldest = collection.keys().next().value as string | undefined
+    if (oldest === undefined) break
+    collection.delete(oldest)
+  }
+}
+

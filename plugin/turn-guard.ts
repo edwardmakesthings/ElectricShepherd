@@ -65,13 +65,14 @@ import { createHookHeadHandlers } from "./session-policy/hook-head.ts"
 import { createToolRegistry } from "./session-policy/registry.ts"
 import { getText, hasFinalReviewSignal, hasActionPart, isAssistantStop, isSerenaMemoryToolTurn } from "./session-policy/analysis.ts"
 import { buildSourceCaptureEnv, buildConsolidationEnv } from "./session-policy/env.ts"
+import { toLowerSet } from "./session-policy/constants.ts"
 import {
   findProjectRoot,
   writeStatusFile, appendAutoConsolidationLog, appendMemoryUsageLog,
   acquireAutoConsolidationLock, releaseAutoConsolidationLock, killProcessTree,
-  getToolNames, containsConsolidationWriteTool, classifyMemoryTools,
+  getToolNames, containsConsolidationWriteTool, classifyMemoryTools, pruneToMax,
 } from "./session-policy/pure-helpers.ts"
-import { findSessionID, getAgentIdentity, getActiveModel, getActiveAgent, getPromptRouting, normalizeModelSpec, resolveSessionPromptRoutingWithGating, resolveLoopGuardRoutingWithGating, maybeWarnWriteAuthorityWithGating } from "./session-policy/routing.ts"
+import { findSessionID, getAgentIdentity, getActiveModel, getActiveAgent, getPromptRouting, normalizeModelSpec, resolveSessionPromptRoutingWithGating, resolveLoopGuardRoutingWithGating, maybeWarnWriteAuthorityWithGating, resolveTaskSwapTarget, getPromptRoutingFromToolHook } from "./session-policy/routing.ts"
 import { maybeInjectMemcoreWithGating, persistWorkedInterventionWithGating, maybeRecordModelFailureWithGating, queuePendingInterventionWithGating, confirmPendingInterventionsWithGating } from "./session-policy/interventions.ts"
 import { maybeFileWorkedExampleWithGating, maybeFileWorkedExamplesFromMessageWithGating } from "./session-policy/worked-example.ts"
 import { maybeRecordCapabilityTupleWithGating, maybeCaptureCalibrationTupleWithGating } from "./session-policy/capability.ts"
@@ -314,10 +315,6 @@ function parseCSV(value: string | undefined): string[] {
     .filter(Boolean)
 }
 
-function toLowerSet(items: string[]): Set<string> {
-  return new Set(items.map((item) => item.toLowerCase()))
-}
-
 function normalizePathForHost(path: string): string {
   if (!path) return ""
   const trimmed = path.trim()
@@ -401,112 +398,6 @@ function unwrapMessageResult(res: any): MessageWithParts | null {
 
 
 
-
-function resolveTaskSwapTarget(args: {
-  current?: { providerID: string; modelID: string } | undefined
-  qwenMatch: string
-  qwenToProvider?: string
-  qwenToModel?: string
-  gemmaMatch: string
-  gemmaToProvider?: string
-  gemmaToModel?: string
-  fallbackProvider?: string
-  fallbackModel?: string
-}): { providerID: string; modelID: string; reason: string } | null {
-  const currentProvider = String(args.current?.providerID ?? "").trim()
-  const currentModel = String(args.current?.modelID ?? "").trim().toLowerCase()
-  const qwenMatch = String(args.qwenMatch || "").trim().toLowerCase()
-  const gemmaMatch = String(args.gemmaMatch || "").trim().toLowerCase()
-
-  const qwenToModel = String(args.qwenToModel || "").trim()
-  const qwenToProvider = String(args.qwenToProvider || currentProvider).trim()
-  const gemmaToModel = String(args.gemmaToModel || "").trim()
-  const gemmaToProvider = String(args.gemmaToProvider || currentProvider).trim()
-  const fallbackModel = String(args.fallbackModel || "").trim()
-  const fallbackProvider = String(args.fallbackProvider || currentProvider).trim()
-
-  if (qwenMatch && currentModel.includes(qwenMatch) && qwenToProvider && qwenToModel) {
-    return {
-      providerID: qwenToProvider,
-      modelID: qwenToModel,
-      reason: `matched ${qwenMatch}`,
-    }
-  }
-
-  if (gemmaMatch && currentModel.includes(gemmaMatch) && gemmaToProvider && gemmaToModel) {
-    return {
-      providerID: gemmaToProvider,
-      modelID: gemmaToModel,
-      reason: `matched ${gemmaMatch}`,
-    }
-  }
-
-  if (fallbackProvider && fallbackModel) {
-    return {
-      providerID: fallbackProvider,
-      modelID: fallbackModel,
-      reason: "fallback",
-    }
-  }
-
-  return null
-}
-
-function getPromptRoutingFromToolHook(input: any, output: any): {
-  agent?: string
-  model?: { providerID: string; modelID: string }
-} {
-  const routing: {
-    agent?: string
-    model?: { providerID: string; modelID: string }
-  } = {}
-
-  const agentCandidates = [
-    output?.agent,
-    input?.agent,
-    output?.mode,
-    input?.mode,
-  ]
-  for (const candidate of agentCandidates) {
-    const value = String(candidate ?? "").trim()
-    if (!value) continue
-    routing.agent = value
-    break
-  }
-
-  const modelCandidates = [
-    output?.model,
-    input?.model,
-    {
-      providerID: output?.providerID,
-      modelID: output?.modelID,
-    },
-    {
-      providerID: input?.providerID,
-      modelID: input?.modelID,
-    },
-  ]
-  for (const candidate of modelCandidates) {
-    const normalized = normalizeModelSpec(candidate)
-    if (!normalized) continue
-    routing.model = normalized
-    break
-  }
-
-  return routing
-}
-/**
- * P3-1: Evict oldest entries from a Map or Set to keep it bounded.
- * Used for all session-keyed state to prevent memory leaks in long-lived processes.
- */
-function pruneToMax(collection: Map<string, any> | Set<string>, max: number): void {
-  if (max <= 0) return
-  while (collection.size > max) {
-    const oldest = collection.keys().next().value as string | undefined
-    if (oldest === undefined) break
-    collection.delete(oldest)
-  }
-}
 
 export const TurnGuard = async ({ client, directory }: any) => {
   const rootDirectory = normalizePathForHost(directory || process.cwd())

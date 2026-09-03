@@ -6,10 +6,10 @@
 import { dirname } from "node:path"
 import { existsSync } from "node:fs"
 import {
-  writeStatusFile, appendMemcoreContextLog, resolveScopeDirFromEvent,
+  writeStatusFile, appendMemcoreContextLog,
   extractPathFromMessageParts, loadMemcoreMarkdown,
 } from "./pure-helpers.ts"
-import { getPromptRouting } from "./routing.ts"
+import { getPromptRouting, resolveScopeDirFromEvent } from "./routing.ts"
 import { MEMCORE_REINJECT_MARKER } from "./constants.ts"
 import {
   clipText,
