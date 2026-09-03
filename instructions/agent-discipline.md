@@ -91,7 +91,7 @@ report skip counts honestly alongside pass/fail when citing results.
 
 ## Missing MCP tool — ask, don't substitute (required)
 
-If a task genuinely requires a specific tool (e.g. `kg_query`, `get_ancestors`, `apply_merge`)
+If a task genuinely requires a specific tool (e.g. `kg_query`, `resolve_canonical`, `apply_merge`)
 and that tool is **not present** in your current toolset, do not silently fall back to a
 weaker substitute (e.g. `mempalace_search`) and report its result as if it answered the
 original question.
@@ -112,7 +112,7 @@ When the required tool is missing:
    "false", not "confirmed") and say what tool call would resolve it.
 
 Also verify you are passing the **full drawer/entity ID** (`drawer_<wing>_<room>_<hash>`),
-not a truncated hash — `kg_query`/`get_ancestors` on a truncated ID silently return empty
+not a truncated hash — `kg_query`/`resolve_canonical` on a truncated ID silently return empty
 results instead of erroring, which looks identical to "no facts exist."
 
 

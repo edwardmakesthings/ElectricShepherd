@@ -183,17 +183,17 @@ with `kg_invalidate` for superseding. We don't build one. And MemPalace already 
 - **Edges are reserved KG predicates:** `synthesized-from` (B → A means B synthesized from A)
   and `merged-into` (§5). The lineage graph is these triples; traversal is KG traversal.
 - **Recursive traversal lives in MemPalace** (substrate, mechanical). Native `kg_query` is
-  one-hop (entity → its direct relations, no depth); the substrate fork adds recursive
-  traversal over a predicate, from which `get_ancestors`/`get_descendants`/`get_height`
-  (longest path) / `resolve_canonical` (merge-chain head) / orphan + candidate detection
-  follow. It lives where the data lives (natively traversing, not reconstructing the graph
+  one-hop (entity → its direct relations, no depth); recursive traversal is provided by
+  `kg_query` with `recurse=true` (optionally predicate-scoped), with `get_height`
+  (longest path) and `resolve_canonical` (merge-chain head) as deterministic helpers.
+  It lives where the data lives (natively traversing, not reconstructing the graph
   outside MemPalace), is unit-tested there, and keeps ElectricShepherd thin.
 
 This collapses most of what an earlier draft of this doc planned to build, and then collapses
 it *further* than the first revision did: there is no invented edge store, no list-valued
-drawer metadata (ChromaDB metadata is scalar-only anyway), **and no parallel
-`node_kind=synthesis` drawer subsystem** — summaries/arcs → closets, durable facts → KG
-triples, categories → halls, edges → KG, recursive traversal → a substrate read API. The
+drawer metadata (ChromaDB metadata is scalar-only anyway), **and no parallel synthesis-only
+drawer subsystem** — summaries/arcs → closets, durable facts → KG triples, categories →
+halls, edges → KG, recursive traversal → a substrate read API.
 substrate PR shrinks accordingly (see the PR-rescope plan): retrieval counters and recursive
 traversal survive as the genuinely-missing primitives; the synthesis-node machinery is largely
 obviated by closets.
@@ -379,9 +379,9 @@ not the conversation.)
 
 ### Substrate vs. policy split for mem-core
 
-- **Substrate (MemPalace):** the scoped lineage query ("synth nodes whose lineage reaches
-  scope X"), node labels, query-time label filters (`match_labels`, `match_mode`,
-  `labeled_only`), and label-policy discovery (`get_label_policy`). All mechanical.
+- **Substrate (MemPalace):** recursive lineage traversal (`kg_query` with `recurse=true`
+  plus predicate filtering), canonical resolution (`resolve_canonical`), and lineage height
+  (`get_height`). All mechanical.
 - **Policy (ElectricShepherd):** the ranking function, the top-N choice, per-scope tag config,
   where renders are written, and the dreamer's label/promote judgments (for example applying
   a `pinned` label).
@@ -659,29 +659,20 @@ this grows beside it. Build the substrate (Project A, in the fork) first; build 
 
 ### Project A — MemPalace fork (substrate; open PR)
 
-**A1 — derived-drawer drawer kind + retrieval counters.** *(Done.)* Added `node_kind=synthesis` + `height`
-metadata to drawers; `last_retrieved`/`retrieval_count` stamped on the read path.
-Pure additive metadata + a read-side counter. Implements §4 (nodes), §6.
+**A1 — retrieval counters + lineage signals.** *(Done.)* Added retrieval counters and
+lineage signals used by policy ranking, with no policy encoded in substrate.
 
-**A2 — synthesis edges + traversal API.** *(Done.)* Reserved `synthesized-from`/`merged-into` predicates;
-added the deterministic traversal read-API (`get_ancestors`/`get_descendants`/`get_height`/
-`resolve_canonical`/candidate-detection) over the KG + derived drawers, as new MCP tools.
-Reuses `check_duplicate` as the candidate seed. Implements §3, §4 (edges/traversal), §5
-(resolution), §6 (candidates). Visual graph render extends the existing exporter.
+**A2 — synthesis edges + traversal API.** *(Done.)* Reserved `synthesized-from`/`merged-into`
+predicates and exposed deterministic traversal helpers already present in the fork surface
+(`kg_query` recurse traversal, `get_height`, `resolve_canonical`, candidate detection).
+Implements §3, §4 (edges/traversal), §5 (resolution), §6 (candidates).
 
-**A3 — schema-enforced synthesis creation + empty-inflation pre-gate.** *(Done.)* Synthesis-node
-creation gated on required DESC + validated edges; deterministic ≥2-distinct-parents pre-gate.
-Implements §7.
+**A3 — schema-enforced synthesis creation + empty-inflation pre-gate.** *(Done.)* Synthesis
+creation is boundary-gated on required content + validated ≥2 distinct parents. Implements §7.
 
-**A4 — scoped lineage query + labels (for mem-core renders, §9a).** *(Done.)* Added two
-additive capabilities: (1) `find_scoped_synthesis_nodes`, a scoped traversal query returning
-synth nodes whose lineage reaches a given room/scope, with deterministic ranking signals
-(height, retrieval_count, connection-degree) exposed so a caller can rank without re-deriving;
-and (2) generic node labels (set/clear + filter) via `set_synthesis_labels` with
-`match_labels` / `match_mode` / `labeled_only`, plus `get_label_policy` so callers can
-discover owner-configured allowed labels. This keeps mechanism in substrate and policy in the
-dreamer (for example, ElectricShepherd can treat label `pinned` specially without MemPalace
-encoding that policy). Implements §9a. (A1–A4 are the open-PR set: additive, no policy.)
+**A4 — scoped lineage retrieval for mem-core (§9a).** *(Done.)* Scoped mem-core retrieval
+remains policy-side composition over substrate traversal primitives; no separate label API is
+required in the fork surface for the current design.
 
 ### ElectricShepherd — the dreamer (policy; separate repo, against the fork)
 
