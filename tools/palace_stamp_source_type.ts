@@ -201,8 +201,8 @@ async function collectRoomInferences(
  *
  * Dry-run (dryRun=true) performs only READS — taxonomy probe, bounded paging,
  * per-drawer edge checks, idempotency reads — and returns what WOULD be stamped.
- * Apply issues one best-effort kg_invalidate (only when the current value differs)
- * + kg_add per drawer that needs stamping; unknown drawers are never written.
+ * Apply issues one atomic kg_supersede (only when the current value differs)
+ * or kg_add (when unstamped) per drawer that needs stamping; unknown drawers are never written.
  */
 export async function runSourceTypeBackfill(args: {
   call: CallTool;
@@ -315,18 +315,21 @@ export async function runSourceTypeBackfill(args: {
   await mapLimit(toStamp, concurrency, async ({ entry }) => {
     try {
       if (entry.current && entry.current !== entry.inferred) {
-        await args.call("kg_invalidate", {
+        await args.call("kg_supersede", {
           subject: entry.drawer_id,
           predicate: "es-source-type",
-          object: entry.current,
-        }).catch(() => ({}));
+          old_object: entry.current,
+          new_object: entry.inferred,
+          source_closet: entry.drawer_id,
+        });
+      } else {
+        await args.call("kg_add", {
+          subject: entry.drawer_id,
+          predicate: "es-source-type",
+          object: entry.inferred,
+          source_closet: entry.drawer_id,
+        });
       }
-      await args.call("kg_add", {
-        subject: entry.drawer_id,
-        predicate: "es-source-type",
-        object: entry.inferred,
-        source_closet: entry.drawer_id,
-      });
       totals.stamped += 1;
     } catch {
       totals.stamp_failed += 1;

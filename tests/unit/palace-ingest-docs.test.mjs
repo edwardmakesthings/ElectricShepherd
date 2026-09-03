@@ -76,7 +76,7 @@ function makeFakePalace({ taxonomy = {}, rooms = {}, mineBehavior = null, kgFact
       if (handler) return { facts: handler };
       return { facts: [] };
     }
-    if (name === "kg_add" || name === "kg_invalidate") {
+    if (name === "kg_add" || name === "kg_invalidate" || name === "kg_supersede") {
       const key = `${name}:${payload.subject}`;
       if (key.startsWith("kg_add:") && kgFacts[`__fail__:${key}`]) throw new Error(`${name} failed for ${key}`);
       if (key.startsWith("kg_invalidate:") && kgFacts[`__fail__:${key}`]) throw new Error(`${name} failed for ${key}`);
@@ -130,7 +130,7 @@ test("dry-run makes no mine call and no KG writes", async () => {
   assert.equal(report.pre_snapshot.total, 2);
   assert.match(report.next_step, /dry_run:false/);
 
-  const mutating = calls.filter((c) => c.name === "mine" || c.name === "kg_add" || c.name === "kg_invalidate");
+  const mutating = calls.filter((c) => c.name === "mine" || c.name === "kg_add" || c.name === "kg_invalidate" || c.name === "kg_supersede");
   assert.equal(mutating.length, 0);
 });
 
@@ -260,7 +260,7 @@ test("apply: mine failure stops immediately — no KG writes", async () => {
 
   assert.equal(report.ok, false);
   assert.match(report.error, /MineAlreadyRunning/);
-  const kgWrites = calls.filter((c) => c.name === "kg_add" || c.name === "kg_invalidate");
+  const kgWrites = calls.filter((c) => c.name === "kg_add" || c.name === "kg_invalidate" || c.name === "kg_supersede");
   assert.equal(kgWrites.length, 0);
 });
 
@@ -445,26 +445,18 @@ test("apply: changed doc with incoming concerns → synthesis is soft-flagged, n
   assert.equal(report.flag_failures, 0);
 
   // Single-marker discipline: syn_a already carries source-changed → NO write for it;
-  // syn_b's prior marker is retired (scoped to es-staleness, exact old value), then the
-  // new marker is added with the exact Phase 11 triple.
-  const stalenessAdds = calls.filter((c) => c.name === "kg_add" && c.args.predicate === "es-staleness");
-  assert.equal(stalenessAdds.length, 1);
-  assert.deepEqual(stalenessAdds[0].args, {
+  // syn_b's prior marker is atomically superseded to source-changed.
+  const stalenessSupersedes = calls.filter((c) => c.name === "kg_supersede" && c.args.predicate === "es-staleness");
+  assert.equal(stalenessSupersedes.length, 1);
+  assert.deepEqual(stalenessSupersedes[0].args, {
     subject: "drawer_syn_b",
     predicate: "es-staleness",
-    object: "source-changed",
+    old_object: "basis-drifted",
+    new_object: "source-changed",
     source_closet: "drawer_syn_b",
   });
-
-  const stalenessInvalidates = calls.filter(
-    (c) => c.name === "kg_invalidate" && c.args.predicate === "es-staleness",
-  );
-  assert.equal(stalenessInvalidates.length, 1);
-  assert.deepEqual(stalenessInvalidates[0].args, {
-    subject: "drawer_syn_b",
-    predicate: "es-staleness",
-    object: "basis-drifted",
-  });
+  const stalenessAdds = calls.filter((c) => c.name === "kg_add" && c.args.predicate === "es-staleness");
+  assert.equal(stalenessAdds.length, 0);
 
   // CRITICAL guardrail: no synthesis node or lineage fact is invalidated OFF-AXIS —
   // the only synthesis-subject invalidations are the scoped es-staleness retirements
@@ -559,7 +551,7 @@ test("apply: no concerns edges → no staleness writes, counters zero", async ()
   assert.equal(report.synthesis_flagged, 0);
   assert.equal(report.flag_failures, 0);
   const stalenessWrites = calls.filter(
-    (c) => (c.name === "kg_add" || c.name === "kg_invalidate") && c.args.predicate === "es-staleness",
+    (c) => (c.name === "kg_add" || c.name === "kg_invalidate" || c.name === "kg_supersede") && c.args.predicate === "es-staleness",
   );
   assert.equal(stalenessWrites.length, 0);
 });
@@ -580,12 +572,12 @@ test("flagConcernedSyntheses: idempotent — already-current flag produces no wr
   // Single-marker idempotency: the read sees source-changed already current, so NO
   // kg_add (not even an identical triple) and NO invalidation are issued.
   const stalenessWrites = calls.filter(
-    (c) => (c.name === "kg_add" || c.name === "kg_invalidate") && c.args.predicate === "es-staleness",
+    (c) => (c.name === "kg_add" || c.name === "kg_invalidate" || c.name === "kg_supersede") && c.args.predicate === "es-staleness",
   );
   assert.equal(stalenessWrites.length, 0);
 });
 
-test("flagConcernedSyntheses: different prior staleness value is invalidated, then source-changed set", async () => {
+test("flagConcernedSyntheses: different prior staleness value is atomically superseded to source-changed", async () => {
   const { call, calls } = makeFakePalace({
     kgFacts: {
       d2: [fact("d2", "es-source-type", "doc")],
@@ -599,25 +591,18 @@ test("flagConcernedSyntheses: different prior staleness value is invalidated, th
 
   assert.deepEqual(result, { concernsChecked: 1, flagged: 1, flagFailed: 0, skippedNonSynthesis: 0 });
 
-  // The prior marker is retired — scoped to es-staleness with the EXACT old value.
-  const invalidates = calls.filter((c) => c.name === "kg_invalidate" && c.args.predicate === "es-staleness");
-  assert.equal(invalidates.length, 1);
-  assert.deepEqual(invalidates[0].args, { subject: "drawer_syn_a", predicate: "es-staleness", object: "basis-drifted" });
-
-  // Then the new single marker is added.
-  const adds = calls.filter((c) => c.name === "kg_add" && c.args.predicate === "es-staleness");
-  assert.equal(adds.length, 1);
-  assert.deepEqual(adds[0].args, {
+  // Prior marker is atomically superseded to source-changed.
+  const supersedes = calls.filter((c) => c.name === "kg_supersede" && c.args.predicate === "es-staleness");
+  assert.equal(supersedes.length, 1);
+  assert.deepEqual(supersedes[0].args, {
     subject: "drawer_syn_a",
     predicate: "es-staleness",
-    object: "source-changed",
+    old_object: "basis-drifted",
+    new_object: "source-changed",
     source_closet: "drawer_syn_a",
   });
-
-  // Ordering: invalidate the old value before adding the new one.
-  const invIdx = calls.findIndex((c) => c.name === "kg_invalidate" && c.args.predicate === "es-staleness");
-  const addIdx = calls.findIndex((c) => c.name === "kg_add" && c.args.predicate === "es-staleness");
-  assert.ok(invIdx >= 0 && invIdx < addIdx, "prior value must be invalidated before the new marker is added");
+  const adds = calls.filter((c) => c.name === "kg_add" && c.args.predicate === "es-staleness");
+  assert.equal(adds.length, 0);
 
   // Guardrail: nothing outside es-staleness was touched (no concerns/lineage invalidation).
   const offAxisInvalidates = calls.filter(

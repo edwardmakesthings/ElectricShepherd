@@ -26,6 +26,7 @@ export type MemgraphToolMap = {
   checkpoint: string;
   updateDrawer: string;
   kgAdd: string;
+  kgSupersede: string;
   kgInvalidate: string;
   search: string;
   listDrawers: string;
@@ -71,6 +72,7 @@ const TOOL_BASE_NAMES: MemgraphToolMap = {
   checkpoint: "checkpoint",
   updateDrawer: "update_drawer",
   kgAdd: "kg_add",
+  kgSupersede: "kg_supersede",
   kgInvalidate: "kg_invalidate",
   search: "search",
   listDrawers: "list_drawers",
@@ -1143,6 +1145,17 @@ export class MemgraphClient {
     return this.call("kgAdd", args as unknown as JsonMap);
   }
 
+  kgSupersede(args: {
+    subject: string;
+    predicate: string;
+    old_object: string;
+    new_object: string;
+    source_closet?: string;
+    source_run_id?: string;
+  }) {
+    return this.call("kgSupersede", args as unknown as JsonMap);
+  }
+
   kgInvalidate(args: {
     subject: string;
     predicate: string;
@@ -1260,14 +1273,21 @@ export class MemgraphClient {
    */
   async setClosetSourceType(closetId: string, sourceType: ClosetSourceType, sourceRunId?: string): Promise<boolean> {
     const previous = await this.getClosetSourceType(closetId);
+    if (previous === sourceType) return true;
     if (previous && previous !== sourceType) {
-      // Best-effort invalidation of the previous value (logged on failure): a stale
-      // previous fact does not block setting the new type — the add below is the
-      // authoritative write.
-      const invalidateRes = await this.invoke("kgInvalidate", { subject: closetId, predicate: "es-source-type", object: previous });
-      if (invalidateRes.ok === false) {
-      console.warn(`[memgraph] es-source-type invalidation of ${closetId}/${previous} failed (kind=${invalidateRes.kind}), continuing to set new type: ${invalidateRes.detail}`);
+      const supersedeRes = await this.invoke("kgSupersede", {
+        subject: closetId,
+        predicate: "es-source-type",
+        old_object: previous,
+        new_object: sourceType,
+        source_closet: closetId,
+        source_run_id: sourceRunId,
+      });
+      if (supersedeRes.ok === false) {
+        console.warn(`[memgraph] es-source-type supersede for ${closetId} (${previous} -> ${sourceType}) failed (kind=${supersedeRes.kind}), leaving axis unchanged: ${supersedeRes.detail}`);
+        return false;
       }
+      return true;
     }
     const addRes = await this.invoke("kgAdd", {
       subject: closetId,
@@ -1356,13 +1376,19 @@ export class MemgraphClient {
       return true;
     }
     if (previous && previous !== value) {
-      // Best-effort invalidation of the prior es-staleness value (logged on failure):
-      // a stale prior flag does not block setting the new one — the add below is the
-      // authoritative write. Scoped to es-staleness only, never other axes.
-      const invalidateRes = await this.invoke("kgInvalidate", { subject: id, predicate: "es-staleness", object: previous });
-      if (invalidateRes.ok === false) {
-      console.warn(`[memgraph] es-staleness invalidation of ${id}/${previous} failed (kind=${invalidateRes.kind}), continuing to set new flag: ${invalidateRes.detail}`);
+      const supersedeRes = await this.invoke("kgSupersede", {
+        subject: id,
+        predicate: "es-staleness",
+        old_object: previous,
+        new_object: value,
+        source_closet: id,
+        source_run_id: sourceRunId,
+      });
+      if (supersedeRes.ok === false) {
+        console.warn(`[memgraph] es-staleness supersede for ${id} (${previous} -> ${value}) failed (kind=${supersedeRes.kind}), leaving node unchanged: ${supersedeRes.detail}`);
+        return false;
       }
+      return true;
     }
     const addRes = await this.invoke("kgAdd", {
       subject: id,

@@ -1,6 +1,5 @@
 # Memory Graph — Design Document
 
-**Status: architecture reference for the policy/runtime split.**
 ElectricShepherd now implements the policy side in this repository with a
  deterministic adapter + retrieval-expansion runtime path, while MemPalace remains the
  substrate dependency/fork boundary. Most sections below describe the intended design
@@ -35,7 +34,7 @@ recording that they merged is mechanical (substrate). The dreamer *decides* the 
 calls the substrate's `link` + `kg_invalidate` to *execute* it. That's the
 probabilistic-wrapped-in-deterministic philosophy (§1) expressed as a repo boundary.
 
-### Project A — MemPalace additions (substrate; open PR)
+### MemPalace additions (substrate)
 
 Developed in a **fork of MemPalace** with a PR open for upstreaming. Everything is
 additive — raw drawers, the mining flow, and existing tools are untouched — which is what
@@ -393,13 +392,6 @@ rotting — the capability already built for global mem-core, extended with a sc
 
 ## 9b. Tier enforcement and injection: mechanical vs. still-convention
 
-**Status update (2026-06-23):** the gap framing in this section is now mostly
-historical. ElectricShepherd's current `turn-guard` wiring already implements
-compaction-aware scoped reinjection and OpenCode-oriented capture verification,
-and the runtime now includes shared synthesis locking and orphan/hang hardening.
-The gap descriptions are retained below as design rationale and failure-mode
-analysis.
-
 The three tiers are *structurally* sound (§§4–9a). This section grades them on the standard
 that actually matters: **is each boundary enforced by mechanism, or hoped for by prompt?** —
 and names the gaps where prompt-and-hope still lives. The pattern across the gaps is
@@ -407,114 +399,10 @@ consistent: the *deterministic machinery* (render, loader, gated writes, capture
 built, but the *injection and trigger plumbing* that connects machinery to the live context
 at the right moment lags. The fixes are event-triggered plugins, not more prompts.
 
-### Scorecard
-
-| Tier | Boundary | Status |
-|---|---|---|
-| **source transcript** | transcripts pushed in, append-only | **Mechanical** (hooks fire on Stop/PreCompact → `mempalace mine`; append-only enforced substrate-side). One wiring check: confirm it fires on the *OpenCode* harness, not only the Claude Code/Codex/Cursor hooks it was built for. |
-| **derived memory** | only well-formed nodes exist | **Mechanical** (substrate gates `add_drawer` on DESC + ≥2 validated sources; inflation guard blocks weak syntheses before write). |
-| **derived memory** | *only the dreamer writes it* | **Convention** — nothing stops an interactive agent from calling `add_drawer` if it holds the tool. Gap #3. |
-| **mem-core** | derived render, file-only, never round-trips | **Mechanical** (post-audit: render is deterministic, file-only). |
-| **mem-core** | *right render present in context, at compaction not just session start* | **Mechanical in OpenCode plugin path** — `turn-guard` re-resolves and reinjects scoped mem-core on `session.started`, `session.idle`, and `session.compacted` (remaining risk is harness/tooling drift, not missing mechanism). |
-
-The counterintuitive result: the most important tier (mem-core, the always-resident one) is
-the *least reliably present when it matters*, because injection is the unsolved part.
-
-### Gap #1 — compaction-aware mem-core re-injection (highest priority, not deferrable)
-
-Compaction is a re-injection event, and nothing initially guaranteed mem-core survives it or
-is refreshed at it. mem-core enters context via OpenCode's `instructions` at session start;
-when OpenCode compacts, the post-compaction context is determined by the summarizer, not
-re-derived from the render. Worse, compaction is exactly when you'd want to *re-pull the
-freshest render* — the consolidation pass may have updated it, or the work may have crossed
-into a different scope since session start.
-
-**The seam is a documented OpenCode hook: `experimental.session.compacting`.** It fires
-*before* the LLM generates the continuation summary, and a plugin can either inject context
-into the compaction prompt or **replace the compaction prompt entirely** (`output.prompt`).
-This is the real "run a script before the agent's context is cleaned" mechanism — not the
-earlier turn-guard approach of injecting mem-core as a synthetic user message (which was at
-the summarizer's mercy). The fix: turn-guard implements `experimental.session.compacting` to
-inject the freshly-resolved scoped mem-core into the compaction prompt, guaranteeing it
-survives into the post-compaction context. Mirrors the existing PreCompact *push* (transcripts
-out to source transcript) with a *pull* (mem-core in).
-
-Two cautions: the hook is `experimental.` (an active proposal, #4317, would stabilize
-`/compact` and the compaction API), so isolate it behind a thin wrapper — same adapter
-discipline as the MemPalace tool names — so a rename touches one file. And OpenCode's
-*unrecoverable-overflow* case is real (if compaction itself overflows, the session hard-fails),
-which is another argument for keeping context shallow proactively rather than letting it grow
-to where even summarization can't fit. Validate against the real hook on the brutal
-low-context local models (4-turn compaction) before building anything larger on it.
-
-### Gap #2 — scope-aware injection wiring
-
-`mem-core-loader.ts` correctly resolves and merges the directory-nested render (broad→narrow)
-for a given directory — but nothing wires its output into what OpenCode actually injects based
-on *where the work is happening*. OpenCode loads a static `instructions` list; it does not call
-the loader to pick the scope-appropriate render for the file being edited. So the
-directory-nested-render design exists as a *capability* (the loader runs, produces correct
-merged markdown) but is not *connected* to injection. Current behavior is "always load the
-global blocks," not "load the merged scoped render for wherever you are." The scoping is built
-but not plumbed. Fix: a mechanism (plugin watching the active working directory, or a
-re-resolve at session-start/compaction) that makes injection consult the loader rather than a
-static list. Until then, the scoping designed in §9a is inert.
-
-### Gap #3 — enforce "only the dreamer writes derived memory" (if it's a real invariant)
-
-The design says only the dreamer creates derived memory, but that is currently a convention — an
-interactive `build`/`plan` agent with the derived-memory write tools in scope could call them mid-session.
-If the invariant is real, enforce it the same way Serena's memory tools were gated: tool-scope
-`add_drawer` / `apply_merge` to the dreamer agent only, deny them to interactive
-agents. Cheap, closes the gap, and keeps the substrate/policy boundary honest (interactive
-agents write *raw* via the capture path; the dreamer is the sole synthesizer). Note this is
-distinct from §6/§7's *write-quality* gating (which is mechanical and stays) — this is
-*write-authority* gating.
-
-### Gap #4 — verify source transcript capture fires on OpenCode
-
-The capture hooks (`mempal_save_hook.sh`, `mempal_precompact_hook.sh`) were written for the
-Claude Code / Codex / Cursor hook protocols. The active harness is OpenCode. Confirm the
-OpenCode equivalent (a compaction plugin or Stop-equivalent) actually fires the
-`mempalace mine`, because if it doesn't, source transcript silently stops capturing and the failure is
-invisible until a dreamer run comes up empty. Design is sound; this is a wiring-verification
-item.
-
-### The shape of the fix, and why it's not "more prompts"
-
-All four gaps are closed by **event-triggered plumbing** — plugins on compaction,
-directory-change, and session-start that *deterministically* perform injection/capture — plus
-one tool-scope denial. None is closed by a better prompt. This is the same lesson as the
-self-editing-memory checkpoint: a deterministic trigger at a fixed event beats hoping the
-right thing happens. The substrate got solid first; this is the orchestration layer that wires
-it into live sessions, and it is the natural build phase *before* the graph-view inspection
-surface (operational reliability precedes inspection — you make the loop correct, then make it
-visible). Build order: Gap #1 (compaction re-injection) first (load-bearing, not deferrable),
-then #2 (scope wiring), then #3 and #4 (cheap closes).
-
-### Implementation status (ElectricShepherd repo)
-
-Current plugin/runtime state now closes these with deterministic wiring:
-
-- Gap #1: `plugin/turn-guard.ts` handles `session.compacted` and re-injects scoped mem-core
-  by invoking `scripts/run-mem-core-loader.ts`.
-- Gap #2: reinjection resolves scope from session/event metadata and recent file paths, then
-  loads broad→narrow scoped renders through the loader.
-- Gap #3: `turn-guard` enforces write-authority as an event-time guard by detecting
-  unauthorized `add_drawer` / `apply_merge` calls and issuing deterministic
-  correction prompts (authoritative hard denial still belongs in harness/tool-scope policy).
-- Gap #4: `turn-guard` emits OpenCode source transcript capture verification heartbeats and optional
-  capture-command execution status to `./.electric-shepherd/turn-guard-status.json`.
-- Operator control surface: slash commands in `command/` (`/consolidate`, `/memory-status`,
-  `/consolidate-deep`, `/memory-refresh`, `/memory-status`) provide explicit consolidation actions;
-  memory-mutating commands run as isolated subtasks, while `/memory-refresh` intentionally
-  runs in-session to refresh the active context.
-- Auto-consolidation hardening: idle/volume/compaction triggers are now guarded by
-  cooldown + timeout watchdog + cross-process lockfile + process-tree kill +
-  bounded tracking maps + start-failure cooldown rollback.
-- Standalone scheduler safety: `scripts/run-memory-consolidation-and-validation.ts`
-  now uses shared lock primitives in `scripts/consolidation-lock.ts` so cron/n8n runs do
-  not overlap plugin-triggered synthesis runs.
+The reliability lever here is event-time mechanism, not prompt wording. Scoped mem-core
+injection, transcript capture, and write-authority boundaries are strong only when they are
+wired to deterministic runtime events (session start/idle/compaction and tool invocation)
+rather than left to convention.
 
 
 ## 10. Authored-notes unification (mechanism = substrate, policy = ElectricShepherd)
@@ -651,93 +539,7 @@ fast and know a bad result is judgment, not machinery. Non-optional for that rea
 
 ---
 
-## 14. Build order (re-homed by project)
-
-A dependency sequence, not validation gates. The current batch dreamer runs throughout;
-this grows beside it. Build the substrate (Project A, in the fork) first; build the policy
-(ElectricShepherd) against it. Source spots to confirm against the real code are marked [CONFIRM].
-
-### Project A — MemPalace fork (substrate; open PR)
-
-**A1 — retrieval counters + lineage signals.** *(Done.)* Added retrieval counters and
-lineage signals used by policy ranking, with no policy encoded in substrate.
-
-**A2 — synthesis edges + traversal API.** *(Done.)* Reserved `synthesized-from`/`merged-into`
-predicates and exposed deterministic traversal helpers already present in the fork surface
-(`kg_query` recurse traversal, `get_height`, `resolve_canonical`, candidate detection).
-Implements §3, §4 (edges/traversal), §5 (resolution), §6 (candidates).
-
-**A3 — schema-enforced synthesis creation + empty-inflation pre-gate.** *(Done.)* Synthesis
-creation is boundary-gated on required content + validated ≥2 distinct parents. Implements §7.
-
-**A4 — scoped lineage retrieval for mem-core (§9a).** *(Done.)* Scoped mem-core retrieval
-remains policy-side composition over substrate traversal primitives; no separate label API is
-required in the fork surface for the current design.
-
-### ElectricShepherd — the dreamer (policy; separate repo, against the fork)
-
-**Policy step 1 — thin adapter foundation.** The module mapping dreamer graph-ops → MemPalace
-tool names. Build first so everything else in policy code is insulated from substrate renames (§0).
-
-**Policy step 2 — retrieval expansion.** Probabilistic-entry/deterministic-expansion recall (§9)
-via the adapter. Immediately useful; exercises the A2 traversal API.
-
-**Policy step 3 — synthesis consolidation (map-reduce) + inflation guard.** §12, §7
-(content-judgment half). Creates derived drawers via the substrate.
-
-**Policy step 4 — bidirectional validation + merge adjudication + escalation.** §8, §5
-(adjudication half). The context-isolated validator subagent, conditional frontier escalation,
-ntfy-on-unresolved.
-
-**Policy step 5 — authored-notes policy + volume-queue cadence.** §10 (policy half), §11.
-
-**Policy step 6 — tier enforcement + injection plumbing (§9b).** The orchestration that makes
-the three tiers *operationally* reliable rather than only structurally sound. In priority
-order: (a) compaction-aware mem-core re-injection plugin — pull-on-compact mirroring the
-existing push-on-compact (load-bearing, not deferrable); (b) scope-aware injection wiring so
-the loader actually drives what's injected for the current working directory; (c) tool-scope
-`add_drawer`/`apply_merge` to the dreamer only (write-authority gating); (d) verify
-source transcript capture fires on the OpenCode harness. All are event-triggered plumbing + one tool-
-scope denial — no prompts. Build this **before** the graph-view inspection surface
-(operational reliability precedes inspection).
-
-#### Implementation status (policy, ElectricShepherd repo)
-
-- **Steps 1–2 (adapter + retrieval expansion).** *Built.* `adapter/memgraph.ts` is the
-  graph-ops→MemPalace adapter; `adapter/retrieval-expansion.ts` does probabilistic-entry /
-  deterministic-expansion recall.
-- **Steps 3–4 (synthesis consolidation + validation/merge).** *Built.*
-  `adapter/synthesis-consolidation.ts` (map-reduce + inflation guard) and
-  `adapter/validation-merge-review.ts` (context-isolated validation, merge adjudication).
-- **Step 5 (cadence).** *Built.* `adapter/cadence-orchestrator.ts` +
-  `.electric-shepherd-cadence-state.json` drive the volume-queue cadence.
-- **Step 6 (tier enforcement + injection plumbing, §9b).** *Built* via `plugin/turn-guard.ts`
-  (gaps #1, #2, #4 closed; gap #3 is event-time warn-guard plus config-level tool denial, not
-  hard substrate enforcement — see scorecard).
-- **§12 factory inversion — partial / divergent.** The consolidation pass *is* a script that
-  owns the loop (`scripts/run-memory-consolidation-and-validation.ts`: worklist-first,
-  batch-chunked, cross-process lock via `scripts/consolidation-lock.ts`, triggered by `/consolidate`
-  and auto-consolidation-on-compact — not an agent-in-charge). But its *internal mechanics* still
-  diverge from §12a–c: it talks to MemPalace over **MCP** (not as a library), uses **live
-  subagent mappers/auditors** (not per-item bounded **no-tools** direct model calls), and has
-  **no `eshepherd/cache/` crash-safe judgment journal** or `judged`-status drawer-annotation
-  promote-then-clear funnel. The factory *shape* is real; the strict no-tools/library/journal
-  form in §12 is the remaining work.
-
-Substrate A1–A2 are the foundation and highest value-to-risk (schema, counters, the
-deterministic graph + visualization — all before any model-judgment machinery). Everything
-that can go wrong by *judgment* (ElectricShepherd) sits on a proven deterministic substrate.
-
-### PR sequencing
-
-A1–A4 are implemented in the MemPalace fork (open PR). Run ElectricShepherd against that build.
-If/when those additions land upstream, ElectricShepherd's adapter repoints to the upstream toolset
-without changing dreamer logic. If the substrate surface differs across environments,
-adjust only the adapter mapping. Either way ElectricShepherd is insulated.
-
----
-
-## 15. Stack-level dependencies (cross-references to the decisions log)
+## 14. Stack-level dependencies (cross-references to the decisions log)
 
 ElectricShepherd's reliability rests on two stack-level choices recorded in the decisions log;
 noted here because they directly shape the architecture above.
@@ -751,7 +553,7 @@ LiteLLM passes through without that transformation. Pointing LiteLLM at llama-se
 regardless (§12a, no tools requested). LiteLLM stays — it's the gateway that defines models
 once for every surface; only the backend behind it changes.
 
-*Status: landed.* Local serving runs llama.cpp behind `llama-swap` (one OpenAI endpoint,
+Local serving runs llama.cpp behind `llama-swap` (one OpenAI endpoint,
 on-demand model swap); LiteLLM points at it as `openai/` for the qwen family. `gemma4:26b`
 stays on Ollama temporarily (mainline llama.cpp cannot load its MXFP4-fused MoE experts until
 the converter PR lands); VRAM hand-off between the two runtimes is automated.
@@ -765,7 +567,6 @@ the same compaction machinery, so they must coordinate (don't both rewrite the c
 prompt) — test together early, since plugin-ordering interactions pass in isolation and break
 combined.
 
-*Status: adopted, combined-integration test pending.* DCP runs as a global OpenCode plugin
-(`@tarquinen/opencode-dcp`); ElectricShepherd's compaction injection lives in `turn-guard`.
-The two have not yet been exercised together through a real compaction to confirm they don't
-both rewrite the prompt.
+DCP runs as a global OpenCode plugin (`@tarquinen/opencode-dcp`); ElectricShepherd's
+compaction injection lives in `turn-guard`. Combined compaction-path integration behavior
+still needs explicit joint validation so both plugins do not rewrite the prompt.

@@ -190,36 +190,8 @@ onboarding/indexing) are unaffected and used normally.
 
 ## MemPalace command routing matrix (required)
 
-When working memory tasks, choose tools by operation type first. Do not pick based on habit.
-
-1. Determine the operation type.
-2. Use the mapped tool path below.
-3. Follow the explicit "never use" rule for that operation.
-
-| Operation type | Use this tool path | Never use for this operation |
-|---|---|---|
-| Create a consolidated summary from 2+ sources | `mempalace_add_drawer` + `mempalace_kg_add` (`synthesized-from` edges) | `mempalace_create_tunnel` |
-| Save a single synthesized finding | `mempalace_add_drawer` | `mempalace_create_tunnel` |
-| Find likely duplicate synth nodes | `mempalace_find_merge_candidates` | Manual guess merges without candidate review |
-| Execute a merge decision | `mempalace_apply_merge`, then `mempalace_resolve_canonical` | `mempalace_kg_add` to hand-roll `merged-into` |
-| Inspect synthesis lineage | `mempalace_kg_query` (predicate `synthesized-from`, recurse=true), `mempalace_get_height` | `mempalace_create_tunnel` |
-| Scoped mem-core retrieval/ranking | `mempalace_search` + recursive `mempalace_kg_query` expansion + `mempalace_resolve_canonical` | Global `mempalace_search` alone as a replacement for lineage scope |
-| Add factual relationship (entity fact) | `mempalace_kg_add` | `mempalace_create_tunnel` for factual assertions |
-| Retire stale fact/edge | `mempalace_kg_invalidate` | Deleting drawers to remove a historical fact |
-| Manage hall/category labels | `mempalace_kg_add` / `mempalace_kg_invalidate` with predicate `in-hall` | Writing labels into free-text content only |
-| Cross-wing navigation bridge | `mempalace_create_tunnel` (and `list/follow/delete_tunnel`) | Any synthesis DAG operation |
-| Search relevant memory content | `mempalace_search`, then expand deterministically with lineage tools | Tunnels as search substitute |
-| Read/write session diary | `mempalace_diary_write`, `mempalace_diary_read` | `mempalace_add_drawer` for diary-only records |
-| Delete one known junk drawer | `mempalace_delete_drawer` (explicit confirmation first) | Bulk delete loops without confirmation |
-| Delete many by known source file | `mempalace_delete_by_source` (dry-run first, then apply) | Repeated single delete calls |
-
-Hard prohibitions:
-
-- Never use `mempalace_create_tunnel` to represent synthesis lineage or merge state.
-  Tunnels are navigation links only; they do not participate in synthesis DAG traversal,
-  canonical merge resolution, or scoped synthesis retrieval.
-- Never write a derived summary without explicit lineage (`synthesized-from`) edges.
-- Never create a synthesized summary from fewer than two distinct source IDs.
+The canonical MemPalace command routing matrix lives in `skills/eshepherd/SKILL.md`
+("Command selection rules"); this file defers to it as the single source of truth.
 
 ## Flock status counting guardrail (required)
 

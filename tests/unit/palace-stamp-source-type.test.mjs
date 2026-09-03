@@ -40,7 +40,7 @@ function makeFakePalace({ rooms = {}, taxonomy = null } = {}) {
       if (handler === "throw") throw new Error(`kg_query failed for ${key}`);
       return { facts: [] };
     }
-    if (name === "kg_add" || name === "kg_invalidate") {
+    if (name === "kg_add" || name === "kg_invalidate" || name === "kg_supersede") {
       const key = `${name}:${payload.subject}`;
       if (rooms[`__fail__:${key}`]) throw new Error(`${name} failed for ${key}`);
       return {};
@@ -116,7 +116,7 @@ test("unknown drawers are left unstamped (no kg_add) in apply mode", async () =>
   assert.equal(report.totals.stamped, 1);
 });
 
-test("dry-run issues no kg_add or kg_invalidate", async () => {
+test("dry-run issues no kg_add, kg_invalidate, or kg_supersede", async () => {
   const { call, calls } = makeFakePalace({
     taxonomy: { [WING]: { "source-transcripts": 2 } },
     rooms: { [`${WING}/source-transcripts`]: ["d1", "d2"] },
@@ -128,6 +128,7 @@ test("dry-run issues no kg_add or kg_invalidate", async () => {
   assert.ok(report.next_step.includes("dry_run:false"));
   assert.equal(calls.filter((c) => c.name === "kg_add").length, 0);
   assert.equal(calls.filter((c) => c.name === "kg_invalidate").length, 0);
+  assert.equal(calls.filter((c) => c.name === "kg_supersede").length, 0);
   // dry-run still reports what it would do
   const roomReport = report.rooms[0];
   assert.equal(roomReport.would_stamp, 2);
@@ -152,7 +153,7 @@ test("apply skips already-correctly-stamped drawers (no invalidate, no re-add)",
   assert.equal(report.totals.stamped, 0);
 });
 
-test("apply invalidates a conflicting previous value before re-stamping", async () => {
+test("apply supersedes a conflicting previous value atomically", async () => {
   const { call, calls } = makeFakePalace({
     taxonomy: { [WING]: { notes: 1 } },
     rooms: {
@@ -168,16 +169,17 @@ test("apply invalidates a conflicting previous value before re-stamping", async 
 
   const report = await runSourceTypeBackfill({ call, wing: WING, dryRun: false });
 
-  const invalidates = calls.filter((c) => c.name === "kg_invalidate");
-  assert.equal(invalidates.length, 1);
-  assert.deepEqual(invalidates[0].args, {
+  const supersedes = calls.filter((c) => c.name === "kg_supersede");
+  assert.equal(supersedes.length, 1);
+  assert.deepEqual(supersedes[0].args, {
     subject: "synth-drawer",
     predicate: "es-source-type",
-    object: "doc",
+    old_object: "doc",
+    new_object: "synthesis",
+    source_closet: "synth-drawer",
   });
   const adds = calls.filter((c) => c.name === "kg_add");
-  assert.equal(adds.length, 1);
-  assert.equal(adds[0].args.object, "synthesis");
+  assert.equal(adds.length, 0);
   assert.equal(report.totals.stamped, 1);
 });
 

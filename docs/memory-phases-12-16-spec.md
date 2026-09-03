@@ -1,5 +1,7 @@
 # Spec: memory phases 12–16 — domain, demonstration, routing, failure modes, calibration
 
+**Status (2026-09-03): phases 12–16 are implemented/built in this repo — not planned.**
+
 Continues phases 1–5 (source-type, authority retrieval, docs, linking, skills) and 6–11
 (consumption audit, outcome, prospective, negative, procedural scope, temporal validity).
 

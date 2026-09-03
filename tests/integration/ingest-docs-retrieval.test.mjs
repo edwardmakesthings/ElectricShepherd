@@ -94,7 +94,7 @@ function makeSharedFakePalace({ rooms = {}, kgFacts = {} } = {}) {
       }
       return { facts: allFacts };
     }
-    if (name === "kg_add" || name === "kg_invalidate") {
+    if (name === "kg_add" || name === "kg_invalidate" || name === "kg_supersede") {
       // Phase 11: apply KG writes to the shared fact state so the write side's
       // invalidations and staleness flags are VISIBLE to the read side (the
       // write->read bridge). kg_invalidate retires a matching open fact (sets
@@ -103,12 +103,27 @@ function makeSharedFakePalace({ rooms = {}, kgFacts = {} } = {}) {
       if (name === "kg_add") {
         if (!facts) kgFacts[payload.subject] = [];
         kgFacts[payload.subject].push({ ...payload, current: true });
-      } else {
+      } else if (name === "kg_invalidate") {
         for (const f of facts || []) {
           if (f.predicate === payload.predicate && f.object === payload.object && f.current !== false) {
             f.current = false;
           }
         }
+      } else {
+        for (const f of facts || []) {
+          if (f.predicate === payload.predicate && f.object === payload.old_object && f.current !== false) {
+            f.current = false;
+          }
+        }
+        if (!facts) kgFacts[payload.subject] = [];
+        kgFacts[payload.subject].push({
+          subject: payload.subject,
+          predicate: payload.predicate,
+          object: payload.new_object,
+          source_closet: payload.source_closet,
+          source_run_id: payload.source_run_id,
+          current: true,
+        });
       }
       return {};
     }
@@ -315,13 +330,13 @@ test("ingest docs -> direct factual retrieval -> concerns edge, no duplicate adm
   assert.equal(dryReport.ok, true);
   assert.equal(dryReport.dry_run, true);
   assert.equal(dryReport.room, ROOM);
-  let mutating = calls.filter((c) => c.name === "mine" || c.name === "kg_add" || c.name === "kg_invalidate");
+  let mutating = calls.filter((c) => c.name === "mine" || c.name === "kg_add" || c.name === "kg_invalidate" || c.name === "kg_supersede");
   assert.equal(mutating.length, 0, "dry-run must make no mine/KG calls");
 
   const applyReport = await runDocIngest({ call, path: docDir, wing: WING, dryRun: false });
   assert.equal(applyReport.ok, true);
   assert.equal(applyReport.dry_run, false);
-  mutating = calls.filter((c) => c.name === "mine" || c.name === "kg_add" || c.name === "kg_invalidate");
+  mutating = calls.filter((c) => c.name === "mine" || c.name === "kg_add" || c.name === "kg_invalidate" || c.name === "kg_supersede");
   assert.ok(mutating.length > 0, "apply must mine and stamp");
   const stamped = new Set(
     calls.filter((c) => c.name === "kg_add" && c.args.predicate === "es-source-type").map((c) => c.args.subject),

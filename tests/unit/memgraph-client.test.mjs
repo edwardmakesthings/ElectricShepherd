@@ -365,7 +365,7 @@ test("getClosetSourceType returns null on read failure (never throws)", async ()
   assert.equal(await client.getClosetSourceType("broken"), null);
 });
 
-test("setClosetSourceType invalidates the previous value then adds the new one", async () => {
+test("setClosetSourceType atomically supersedes the previous value", async () => {
   const { client, calls } = makeRecordingClient({
     kg_query: (args) => {
       if (args.predicate === "es-source-type") {
@@ -378,19 +378,18 @@ test("setClosetSourceType invalidates the previous value then adds the new one",
   const ok = await client.setClosetSourceType("drawer-1", "synthesis", "run-9");
   assert.equal(ok, true);
 
-  const invalidates = calls.filter((call) => call.name.endsWith("kg_invalidate"));
-  assert.equal(invalidates.length, 1);
-  assert.deepEqual(invalidates[0].args, { subject: "drawer-1", predicate: "es-source-type", object: "doc" });
-
-  const adds = calls.filter((call) => call.name.endsWith("kg_add"));
-  assert.equal(adds.length, 1);
-  assert.deepEqual(adds[0].args, {
+  const supersedes = calls.filter((call) => call.name.endsWith("kg_supersede"));
+  assert.equal(supersedes.length, 1);
+  assert.deepEqual(supersedes[0].args, {
     subject: "drawer-1",
     predicate: "es-source-type",
-    object: "synthesis",
+    old_object: "doc",
+    new_object: "synthesis",
     source_closet: "drawer-1",
     source_run_id: "run-9",
   });
+  assert.equal(calls.filter((call) => call.name.endsWith("kg_add")).length, 0);
+  assert.equal(calls.filter((call) => call.name.endsWith("kg_invalidate")).length, 0);
 });
 
 test("setClosetSourceType skips invalidation when the value is already current", async () => {
@@ -406,13 +405,16 @@ test("setClosetSourceType skips invalidation when the value is already current",
   const ok = await client.setClosetSourceType("drawer-1", "transcript");
   assert.equal(ok, true);
   assert.equal(calls.filter((call) => call.name.endsWith("kg_invalidate")).length, 0);
+  assert.equal(calls.filter((call) => call.name.endsWith("kg_supersede")).length, 0);
+  assert.equal(calls.filter((call) => call.name.endsWith("kg_add")).length, 0);
 });
 
 test("setClosetSourceType returns false on failure without throwing", async () => {
   const { client } = makeRecordingClient({
-    kg_add: () => {
-      throw new Error("kg_add exploded");
+    kg_supersede: () => {
+      throw new Error("kg_supersede exploded");
     },
+    kg_query: () => ({ facts: [{ current: true, subject: "drawer-1", predicate: "es-source-type", object: "doc" }] }),
   });
 
   assert.equal(await client.setClosetSourceType("drawer-1", "skill"), false);
@@ -435,25 +437,28 @@ test("es-status and es-source-type are independently settable (no cross-predicat
   await client.setClosetSourceType("drawer-1", "synthesis");
 
   const invalidates = calls.filter((call) => call.name.endsWith("kg_invalidate"));
-  // Each setter only ever invalidates facts on ITS OWN predicate.
-  for (const call of invalidates) {
+  const supersedes = calls.filter((call) => call.name.endsWith("kg_supersede"));
+  // Each setter only ever mutates facts on ITS OWN predicate.
+  for (const call of [...invalidates, ...supersedes]) {
     assert.ok(
       ["es-status", "es-source-type"].includes(call.args.predicate),
-      `unexpected invalidate predicate: ${call.args.predicate}`,
+      `unexpected mutation predicate: ${call.args.predicate}`,
     );
   }
   const statusInvalidates = invalidates.filter((call) => call.args.predicate === "es-status");
-  const typeInvalidates = invalidates.filter((call) => call.args.predicate === "es-source-type");
+  const typeSupersedes = supersedes.filter((call) => call.args.predicate === "es-source-type");
   // setClosetStatus("active") invalidated the opposite es-status value.
   assert.equal(statusInvalidates.length, 1);
   assert.equal(statusInvalidates[0].args.object, "provisional");
-  // setClosetSourceType invalidated the previous source-type value.
-  assert.equal(typeInvalidates.length, 1);
-  assert.equal(typeInvalidates[0].args.object, "transcript");
+  // setClosetSourceType superseded the previous source-type value atomically.
+  assert.equal(typeSupersedes.length, 1);
+  assert.equal(typeSupersedes[0].args.old_object, "transcript");
+  assert.equal(typeSupersedes[0].args.new_object, "synthesis");
 
   // The es-status setter never touched an es-source-type fact and vice versa.
   assert.ok(!invalidates.some((call) => call.args.predicate === "es-status" && call.args.object !== "provisional"));
-  assert.ok(!invalidates.some((call) => call.args.predicate === "es-source-type" && call.args.object !== "transcript"));
+  assert.ok(!supersedes.some((call) => call.args.predicate === "es-status"));
+  assert.ok(!supersedes.some((call) => call.args.predicate === "es-source-type" && call.args.old_object !== "transcript"));
 });
 
 test("setClosetStatus never invalidates an es-source-type fact", async () => {
@@ -480,9 +485,9 @@ test("setClosetSourceType never invalidates an es-status fact", async () => {
   await client.setClosetSourceType("drawer-1", "transcript");
 
   const invalidates = calls.filter((call) => call.name.endsWith("kg_invalidate"));
-  for (const call of invalidates) {
-    assert.equal(call.args.predicate, "es-source-type");
-  }
+  const supersedes = calls.filter((call) => call.name.endsWith("kg_supersede"));
+  for (const call of invalidates) assert.equal(call.args.predicate, "es-source-type");
+  for (const call of supersedes) assert.equal(call.args.predicate, "es-source-type");
 });
 
 
@@ -538,7 +543,7 @@ test("getStalenessFlags returns per-node markers and degrades to null on failure
   assert.equal(flags.get("node-broken"), null);
 });
 
-test("setStalenessFlag invalidates the previous es-staleness value then adds the new one", async () => {
+test("setStalenessFlag atomically supersedes the previous es-staleness value", async () => {
   const { client, calls } = makeRecordingClient({
     kg_query: (args) => {
       if (args.predicate === "es-staleness") {
@@ -551,19 +556,18 @@ test("setStalenessFlag invalidates the previous es-staleness value then adds the
   const ok = await client.setStalenessFlag("drawer-1", "basis-drifted", "run-9");
   assert.equal(ok, true);
 
-  const invalidates = calls.filter((call) => call.name.endsWith("kg_invalidate"));
-  assert.equal(invalidates.length, 1);
-  assert.deepEqual(invalidates[0].args, { subject: "drawer-1", predicate: "es-staleness", object: "source-changed" });
-
-  const adds = calls.filter((call) => call.name.endsWith("kg_add"));
-  assert.equal(adds.length, 1);
-  assert.deepEqual(adds[0].args, {
+  const supersedes = calls.filter((call) => call.name.endsWith("kg_supersede"));
+  assert.equal(supersedes.length, 1);
+  assert.deepEqual(supersedes[0].args, {
     subject: "drawer-1",
     predicate: "es-staleness",
-    object: "basis-drifted",
+    old_object: "source-changed",
+    new_object: "basis-drifted",
     source_closet: "drawer-1",
     source_run_id: "run-9",
   });
+  assert.equal(calls.filter((call) => call.name.endsWith("kg_add")).length, 0);
+  assert.equal(calls.filter((call) => call.name.endsWith("kg_invalidate")).length, 0);
 });
 
 test("setStalenessFlag skips invalidation and duplicate add when the value is already current", async () => {
@@ -580,6 +584,7 @@ test("setStalenessFlag skips invalidation and duplicate add when the value is al
   assert.equal(ok, true);
   // Idempotent re-set: no invalidation, no duplicate kg_add.
   assert.equal(calls.filter((call) => call.name.endsWith("kg_invalidate")).length, 0);
+  assert.equal(calls.filter((call) => call.name.endsWith("kg_supersede")).length, 0);
   assert.equal(calls.filter((call) => call.name.endsWith("kg_add")).length, 0);
 });
 
@@ -602,12 +607,13 @@ test("setStalenessFlag never invalidates es-status or es-source-type facts", asy
   await client.setStalenessFlag("drawer-1", "basis-drifted");
 
   const invalidates = calls.filter((call) => call.name.endsWith("kg_invalidate"));
-  // Every invalidate is scoped to the es-staleness predicate only.
-  for (const call of invalidates) {
+  const supersedes = calls.filter((call) => call.name.endsWith("kg_supersede"));
+  // Every mutation is scoped to the es-staleness predicate only.
+  for (const call of [...invalidates, ...supersedes]) {
     assert.equal(call.args.predicate, "es-staleness");
   }
-  assert.ok(!invalidates.some((call) => call.args.predicate === "es-status"));
-  assert.ok(!invalidates.some((call) => call.args.predicate === "es-source-type"));
+  assert.ok(![...invalidates, ...supersedes].some((call) => call.args.predicate === "es-status"));
+  assert.ok(![...invalidates, ...supersedes].some((call) => call.args.predicate === "es-source-type"));
 });
 
 test("es-staleness is independently settable alongside es-status and es-source-type (no cross-predicate invalidation)", async () => {
@@ -631,27 +637,31 @@ test("es-staleness is independently settable alongside es-status and es-source-t
   await client.setStalenessFlag("drawer-1", "basis-drifted");
 
   const invalidates = calls.filter((call) => call.name.endsWith("kg_invalidate"));
-  // Each setter only ever invalidates facts on ITS OWN predicate.
-  for (const call of invalidates) {
+  const supersedes = calls.filter((call) => call.name.endsWith("kg_supersede"));
+  // Each setter only ever mutates facts on ITS OWN predicate.
+  for (const call of [...invalidates, ...supersedes]) {
     assert.ok(
       ["es-status", "es-source-type", "es-staleness"].includes(call.args.predicate),
-      `unexpected invalidate predicate: ${call.args.predicate}`,
+      `unexpected mutation predicate: ${call.args.predicate}`,
     );
   }
   const statusInvalidates = invalidates.filter((call) => call.args.predicate === "es-status");
-  const typeInvalidates = invalidates.filter((call) => call.args.predicate === "es-source-type");
-  const stalenessInvalidates = invalidates.filter((call) => call.args.predicate === "es-staleness");
+  const typeSupersedes = supersedes.filter((call) => call.args.predicate === "es-source-type");
+  const stalenessSupersedes = supersedes.filter((call) => call.args.predicate === "es-staleness");
   assert.equal(statusInvalidates.length, 1);
   assert.equal(statusInvalidates[0].args.object, "provisional");
-  assert.equal(typeInvalidates.length, 1);
-  assert.equal(typeInvalidates[0].args.object, "transcript");
-  assert.equal(stalenessInvalidates.length, 1);
-  assert.equal(stalenessInvalidates[0].args.object, "source-changed");
+  assert.equal(typeSupersedes.length, 1);
+  assert.equal(typeSupersedes[0].args.old_object, "transcript");
+  assert.equal(typeSupersedes[0].args.new_object, "synthesis");
+  assert.equal(stalenessSupersedes.length, 1);
+  assert.equal(stalenessSupersedes[0].args.old_object, "source-changed");
+  assert.equal(stalenessSupersedes[0].args.new_object, "basis-drifted");
 
   // No setter touched another axis's facts.
   assert.ok(!invalidates.some((call) => call.args.predicate === "es-status" && call.args.object !== "provisional"));
-  assert.ok(!invalidates.some((call) => call.args.predicate === "es-source-type" && call.args.object !== "transcript"));
-  assert.ok(!invalidates.some((call) => call.args.predicate === "es-staleness" && call.args.object !== "source-changed"));
+  assert.ok(!supersedes.some((call) => call.args.predicate === "es-status"));
+  assert.ok(!supersedes.some((call) => call.args.predicate === "es-source-type" && call.args.old_object !== "transcript"));
+  assert.ok(!supersedes.some((call) => call.args.predicate === "es-staleness" && call.args.old_object !== "source-changed"));
 });
 
 test("setStalenessFlag returns false on failure without throwing", async () => {

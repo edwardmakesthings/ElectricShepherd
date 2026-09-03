@@ -312,7 +312,7 @@ export async function openIncomingConcerns(call: CallTool, docDrawerId: string):
  * the tool-level call transport cannot invoke directly): read the node's current
  * es-staleness value first; if it already equals `source-changed`, do NOTHING
  * (idempotent re-run — no duplicate write); if a DIFFERENT open value exists,
- * invalidate ONLY that prior `es-staleness` fact before adding. The invalidation is
+ * supersede that prior value atomically to `source-changed`. The supersession is
  * scoped to predicate `es-staleness` alone — never synthesis lineage or any other
  * axis. Best-effort throughout; counts are returned, never thrown.
  */
@@ -342,16 +342,24 @@ export async function flagConcernedSyntheses(
         continue;
       }
       if (previous) {
-        // A different open marker exists: retire ONLY the prior es-staleness fact.
-        await call("kg_invalidate", { subject: synthesisId, predicate: STALENESS_PREDICATE, object: previous });
+        // A different open marker exists: atomically supersede it on the same axis.
+        await call("kg_supersede", {
+          subject: synthesisId,
+          predicate: STALENESS_PREDICATE,
+          old_object: previous,
+          new_object: STALENESS_SOURCE_CHANGED,
+          source_closet: synthesisId,
+          ...(sourceRunId ? { source_run_id: sourceRunId } : {}),
+        });
+      } else {
+        await call("kg_add", {
+          subject: synthesisId,
+          predicate: STALENESS_PREDICATE,
+          object: STALENESS_SOURCE_CHANGED,
+          source_closet: synthesisId,
+          ...(sourceRunId ? { source_run_id: sourceRunId } : {}),
+        });
       }
-      await call("kg_add", {
-        subject: synthesisId,
-        predicate: STALENESS_PREDICATE,
-        object: STALENESS_SOURCE_CHANGED,
-        source_closet: synthesisId,
-        ...(sourceRunId ? { source_run_id: sourceRunId } : {}),
-      });
       flagged += 1;
     } catch {
       flagFailed += 1; // counted, never aborts the pass
