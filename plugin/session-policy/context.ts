@@ -24,7 +24,6 @@ export interface TurnGuardContext {
   retryEnabled: boolean
   retryDisabledAgents: Set<string>
   retryDisabledModes: Set<string>
-  consolidationWriteGuardEnabled: boolean
   sourceCaptureVerifyEnabled: boolean
   autoConsolidationEnabled: boolean
   autoConsolidationOnIdle: boolean
@@ -34,7 +33,6 @@ export interface TurnGuardContext {
   autoConsolidationCooldownMs: number
   autoConsolidationTimeoutMs: number
   autoConsolidationMaxTrackedSessions: number
-  allowedConsolidationWriters: Set<string>
   spiralGuardEnabled: boolean
 
   // ── retry state ───────────────────────────────────────────────────

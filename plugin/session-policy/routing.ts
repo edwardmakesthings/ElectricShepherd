@@ -6,7 +6,6 @@
 import { existsSync } from "node:fs"
 import { normalizePathForHost } from "./constants.ts"
 import type { MessageWithParts } from "./constants.ts"
-import { WRITE_AUTHORITY_MARKER } from "./constants.ts"
 
 export function findSessionID(event: any): string {
 
@@ -294,74 +293,6 @@ export async function resolveLoopGuardRoutingWithGating(args: {
     args.activeRoutingBySession.set(args.sid, resolved)
   }
   return resolved
-}
-
-export async function maybeWarnWriteAuthorityWithGating(args: {
-  sid: string
-  msg: MessageWithParts
-  consolidationWriteGuardEnabled: boolean
-  warnedConsolidationWriteMessageIDs: Set<string>
-  allowedConsolidationWriters: Set<string>
-  client: any
-  directory: string
-  getToolNames: (msg: MessageWithParts) => string[]
-  containsConsolidationWriteTool: (toolNames: string[]) => boolean
-  getAgentIdentity: (msg: MessageWithParts | null | undefined) => string
-  getPromptRouting: (...candidates: Array<MessageWithParts | null | undefined>) => { agent?: string; model?: { providerID: string; modelID: string } }
-  writeStatusFile: (extra: Record<string, unknown>) => void
-}): Promise<boolean> {
-  if (!args.consolidationWriteGuardEnabled) return false
-
-  const msgID = String(args.msg?.info?.id ?? "")
-  if (msgID && args.warnedConsolidationWriteMessageIDs.has(msgID)) return false
-
-  const toolNames = args.getToolNames(args.msg)
-  if (toolNames.length === 0 || !args.containsConsolidationWriteTool(toolNames)) return false
-
-  const actor = args.getAgentIdentity(args.msg)
-  const authorized = args.allowedConsolidationWriters.has(actor)
-  if (authorized) return false
-
-  if (msgID) args.warnedConsolidationWriteMessageIDs.add(msgID)
-  const namesJoined = toolNames.join(", ")
-  console.log(`[turn-guard] write-authority alert sid=${args.sid} actor=${actor || "unknown"} tools=${namesJoined}`)
-
-  args.writeStatusFile({
-    type: "write-authority",
-    sid: args.sid,
-    actor,
-    authorized,
-    toolNames,
-    messageID: msgID || undefined,
-  })
-
-  try {
-    const routing = args.getPromptRouting(args.msg)
-    const body: any = {
-      parts: [
-        {
-          type: "text",
-          text:
-            `${WRITE_AUTHORITY_MARKER} derived memory write tools are restricted to dreamer agents (` +
-            `${[...args.allowedConsolidationWriters].join(", ")}). ` +
-            `This turn attempted: ${namesJoined}. ` +
-            "Do not call add_drawer/update_drawer/kg_add/kg_invalidate/apply_merge from interactive build/plan flows unless this is an explicit consolidation pass. " +
-            "Use diary_write for ordinary findings and reserve derived-memory writes for dreamer consolidation.",
-        },
-      ],
-    }
-    if (routing.agent) body.agent = routing.agent
-    if (routing.model) body.model = routing.model
-
-    await args.client.session.prompt({
-      path: { id: args.sid },
-      query: { directory: args.directory },
-      body,
-    })
-  } catch (err) {
-    console.error("[turn-guard] failed write-authority prompt:", err)
-  }
-  return true
 }
 
 export function resolveTaskSwapTarget(args: {

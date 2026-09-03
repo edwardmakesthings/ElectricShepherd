@@ -541,7 +541,6 @@ export async function onMessageUpdatedWithGating(args: {
   activeRoutingBySession: Map<string, { agent?: string; model?: { providerID: string; modelID: string } }>
   memoryReadSessions: Set<string>
   noteAutoConsolidationActivity: (sid: string, info: any) => void
-  maybeWarnWriteAuthority: (sid: string, msg: MessageWithParts) => Promise<boolean>
   verifySourceCapture: (sid: string, eventType: string) => Promise<void>
   issueRetry: (sid: string, last: MessageWithParts, prev: MessageWithParts | null) => Promise<boolean>
   maybeSpiralNudge: (sid: string, last: MessageWithParts, prev: MessageWithParts | null) => Promise<boolean>
@@ -622,8 +621,6 @@ export async function onMessageUpdatedWithGating(args: {
         writes: memoryTools.writes,
       })
     }
-
-    await args.maybeWarnWriteAuthority(sid, current)
 
     if (info?.finish !== "stop") return
 
@@ -931,7 +928,6 @@ export interface SessionPolicyHandlerDeps {
   context: TurnGuardContext
   directory: string
   noteAutoConsolidationActivity: (sid: string, info: any) => void
-  maybeWarnWriteAuthority: (sid: string, msg: MessageWithParts) => Promise<boolean>
   verifySourceCapture: (sid: string, eventType: string) => Promise<void>
   issueRetry: (sid: string, last: MessageWithParts, prev: MessageWithParts | null) => Promise<boolean>
   maybeSpiralNudge: (sid: string, last: MessageWithParts, prev: MessageWithParts | null) => Promise<boolean>
@@ -971,7 +967,6 @@ export function bindSessionPolicyHandlers(deps: SessionPolicyHandlerDeps) {
         activeRoutingBySession: deps.activeRoutingBySession,
         memoryReadSessions: deps.memoryReadSessions,
         noteAutoConsolidationActivity: deps.noteAutoConsolidationActivity,
-        maybeWarnWriteAuthority: deps.maybeWarnWriteAuthority,
         verifySourceCapture: deps.verifySourceCapture,
         issueRetry: deps.issueRetry,
         maybeSpiralNudge: deps.maybeSpiralNudge,

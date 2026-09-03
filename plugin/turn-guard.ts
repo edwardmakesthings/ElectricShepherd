@@ -67,7 +67,7 @@ import { getText, hasFinalReviewSignal, hasActionPart, isAssistantStop, isSerena
 import { buildSourceCaptureEnv, buildConsolidationEnv } from "./session-policy/env.ts"
 import type { MessageWithParts } from "./session-policy/constants.ts"
 import {
-  AUTO_RETRY_MARKER, CHECKPOINT_MARKER, WRITE_AUTHORITY_MARKER, MIN_USEFUL_TEXT, START_BANNER,
+  AUTO_RETRY_MARKER, CHECKPOINT_MARKER, MIN_USEFUL_TEXT, START_BANNER,
   MAX_RETRIES_PER_PARENT, DEFAULT_MAX_RETRIES_PER_SESSION, STATUS_DIR, STATUS_FILE,
   AUTOCONSOLIDATION_LOG_FILE, MEMCORE_CONTEXT_LOG_FILE, MEMORY_USAGE_LOG_FILE, EVENT_LOG_FILE,
   TURN_GUARD_INSTANCE_DIRS_KEY, TURN_GUARD_INSTANCE_RESET_KEY, DEFAULT_MEMCORE_MAX_CHARS,
@@ -84,8 +84,8 @@ import {
   INTERVENTION_REPLAY_MAX_PATCHES, DEFAULT_LOOP_MUTATION_TOOLS, DEFAULT_LOOP_EXEMPT_TOOLS,
   SPIRAL_GUARD_MARKER, DEFAULT_SPIRAL_GUARD_ENABLED, DEFAULT_SPIRAL_INVESTIGATE_THRESHOLD,
   DEFAULT_SPIRAL_REVERSAL_THRESHOLD, DEFAULT_SPIRAL_MAX_INTERVENTIONS, DEFAULT_SPIRAL_EXEMPT_PROVIDERS,
-  DEFAULT_SPIRAL_EXEMPT_MODEL_PREFIXES, DEFAULT_ALLOWED_CONSOLIDATION_WRITERS,
-  CONSOLIDATION_WRITE_TOOL_NAMES, DEFAULT_AUTOCONSOLIDATION_IDLE_DELAY_MS,
+  DEFAULT_SPIRAL_EXEMPT_MODEL_PREFIXES,
+  DEFAULT_AUTOCONSOLIDATION_IDLE_DELAY_MS,
   DEFAULT_AUTOCONSOLIDATION_MESSAGE_THRESHOLD, DEFAULT_AUTOCONSOLIDATION_COOLDOWN_MS,
   DEFAULT_AUTOCONSOLIDATION_TIMEOUT_MS, AUTOCONSOLIDATION_LOCK_FILE,
   DEFAULT_SOURCE_CAPTURE_TIMEOUT_MS, DEFAULT_MEMCORE_LOADER_TIMEOUT_MS,
@@ -96,9 +96,9 @@ import {
   findProjectRoot,
   writeStatusFile, appendAutoConsolidationLog, appendMemoryUsageLog,
   acquireAutoConsolidationLock, releaseAutoConsolidationLock, killProcessTree,
-  getToolNames, containsConsolidationWriteTool, classifyMemoryTools, pruneToMax,
+  getToolNames, classifyMemoryTools, pruneToMax,
 } from "./session-policy/pure-helpers.ts"
-import { findSessionID, getAgentIdentity, getActiveModel, getActiveAgent, getPromptRouting, normalizeModelSpec, resolveSessionPromptRoutingWithGating, resolveLoopGuardRoutingWithGating, maybeWarnWriteAuthorityWithGating, resolveTaskSwapTarget, getPromptRoutingFromToolHook } from "./session-policy/routing.ts"
+import { findSessionID, getAgentIdentity, getActiveModel, getActiveAgent, getPromptRouting, normalizeModelSpec, resolveSessionPromptRoutingWithGating, resolveLoopGuardRoutingWithGating, resolveTaskSwapTarget, getPromptRoutingFromToolHook } from "./session-policy/routing.ts"
 import { maybeInjectMemcoreWithGating, persistWorkedInterventionWithGating, maybeRecordModelFailureWithGating, queuePendingInterventionWithGating, confirmPendingInterventionsWithGating } from "./session-policy/interventions.ts"
 import { maybeFileWorkedExampleWithGating, maybeFileWorkedExamplesFromMessageWithGating } from "./session-policy/worked-example.ts"
 import { maybeRecordCapabilityTupleWithGating, maybeCaptureCalibrationTupleWithGating } from "./session-policy/capability.ts"
@@ -277,7 +277,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
   const retryEnabled = cfgBool("retry.enabled", DEFAULT_RETRY_ENABLED)
   const retryDisabledAgents = toLowerSet(cfgCSV("retry.disabledAgents"))
   const retryDisabledModes = toLowerSet(cfgCSV("retry.disabledModes"))
-  const consolidationWriteGuardEnabled = cfgBool("consolidation.writeGuardEnabled", true)
   const sourceCaptureVerifyEnabled = cfgBool("sourceCapture.verifyEnabled", true)
   // Automatic consolidation ("consolidate in the background"): ON by default.
   // It triggers memory writes in the background, throttled by the idle delay,
@@ -292,11 +291,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
   const autoConsolidationCooldownMs = cfgNum("consolidation.auto.cooldownMs", DEFAULT_AUTOCONSOLIDATION_COOLDOWN_MS)
   const autoConsolidationTimeoutMs = cfgNum("commands.autoConsolidation.timeoutMs", DEFAULT_AUTOCONSOLIDATION_TIMEOUT_MS)
   const autoConsolidationMaxTrackedSessions = cfgNum("consolidation.auto.maxTrackedSessions", DEFAULT_AUTOCONSOLIDATION_MAX_TRACKED_SESSIONS)
-  const allowedConsolidationWriters = new Set(
-    cfgCSV("consolidation.allowedWriters").length > 0
-      ? cfgCSV("consolidation.allowedWriters").map((item) => item.toLowerCase())
-      : DEFAULT_ALLOWED_CONSOLIDATION_WRITERS,
-  )
 
   // --- retry state ---
   // Allow one follow-up retry when the first retry still ends mid-intent,
@@ -794,7 +788,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
       spiralInvestigateThreshold,
       spiralReversalThreshold,
       spiralMaxInterventions,
-      consolidationWriteGuardEnabled,
       sourceCaptureVerifyEnabled,
       autoConsolidationEnabled,
       autoConsolidationOnIdle,
@@ -804,7 +797,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
       autoConsolidationCooldownMs,
       autoConsolidationTimeoutMs,
       autoConsolidationMaxTrackedSessions,
-      allowedConsolidationWriters: [...allowedConsolidationWriters],
     })}`,
   )
 
@@ -824,7 +816,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
     agent?: string
     model?: { providerID: string; modelID: string }
   }>()
-  const warnedConsolidationWriteMessageIDs = new Set<string>()
   const memoryReadSessions = new Set<string>()
   const sourceCaptureBySession = new Map<string, { totalEvents: number; lastEvent: string; lastAt: string; lastSuccess: boolean }>()
   // Tracks post-compaction mem-core reinjection events per session.
@@ -848,7 +839,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
     retryEnabled,
     retryDisabledAgents,
     retryDisabledModes,
-    consolidationWriteGuardEnabled,
     sourceCaptureVerifyEnabled,
     autoConsolidationEnabled,
     autoConsolidationOnIdle,
@@ -858,7 +848,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
     autoConsolidationCooldownMs,
     autoConsolidationTimeoutMs,
     autoConsolidationMaxTrackedSessions,
-    allowedConsolidationWriters,
     spiralGuardEnabled,
     retriedParentBySession,
     retriesTotalBySession,
@@ -933,7 +922,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
       retryDisabledAgents: [...retryDisabledAgents],
       retryDisabledModes: [...retryDisabledModes],
       checkpointDisabledAgents: [...checkpointDisabledAgents],
-      consolidationWriteGuardEnabled,
       sourceCaptureVerifyEnabled,
       autoConsolidationEnabled,
       autoConsolidationOnIdle,
@@ -942,7 +930,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
       autoConsolidationMessageThreshold,
       autoConsolidationCooldownMs,
       autoConsolidationTimeoutMs,
-      allowedConsolidationWriters: [...allowedConsolidationWriters],
       sessions: {
         checkpointed: checkpointedSessions.size,
         memcoreInjected: memcoreInjectionBySession.size,
@@ -1017,22 +1004,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
     })
   }
 
-  async function maybeWarnWriteAuthority(sid: string, msg: MessageWithParts): Promise<boolean> {
-    return maybeWarnWriteAuthorityWithGating({
-      sid,
-      msg,
-      consolidationWriteGuardEnabled,
-      warnedConsolidationWriteMessageIDs,
-      allowedConsolidationWriters,
-      client,
-      directory,
-      getToolNames,
-      containsConsolidationWriteTool,
-      getAgentIdentity,
-      getPromptRouting,
-      writeStatusFile: (extra) => writeStatusFile(projectRoot, statusSnapshot(extra)),
-    })
-  }
 
   async function verifySourceCapture(sid: string, eventType: string): Promise<void> {
     return verifySourceCaptureWithGating({
@@ -1229,7 +1200,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
     context,
     directory,
     noteAutoConsolidationActivity,
-    maybeWarnWriteAuthority,
     verifySourceCapture,
     issueRetry,
     maybeSpiralNudge,
