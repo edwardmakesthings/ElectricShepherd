@@ -10,6 +10,7 @@ import {
   normalizeOptional,
   normalizeWingList,
   parseIDsFromFile,
+  normalizeDryRunArg,
   resolveMemPalaceMCPUrl,
   runDrawerBatch,
   summarizeFailures,
@@ -76,8 +77,8 @@ export default tool({
       .describe("Optional source room filter when selecting by source_wing/source_wings."),
     dry_run: tool.schema
       .boolean()
-      .default(false)
-      .describe("When true, prints planned deletions without deleting."),
+      .optional()
+      .describe("Preview without writing (default true). Pass false only after explicit operator confirmation."),
     fail_fast: tool.schema
       .boolean()
       .default(false)
@@ -157,11 +158,13 @@ export default tool({
         drawerIDs = [...scoped];
       }
 
+      const dryRun = normalizeDryRunArg(args);
+
       if (drawerIDs.length === 0) {
         return JSON.stringify(
           {
             ok: true,
-            dry_run: args.dry_run !== false,
+            dry_run: dryRun,
             requested: 0,
             source_wing: sourceWing || undefined,
             source_wings: useScope ? [...scopeWings] : undefined,
@@ -173,7 +176,7 @@ export default tool({
         );
       }
 
-      if (args.dry_run) {
+      if (dryRun) {
         return JSON.stringify(
           {
             ok: true,

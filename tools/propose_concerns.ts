@@ -29,6 +29,7 @@
 import { tool } from "@opencode-ai/plugin";
 import { asObject, asText, createPalaceClient, parseFacts } from "../adapter/palace-tools.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
+import { normalizeDryRunArg } from "../core/substrate.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
 
 declare const process: {
@@ -104,13 +105,14 @@ export async function runConcernProposal(args: {
   call: CallTool;
   synthesisId: string;
   docIds: string[];
+  dry_run?: boolean;
   dryRun?: boolean;
 }): Promise<ConcernProposalReport> {
   const synthesisId = String(args.synthesisId || "").trim();
   if (!synthesisId) throw new Error("propose_concerns: synthesis_id is required");
   const docIds = [...new Set((args.docIds || []).map((id) => String(id).trim()).filter(Boolean))];
   if (docIds.length === 0) throw new Error("propose_concerns: at least one doc_id is required");
-  const dryRun = args.dryRun !== false;
+  const dryRun = normalizeDryRunArg(args);
 
   // Endpoint validation — shared by preview and apply. One bounded fan-out of one-hop
   // reads per endpoint; no room scans, no content reads beyond a desc lookup for the

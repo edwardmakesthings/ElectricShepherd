@@ -8,6 +8,7 @@ import {
   sliceVerbatimBetween,
   verifyVerbatimExcerpt,
 } from "../adapter/palace-tools.ts";
+import { normalizeDryRunArg } from "../core/substrate.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
 
@@ -56,7 +57,7 @@ export default tool({
     const targetWing = String(args.target_wing || "").trim();
     const targetRoom = String(args.target_room || "").trim();
     const mode = args.mode === "excerpt" ? "excerpt" : "move";
-    const dryRun = args.dry_run !== false;
+    const dryRun = normalizeDryRunArg(args);
 
     if (!drawerID) throw new Error("relocate_memory: drawer_id is required");
     if (!targetWing || !targetRoom) throw new Error("relocate_memory: target_wing and target_room are required");

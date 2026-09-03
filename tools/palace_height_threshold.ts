@@ -1,5 +1,6 @@
 import { tool } from "@opencode-ai/plugin";
 import { asObject, createPalaceClient, parseRows } from "../adapter/palace-tools.ts";
+import { collectDrawerIDsByScope } from "../core/substrate.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
 
@@ -97,25 +98,12 @@ async function collectScopedDrawerIDs(
   room: string,
   limit: number,
 ): Promise<string[]> {
-  const ids: string[] = [];
-  let offset = 0;
-  const pageSize = Math.min(100, limit);
-
-  while (ids.length < limit) {
-    const listed = await call("list_drawers", { wing, room: room || undefined, limit: pageSize, offset });
-    const rows = parseRows(listed);
-    if (rows.length === 0) break;
-    for (const row of rows) {
-      const id = String((row as Record<string, unknown>).drawer_id || "").trim();
-      if (!id) continue;
-      ids.push(id);
-      if (ids.length >= limit) break;
-    }
-    if (rows.length < pageSize) break;
-    offset += rows.length;
-  }
-
-  return [...new Set(ids)];
+  return collectDrawerIDsByScope(
+    (payload) => call("list_drawers", payload) as Promise<Record<string, unknown>>,
+    wing,
+    room,
+    { maxIDs: limit },
+  );
 }
 
 function uniqueIDs(value: unknown): string[] {

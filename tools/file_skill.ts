@@ -28,6 +28,7 @@ import { tool } from "@opencode-ai/plugin";
 import { SKILL_DOMAINS, type SkillDomain } from "../adapter/memgraph.ts";
 import { asObject, asText, createPalaceClient, parseRows, parseTaxonomy } from "../adapter/palace-tools.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
+import { normalizeDryRunArg } from "../core/substrate.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
 import { pickPurposeRoom } from "./ingest_docs.ts";
 
@@ -73,6 +74,7 @@ export async function runSkillFiling(args: {
   room?: string;
   /** Phase 12: es-domain axis. Closed vocabulary — unknown values are rejected at write time. */
   domain?: SkillDomain | string;
+  dry_run?: boolean;
   dryRun?: boolean;
 }): Promise<SkillFilingReport> {
   const wing = String(args.wing || "").trim();
@@ -88,7 +90,7 @@ export async function runSkillFiling(args: {
   // TEMPORARY CONSERVATIVE DEFAULT until project-domain inference is added (spec wants
   // `general` used sparingly; an explicit arg is the only way to opt out for now).
   const domain = (rawDomain || "general") as SkillDomain;
-  const dryRun = args.dryRun !== false;
+  const dryRun = normalizeDryRunArg(args);
 
   const taxonomy = parseTaxonomy(await args.call("get_taxonomy", {}));
   const wingEntry = taxonomy.find((entry) => entry.wing === wing);

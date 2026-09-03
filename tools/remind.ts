@@ -24,7 +24,9 @@
  */
 
 import { tool } from "@opencode-ai/plugin";
+import { runCheckpointWrite } from "../core/operation.ts";
 import { asObject, asText, createPalaceClient } from "../adapter/palace-tools.ts";
+import { normalizeDryRunArg } from "../core/substrate.ts";
 import {
   REMINDER_EXPIRES_AT_PREDICATE,
   REMINDER_SATISFIED_AT_PREDICATE,
@@ -110,6 +112,7 @@ export async function runRemind(args: {
   /** update/close: explicit reminder drawer id. */
   drawerId?: string;
   addedBy?: string;
+  dry_run?: boolean;
   dryRun?: boolean;
   now?: () => Date;
 }): Promise<RemindReport> {
@@ -121,7 +124,7 @@ export async function runRemind(args: {
   const wing = asText(args.wing).trim();
   if (!wing) throw new Error("remind: wing is required (the project wing the reminder belongs to)");
   const room = asText(args.room).trim() || REMINDERS_ROOM;
-  const dryRun = args.dryRun !== false;
+  const dryRun = normalizeDryRunArg(args);
   const nowIso = (args.now ?? (() => new Date()))().toISOString();
 
   if (action === "create") {
@@ -159,19 +162,34 @@ export async function runRemind(args: {
       };
     }
 
-    // APPLY. The drawer id is not known until add_drawer returns, so edges are
+    // APPLY. The drawer id is not known until checkpoint returns, so edges are
     // written sequentially after it. Each step is best-effort and counted.
     let drawerId = "";
     try {
-      const created = asObject(await args.call("add_drawer", {
-        wing,
-        room,
-        content: what,
-        source_file: `remind:${condition}`,
-        added_by: asText(args.addedBy).trim() || "electric-shepherd-remind",
-      }));
-      drawerId = asText(created.drawer_id || created.id).trim();
-      if (!drawerId) throw new Error("add_drawer returned no drawer_id");
+      const checkpoint = await runCheckpointWrite(args.call, {
+        items: [{
+          wing,
+          room,
+          content: what,
+          source_file: `remind:${condition}`,
+          added_by: asText(args.addedBy).trim() || "electric-shepherd-remind",
+        }],
+      }, { dry_run: false });
+      const raw = asObject(checkpoint.raw);
+      const rows = [
+        ...(Array.isArray(raw.results) ? raw.results : []),
+        ...(Array.isArray(raw.items) ? raw.items : []),
+      ].map(asObject);
+      drawerId = asText(
+        raw.drawer_id
+          || raw.id
+          || rows.find((row) => row.ok !== false && asText(row.drawer_id || row.id).trim())?.drawer_id
+          || rows.find((row) => row.ok !== false && asText(row.drawer_id || row.id).trim())?.id,
+      ).trim();
+      if (!checkpoint.ok) {
+        throw new Error(checkpoint.error || checkpoint.failure_summary || "checkpoint failed");
+      }
+      if (!drawerId) throw new Error("checkpoint returned no drawer_id");
       steps[0].status = "done";
       steps[0].detail = `${what} -> ${drawerId}`;
     } catch (err) {

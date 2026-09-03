@@ -32,6 +32,7 @@
 import { tool } from "@opencode-ai/plugin";
 import { asText } from "../adapter/palace-tools.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
+import { normalizeDryRunArg } from "../core/substrate.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
 
 declare const process: {
@@ -99,6 +100,7 @@ export async function runOutcomeRecord(args: {
   nodeIds: string[];
   outcome: string;
   cycleRef?: string;
+  dry_run?: boolean;
   dryRun?: boolean;
   now?: () => Date;
   /** Phase 16: optional calibration tuple for the unit this outcome closes. When all
@@ -125,7 +127,7 @@ export async function runOutcomeRecord(args: {
     );
   }
 
-  const dryRun = args.dryRun !== false;
+  const dryRun = normalizeDryRunArg(args);
   const validFrom = (args.now ?? (() => new Date()))().toISOString();
   const cycleRef = asText(args.cycleRef).trim() || undefined;
 

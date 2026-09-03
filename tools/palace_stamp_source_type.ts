@@ -25,6 +25,7 @@ import {
   parseTaxonomy,
 } from "../adapter/palace-tools.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
+import { normalizeDryRunArg } from "../core/substrate.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
 import { mapLimit } from "./palace_flock_status.ts";
 
@@ -212,13 +213,14 @@ export async function runSourceTypeBackfill(args: {
   maxPages?: number;
   maxRooms?: number;
   concurrency?: number;
+  dry_run?: boolean;
   dryRun?: boolean;
 }): Promise<StampReport> {
   const pageSize = clampNumber(args.pageSize, DEFAULT_PAGE_SIZE, 1, MAX_PAGE_SIZE);
   const maxPages = clampNumber(args.maxPages, DEFAULT_MAX_PAGES, 1, MAX_MAX_PAGES);
   const maxRooms = clampNumber(args.maxRooms, DEFAULT_MAX_ROOMS, 1, MAX_MAX_ROOMS);
   const concurrency = clampNumber(args.concurrency, DEFAULT_CONCURRENCY, 1, MAX_CONCURRENCY);
-  const dryRun = args.dryRun !== false;
+  const dryRun = normalizeDryRunArg(args);
 
   const taxonomy = parseTaxonomy(await args.call("get_taxonomy", {}));
   const wingEntry = taxonomy.find((entry) => entry.wing === args.wing);

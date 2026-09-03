@@ -42,6 +42,7 @@
 import { tool } from "@opencode-ai/plugin";
 import { asObject, asText, createPalaceClient, drawerContentFrom, parseFacts, parseTaxonomy } from "../adapter/palace-tools.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
+import { normalizeDryRunArg } from "../core/substrate.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
 import { SKILLS_ROOM, SKILL_LIKE_STEMS } from "./file_skill.ts";
 import { pickPurposeRoom } from "./ingest_docs.ts";
@@ -158,12 +159,13 @@ export async function runSkillPromotion(args: {
   skillId: string;
   sharedWing?: string;
   sharedRoom?: string;
+  dry_run?: boolean;
   dryRun?: boolean;
 }): Promise<SkillPromotionReport> {
   const skillId = String(args.skillId || "").trim();
   if (!skillId) throw new Error("promote_skill: skill_id is required");
   const sharedWing = String(args.sharedWing || DEFAULT_SHARED_WING).trim() || DEFAULT_SHARED_WING;
-  const dryRun = args.dryRun !== false;
+  const dryRun = normalizeDryRunArg(args);
 
   // Read the source drawer once (content + wing/room) and verify it is a real skill.
   let source: Record<string, unknown>;

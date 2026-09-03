@@ -63,11 +63,10 @@ import { loadRuntimeEnv } from "../scripts/runtime-env.ts"
 
 import { createHookHeadHandlers } from "./session-policy/hook-head.ts"
 import { createToolRegistry } from "./session-policy/registry.ts"
-import { getText, hasFinalReviewSignal, hasActionPart, isAssistantStop, isSerenaMemoryToolTurn } from "./session-policy/analysis.ts"
 import { buildSourceCaptureEnv, buildConsolidationEnv } from "./session-policy/env.ts"
 import type { MessageWithParts } from "./session-policy/constants.ts"
 import {
-  AUTO_RETRY_MARKER, CHECKPOINT_MARKER, MIN_USEFUL_TEXT, START_BANNER,
+  AUTO_RETRY_MARKER, CHECKPOINT_MARKER, START_BANNER,
   MAX_RETRIES_PER_PARENT, DEFAULT_MAX_RETRIES_PER_SESSION, STATUS_DIR, STATUS_FILE,
   AUTOCONSOLIDATION_LOG_FILE, MEMCORE_CONTEXT_LOG_FILE, MEMORY_USAGE_LOG_FILE, EVENT_LOG_FILE,
   TURN_GUARD_INSTANCE_DIRS_KEY, TURN_GUARD_INSTANCE_RESET_KEY, DEFAULT_MEMCORE_MAX_CHARS,
@@ -96,7 +95,7 @@ import {
   findProjectRoot,
   writeStatusFile, appendAutoConsolidationLog, appendMemoryUsageLog,
   acquireAutoConsolidationLock, releaseAutoConsolidationLock, killProcessTree,
-  getToolNames, classifyMemoryTools, pruneToMax,
+  getToolNames, classifyMemoryTools, pruneToMax, sortByCreated, unwrapListResult, unwrapMessageResult,
 } from "./session-policy/pure-helpers.ts"
 import { findSessionID, getAgentIdentity, getActiveModel, getActiveAgent, getPromptRouting, normalizeModelSpec, resolveSessionPromptRoutingWithGating, resolveLoopGuardRoutingWithGating, resolveTaskSwapTarget, getPromptRoutingFromToolHook } from "./session-policy/routing.ts"
 import { maybeInjectMemcoreWithGating, persistWorkedInterventionWithGating, maybeRecordModelFailureWithGating, queuePendingInterventionWithGating, confirmPendingInterventionsWithGating } from "./session-policy/interventions.ts"
@@ -112,80 +111,6 @@ import type { TurnGuardContext } from "./session-policy/context.ts"
 // loadRuntimeEnv finds ElectricShepherd/.env (or the sibling docker/.env) and
 // scripts resolve their sibling adapter modules.
 const ESHEPHERD_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
-
-
-
-function hasUsefulPayload(msg: MessageWithParts): boolean {
-  const parts = msg.parts ?? []
-  const text = getText(parts)
-  if (text.length >= MIN_USEFUL_TEXT) return true
-  // Short but still useful status/blocker responses should not trigger retries.
-  if (/no files found|not found|blocked|error|unable|cannot|next step|i will/i.test(text)) return true
-  if (text.length >= 8) return true
-  if (parts.some((p) => p?.type === "patch")) return true
-  if (parts.some((p) => p?.type === "file")) return true
-  return false
-}
-
-
-
-function isCapabilityQuestion(text: string): boolean {
-  const normalized = String(text || "").trim().toLowerCase()
-  if (!normalized || !normalized.includes("?")) return false
-  return /^(are you able|can you|could you|are you capable|do you have|are you able to)\b/.test(normalized)
-}
-
-// Mode B premature stop: the model announced an action (or trailed off on a
-// colon) but emitted finish=stop with no tool/patch/file part executing it.
-// e.g. "Now let me verify the delete button in the Control Panel:" then nothing.
-function endsMidIntent(msg: MessageWithParts): boolean {
-  const parts = msg.parts ?? []
-  if (hasActionPart(msg)) return false
-  const text = getText(parts).trim()
-  if (!text) return false
-  const lastLine = (text.split(/\n/).pop() ?? "").trim()
-  const danglingColon = /[:\uFF1A]\s*$/.test(text)
-  const announcesAction =
-    /\b(let me|let's|now (?:i|we)|i'?ll|i will|i'm going to|going to|next,?\s+i|then i|first,? i|i need to|i'?m going to|let me now)\b/i.test(
-      lastLine,
-    )
-  return danglingColon || announcesAction
-}
-
-
-function isAssistantToolCallFinish(msg: MessageWithParts): boolean {
-  return msg?.info?.role === "assistant" && msg?.info?.finish === "tool-calls"
-}
-
-
-function partTypes(msg: MessageWithParts | null | undefined): string {
-  const parts = msg?.parts ?? []
-  return parts.map((p: any) => String(p?.type ?? "?")).join(",") || "none"
-}
-
-function sortByCreated(messages: MessageWithParts[]): MessageWithParts[] {
-  return [...messages].sort((a, b) => {
-    const ta = Number(a?.info?.time?.created ?? 0)
-    const tb = Number(b?.info?.time?.created ?? 0)
-    return ta - tb
-  })
-}
-
-function unwrapListResult(res: any): MessageWithParts[] {
-  if (Array.isArray(res?.data)) return res.data
-  if (Array.isArray(res)) return res
-  return []
-}
-
-function unwrapMessageResult(res: any): MessageWithParts | null {
-  if (res?.data && typeof res.data === "object") return res.data
-  if (res && typeof res === "object" && res.info) return res
-  return null
-}
-
-
-
-
 
 export const TurnGuard = async ({ client, directory }: any) => {
   const rootDirectory = normalizePathForHost(directory || process.cwd())

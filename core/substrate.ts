@@ -38,6 +38,12 @@ export function normalizeIDs(ids: unknown): string[] {
     .filter(Boolean);
 }
 
+export function normalizeDryRunArg(args: { dry_run?: boolean; dryRun?: boolean }): boolean {
+  if (typeof args.dry_run === "boolean") return args.dry_run;
+  if (typeof args.dryRun === "boolean") return args.dryRun;
+  return true;
+}
+
 export function parseIDsFromFile(path: string, cwd: string): string[] {
   const absolute = resolve(cwd, path);
   const raw = readFileSync(absolute, "utf8").trim();
@@ -165,7 +171,13 @@ export async function collectDrawerIDsByScope(
   listToolCall: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>,
   sourceWing: string,
   sourceRoom: string,
+  options: { maxIDs?: number } = {},
 ): Promise<string[]> {
+  const maxIDs = typeof options.maxIDs === "number" && Number.isFinite(options.maxIDs)
+    ? Math.max(0, Math.floor(options.maxIDs))
+    : undefined;
+  if (maxIDs === 0) return [];
+
   const ids = new Set<string>();
   let offset = 0;
   const limit = 100;
@@ -182,7 +194,11 @@ export async function collectDrawerIDsByScope(
     const rows = Array.isArray(listed?.drawers) ? listed.drawers : [];
     for (const row of rows) {
       const drawerID = normalizeOptional(row?.drawer_id);
-      if (drawerID) ids.add(drawerID);
+      if (!drawerID) continue;
+      ids.add(drawerID);
+      if (typeof maxIDs === "number" && ids.size >= maxIDs) {
+        return [...ids];
+      }
     }
     if (rows.length < limit) break;
     offset += rows.length;

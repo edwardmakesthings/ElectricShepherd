@@ -9,6 +9,7 @@ import {
   parseTaxonomy,
 } from "../adapter/palace-tools.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
+import { collectDrawerIDsByScope } from "../core/substrate.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
 
 declare const process: {
@@ -394,15 +395,14 @@ async function collectExactSourceIds(
   const out: string[] = [];
   for (const room of rooms) {
     if (room.total <= 0) continue;
-    const pageSize = 100;
-    for (let offset = 0; offset < room.total; offset += pageSize) {
-      const response = await call("list_drawers", { wing, room: room.room, limit: pageSize, offset });
-      const ids = parseRows(response)
-        .map((row) => asText(row.drawer_id || row.id).trim())
-        .filter(Boolean);
-      out.push(...ids);
-      if (ids.length < pageSize) break;
-    }
+    // Unbounded collect-all via the core primitive: it pages with its own fixed size
+    // until a short page — exactly the "collect every drawer in this room" contract.
+    const ids = await collectDrawerIDsByScope(
+      (payload) => call("list_drawers", payload) as Promise<Record<string, unknown>>,
+      wing,
+      room.room,
+    );
+    out.push(...ids);
   }
   return dedupe(out);
 }

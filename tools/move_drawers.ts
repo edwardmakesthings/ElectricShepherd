@@ -6,6 +6,7 @@ import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
 import {
   collectDrawerIDsByScope,
   classifyErrorKind,
+  normalizeDryRunArg,
   normalizeIDs,
   normalizeOptional,
   normalizeWingList,
@@ -159,7 +160,7 @@ export default tool({
       : [];
     const bridgeWing = normalizeOptional(args.bridge_wing) || "move-drawer-hop";
     const failFast = Boolean(args.fail_fast);
-    const dryRun = args.dry_run !== false;
+    const dryRun = normalizeDryRunArg(args);
 
     const ids = new Set<string>();
     for (const id of normalizeIDs(args.drawer_ids)) ids.add(id);

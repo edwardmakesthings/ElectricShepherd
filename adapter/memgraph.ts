@@ -23,6 +23,7 @@ export type MemgraphToolMap = {
   findMergeCandidates: string;
   findClosetLineageIssues: string;
   addDrawer: string;
+  checkpoint: string;
   updateDrawer: string;
   kgAdd: string;
   kgInvalidate: string;
@@ -67,6 +68,7 @@ const TOOL_BASE_NAMES: MemgraphToolMap = {
   findMergeCandidates: "find_merge_candidates",
   findClosetLineageIssues: "find_closet_lineage_issues",
   addDrawer: "add_drawer",
+  checkpoint: "checkpoint",
   updateDrawer: "update_drawer",
   kgAdd: "kg_add",
   kgInvalidate: "kg_invalidate",
@@ -1072,8 +1074,30 @@ export class MemgraphClient {
     content: string;
     source_file?: string;
     added_by?: string;
+    desc?: string;
   }) {
     return this.call("addDrawer", args as unknown as JsonMap);
+  }
+
+  checkpoint(args: {
+    items: Array<{
+      wing: string;
+      room: string;
+      content: string;
+      source_file?: string;
+      added_by?: string;
+      desc?: string;
+    }>;
+    dedup_threshold?: number;
+    added_by?: string;
+    diary?: {
+      agent_name?: string;
+      entry?: string;
+      topic?: string;
+      wing?: string;
+    };
+  }) {
+    return this.call("checkpoint", args as unknown as JsonMap);
   }
 
   updateDrawer(args: {
