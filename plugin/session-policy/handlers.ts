@@ -12,13 +12,14 @@ import {
   MAX_RETRIES_PER_PARENT, MIN_TERMINAL_MESSAGES_BEFORE_CHECKPOINT, CHECKPOINT_MODES,
 } from "./constants.ts"
 import { getPromptRouting, findSessionID, getAgentIdentity } from "./routing.ts"
+import { detectDeliberationSpiral, isDeliberationExemptPrompt } from "../../adapter/turn-guard-helpers.ts"
 import {
   getText, hasFinalReviewSignal, hasActionPart, isAssistantStop,
   isSerenaMemoryToolTurn,
 } from "./analysis.ts"
 import {
   getToolNames, classifyMemoryTools, appendMemoryUsageLog, writeStatusFile,
-  hasUsefulPayload, isCapabilityQuestion,
+  hasUsefulPayload, isCapabilityQuestion, endsMidIntent, isAssistantToolCallFinish, partTypes,
 } from "./pure-helpers.ts"
 
 
@@ -30,29 +31,44 @@ import {
 // entire function returns immediately — zero per-message overhead.
 // Retain as an opt-in safety net for providers that still mis-signal.
 // Returns true if a retry prompt was issued.
-const issueRetry = async (
-  sid: string,
-  last: MessageWithParts,
-  prev: MessageWithParts | null,
-): Promise<boolean> => {
-  if (!retryEnabled) return false
+export async function issueRetryWithGating(args: {
+  sid: string
+  last: MessageWithParts
+  prev: MessageWithParts | null
+  retryEnabled: boolean
+  retryDisabledModes: Set<string>
+  retryDisabledAgents: Set<string>
+  inspectedStopBySession: Map<string, Set<string>>
+  retriedParentBySession: Map<string, Map<string, number>>
+  retriesTotalBySession: Map<string, number>
+  retryChainBySession: Map<string, number>
+  maxRetriesPerSession: number
+  client: any
+  directory: string
+  getPromptRouting: (...candidates: Array<MessageWithParts | null | undefined>) => { agent?: string; model?: { providerID: string; modelID: string } }
+  confirmPendingInterventions: (args: { sid: string; confirmedKey?: string; model?: { providerID: string; modelID: string } | null; taskText: string }) => Promise<void>
+  maybeRecordModelFailure: (args: { sid: string; model?: { providerID: string; modelID: string } | null; taskText: string; event: "spiral" | "loop"; interventionLabel: "spiral-nudge" | "retry-nudge" | "loop-block"; interventionText: string }) => Promise<void>
+  queuePendingIntervention: (sid: string, key: string, label: string, text: string) => void
+}): Promise<boolean> {
+  const { sid, last, prev } = args
+  if (!args.retryEnabled) return false
   if (!isAssistantStop(last)) return false
 
   const currentMode = String(last?.info?.mode ?? "").trim().toLowerCase()
   const currentAgent = String(last?.info?.agent ?? "").trim().toLowerCase()
-  if (currentMode && retryDisabledModes.has(currentMode)) {
+  if (currentMode && args.retryDisabledModes.has(currentMode)) {
     return false
   }
-  if (currentAgent && retryDisabledAgents.has(currentAgent)) {
+  if (currentAgent && args.retryDisabledAgents.has(currentAgent)) {
     return false
   }
 
   const messageID = String(last?.info?.id ?? "")
   if (messageID) {
-    const inspected = inspectedStopBySession.get(sid) ?? new Set<string>()
+    const inspected = args.inspectedStopBySession.get(sid) ?? new Set<string>()
     if (inspected.has(messageID)) return false
     inspected.add(messageID)
-    inspectedStopBySession.set(sid, inspected)
+    args.inspectedStopBySession.set(sid, inspected)
   }
 
   const prevIsToolTurn = !!prev && isAssistantToolCallFinish(prev)
@@ -93,11 +109,12 @@ const issueRetry = async (
       `prevSerenaMemory=${String(prevWasSerenaMemory)})`
     )
     // Turn is genuinely complete — reset the retry chain counter for this session.
-    retryChainBySession.delete(sid)
+    args.retryChainBySession.delete(sid)
     // Phase 15 CREATE (success signal): a clean completion right after an
     // attempted nudge is deterministic evidence the intervention worked —
     // persist the pending patch(es); expire any that were not confirmed here.
-    void confirmPendingInterventions({ sid, confirmedKey: messageID, model: routing.model ?? null, taskText: parentText })
+    const routing = args.getPromptRouting(last, prev)
+    void args.confirmPendingInterventions({ sid, confirmedKey: messageID, model: routing.model ?? null, taskText: parentText })
     return false
   }
 
@@ -114,7 +131,7 @@ const issueRetry = async (
 
   // Chain counter: the authoritative bound against runaway retry chains.
   // Resets on consideredComplete or real user message (not injected prompts).
-  const chainCount = retryChainBySession.get(sid) ?? 0
+  const chainCount = args.retryChainBySession.get(sid) ?? 0
   if (chainCount >= MAX_RETRIES_PER_PARENT) {
     console.log(
       `[turn-guard] skip retry in ${sid}; retry chain cap ${MAX_RETRIES_PER_PARENT} reached`,
@@ -122,24 +139,24 @@ const issueRetry = async (
     return false
   }
 
-  const retriedParents = retriedParentBySession.get(sid) ?? new Map<string, number>()
+  const retriedParents = args.retriedParentBySession.get(sid) ?? new Map<string, number>()
   const retryCount = retriedParents.get(retryKey) ?? 0
   if (retryCount >= MAX_RETRIES_PER_PARENT) return false
 
   // Keying-independent per-session ceiling: bounds the entire retry chain even
   // when retryKey shifts every generation (see DEFAULT_MAX_RETRIES_PER_SESSION).
-  const sessionRetries = retriesTotalBySession.get(sid) ?? 0
-  if (sessionRetries >= maxRetriesPerSession) {
+  const sessionRetries = args.retriesTotalBySession.get(sid) ?? 0
+  if (sessionRetries >= args.maxRetriesPerSession) {
     console.log(
-      `[turn-guard] skip retry in ${sid}; per-session retry cap ${maxRetriesPerSession} reached`,
+      `[turn-guard] skip retry in ${sid}; per-session retry cap ${args.maxRetriesPerSession} reached`,
     )
     return false
   }
 
   retriedParents.set(retryKey, retryCount + 1)
-  retriedParentBySession.set(sid, retriedParents)
-  retriesTotalBySession.set(sid, sessionRetries + 1)
-  retryChainBySession.set(sid, chainCount + 1)
+  args.retriedParentBySession.set(sid, retriedParents)
+  args.retriesTotalBySession.set(sid, sessionRetries + 1)
+  args.retryChainBySession.set(sid, chainCount + 1)
 
   const retryReason = memoryOnlyLikelyPremature
     ? "memory checkpoint without concrete continuation"
@@ -157,7 +174,7 @@ const issueRetry = async (
     `prevFinish=${String(prev?.info?.finish ?? "")} issuing one auto-retry`
   )
 
-  const routing = getPromptRouting(last, prev)
+  const routing = args.getPromptRouting(last, prev)
   const activeModel = routing.model
   if (activeModel) {
     console.log(
@@ -189,9 +206,9 @@ const issueRetry = async (
     body.model = activeModel
   }
 
-  await client.session.prompt({
+  await args.client.session.prompt({
     path: { id: sid },
-    query: { directory },
+    query: { directory: args.directory },
     body,
   })
 
@@ -201,7 +218,7 @@ const issueRetry = async (
   // knowledge only if confirmPendingInterventions later proves it worked (the
   // next stop being considered complete). Fire-and-forget — best-effort.
   const retryTaskText = prevIsUser ? parentText : getText(last.parts ?? [])
-  void maybeRecordModelFailure({
+  void args.maybeRecordModelFailure({
     sid,
     model: activeModel ?? null,
     taskText: retryTaskText,
@@ -209,7 +226,7 @@ const issueRetry = async (
     interventionLabel: "retry-nudge",
     interventionText: String(body.parts[0].text),
   })
-  queuePendingIntervention(sid, messageID, "retry-nudge", String(body.parts[0].text))
+  args.queuePendingIntervention(sid, messageID, "retry-nudge", String(body.parts[0].text))
 
   return true
 }
@@ -218,35 +235,52 @@ const issueRetry = async (
 // (no useful output / mid-intent); this owns the opposite failure — a finish=stop
 // turn dense with announced-but-unexecuted investigation and zero action parts.
 // Fires independently of retryEnabled.
-const maybeSpiralNudge = async (
-  sid: string,
-  last: MessageWithParts,
-  prev: MessageWithParts | null,
-): Promise<boolean> => {
-  if (!spiralGuardEnabled) return false
+export async function maybeSpiralNudgeWithGating(args: {
+  sid: string
+  last: MessageWithParts
+  prev: MessageWithParts | null
+  spiralGuardEnabled: boolean
+  spiralGuardDisabledModes: Set<string>
+  spiralGuardDisabledAgents: Set<string>
+  spiralExemptProviders: Set<string>
+  spiralExemptModelPrefixes: Set<string>
+  spiralExemptReflection: boolean
+  spiralInvestigateThreshold: number
+  spiralReversalThreshold: number
+  spiralMaxInterventions: number
+  spiralNudgedBySession: Map<string, number>
+  spiralInspectedBySession: Map<string, Set<string>>
+  client: any
+  directory: string
+  getPromptRouting: (...candidates: Array<MessageWithParts | null | undefined>) => { agent?: string; model?: { providerID: string; modelID: string } }
+  maybeRecordModelFailure: (args: { sid: string; model?: { providerID: string; modelID: string } | null; taskText: string; event: "spiral" | "loop"; interventionLabel: "spiral-nudge" | "retry-nudge" | "loop-block"; interventionText: string }) => Promise<void>
+  queuePendingIntervention: (sid: string, key: string, label: string, text: string) => void
+}): Promise<boolean> {
+  const { sid, last, prev } = args
+  if (!args.spiralGuardEnabled) return false
   if (!isAssistantStop(last)) return false
 
   const messageID = String(last?.info?.id ?? "")
   if (messageID) {
-    const inspected = spiralInspectedBySession.get(sid) ?? new Set<string>()
+    const inspected = args.spiralInspectedBySession.get(sid) ?? new Set<string>()
     if (inspected.has(messageID)) return false
     inspected.add(messageID)
-    spiralInspectedBySession.set(sid, inspected)
+    args.spiralInspectedBySession.set(sid, inspected)
   }
 
   const currentMode = String(last?.info?.mode ?? "").trim().toLowerCase()
   const currentAgent = String(last?.info?.agent ?? "").trim().toLowerCase()
-  if (currentMode && spiralGuardDisabledModes.has(currentMode)) return false
-  if (currentAgent && spiralGuardDisabledAgents.has(currentAgent)) return false
+  if (currentMode && args.spiralGuardDisabledModes.has(currentMode)) return false
+  if (currentAgent && args.spiralGuardDisabledAgents.has(currentAgent)) return false
 
   // Cloud models don't spiral the way local models do — skip them by default.
-  const spiralRouting = getPromptRouting(last, prev)
+  const spiralRouting = args.getPromptRouting(last, prev)
   const spiralProvider = spiralRouting.model?.providerID?.toLowerCase() ?? ""
   const spiralModelID = spiralRouting.model?.modelID?.toLowerCase() ?? ""
-  if (spiralProvider && spiralExemptProviders.has(spiralProvider)) return false
+  if (spiralProvider && args.spiralExemptProviders.has(spiralProvider)) return false
   if (
     spiralModelID &&
-    Array.from(spiralExemptModelPrefixes).some((prefix) => spiralModelID.startsWith(prefix))
+    Array.from(args.spiralExemptModelPrefixes).some((prefix) => spiralModelID.startsWith(prefix))
   ) {
     return false
   }
@@ -263,7 +297,7 @@ const maybeSpiralNudge = async (
 
   // Explicit reflection/explanation asks are supposed to be long and tool-free.
   const prevIsUser = prev?.info?.role === "user"
-  if (spiralExemptReflection && prevIsUser && isDeliberationExemptPrompt(parentText)) {
+  if (args.spiralExemptReflection && prevIsUser && isDeliberationExemptPrompt(parentText)) {
     return false
   }
 
@@ -271,24 +305,24 @@ const maybeSpiralNudge = async (
   const decision = detectDeliberationSpiral({
     text,
     hasActionPart: hasActionPart(last),
-    investigateThreshold: spiralInvestigateThreshold,
-    reversalThreshold: spiralReversalThreshold,
+    investigateThreshold: args.spiralInvestigateThreshold,
+    reversalThreshold: args.spiralReversalThreshold,
   })
   if (!decision.isSpiral) return false
 
-  const used = spiralNudgedBySession.get(sid) ?? 0
-  if (used >= spiralMaxInterventions) {
+  const used = args.spiralNudgedBySession.get(sid) ?? 0
+  if (used >= args.spiralMaxInterventions) {
     console.log(
-      `[turn-guard] spiral guard: budget ${spiralMaxInterventions} spent in ${sid}; letting it through`,
+      `[turn-guard] spiral guard: budget ${args.spiralMaxInterventions} spent in ${sid}; letting it through`,
     )
     return false
   }
-  spiralNudgedBySession.set(sid, used + 1)
+  args.spiralNudgedBySession.set(sid, used + 1)
 
   console.log(
     `[turn-guard] spiral detected sid=${sid} msg=${messageID || "?"} ` +
       `investigate=${decision.investigateCount} reversal=${decision.reversalCount} ` +
-      `nudge=${used + 1}/${spiralMaxInterventions}`,
+      `nudge=${used + 1}/${args.spiralMaxInterventions}`,
   )
 
   const routing = spiralRouting
@@ -313,9 +347,9 @@ const maybeSpiralNudge = async (
   if (routing.agent) body.agent = routing.agent
   if (routing.model) body.model = routing.model
 
-  await client.session.prompt({
+  await args.client.session.prompt({
     path: { id: sid },
-    query: { directory },
+    query: { directory: args.directory },
     body,
   })
 
@@ -323,7 +357,7 @@ const maybeSpiralNudge = async (
   // intervention text is only QUEUED — it becomes durable knowledge only if
   // confirmPendingInterventions later proves it worked (the next stop being
   // considered complete by issueRetry's predicates). Fire-and-forget — best-effort.
-  void maybeRecordModelFailure({
+  void args.maybeRecordModelFailure({
     sid,
     model: routing.model ?? null,
     taskText: spiralTaskText,
@@ -331,20 +365,30 @@ const maybeSpiralNudge = async (
     interventionLabel: "spiral-nudge",
     interventionText: String(body.parts[0].text),
   })
-  queuePendingIntervention(sid, messageID, "spiral-nudge", String(body.parts[0].text))
+  args.queuePendingIntervention(sid, messageID, "spiral-nudge", String(body.parts[0].text))
 
   return true
 }
 
 // Returns true if a checkpoint prompt was issued. Idle-only, once per session,
 // and only on a genuinely complete turn so it never fires over a stall.
-const maybeCheckpoint = async (sid: string, last: MessageWithParts): Promise<boolean> => {
-  if (checkpointedSessions.has(sid)) return false
+export async function maybeCheckpointWithGating(args: {
+  sid: string
+  last: MessageWithParts
+  checkpointedSessions: Set<string>
+  terminalCountBySession: Map<string, number>
+  checkpointDisabledAgents: Set<string>
+  client: any
+  directory: string
+  getPromptRouting: (...candidates: Array<MessageWithParts | null | undefined>) => { agent?: string; model?: { providerID: string; modelID: string } }
+}): Promise<boolean> {
+  const { sid, last } = args
+  if (args.checkpointedSessions.has(sid)) return false
 
   const mode = String(last?.info?.mode ?? "")
   if (!CHECKPOINT_MODES.has(mode)) return false
 
-  const count = terminalCountBySession.get(sid) ?? 0
+  const count = args.terminalCountBySession.get(sid) ?? 0
   if (count < MIN_TERMINAL_MESSAGES_BEFORE_CHECKPOINT) return false
 
   // Only checkpoint after a clean, SUCCESSFUL turn — a real stop with useful
@@ -358,14 +402,14 @@ const maybeCheckpoint = async (sid: string, last: MessageWithParts): Promise<boo
 
   // Utility subagents never checkpoint: they do no durable work of their own,
   // and a checkpoint prompt would only burn a turn on them.
-  const routing = getPromptRouting(last)
+  const routing = args.getPromptRouting(last)
   const currentAgent = String(routing.agent ?? "").trim().toLowerCase()
-  if (currentAgent && checkpointDisabledAgents.has(currentAgent)) {
+  if (currentAgent && args.checkpointDisabledAgents.has(currentAgent)) {
     console.log(`[turn-guard] checkpoint skipped for sid=${sid}: agent=${currentAgent} is in checkpoint.disabledAgents`)
     return false
   }
 
-  checkpointedSessions.add(sid)
+  args.checkpointedSessions.add(sid)
   console.log(`[turn-guard] prompting memory checkpoint for sid=${sid} (mode=${mode})`)
 
   try {
@@ -418,9 +462,9 @@ const maybeCheckpoint = async (sid: string, last: MessageWithParts): Promise<boo
     if (routing.agent) body.agent = routing.agent
     if (routing.model) body.model = routing.model
 
-    await client.session.prompt({
+    await args.client.session.prompt({
       path: { id: sid },
-      query: { directory },
+      query: { directory: args.directory },
       body,
     })
   } catch (err) {

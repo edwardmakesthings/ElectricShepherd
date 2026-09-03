@@ -75,8 +75,8 @@ import { findSessionID, getAgentIdentity, getActiveModel, getActiveAgent, getPro
 import { maybeInjectMemcoreWithGating, persistWorkedInterventionWithGating, maybeRecordModelFailureWithGating, queuePendingInterventionWithGating, confirmPendingInterventionsWithGating } from "./session-policy/interventions.ts"
 import { maybeFileWorkedExampleWithGating, maybeFileWorkedExamplesFromMessageWithGating } from "./session-policy/worked-example.ts"
 import { maybeRecordCapabilityTupleWithGating, maybeCaptureCalibrationTupleWithGating } from "./session-policy/capability.ts"
-import { runSourceCaptureCommand, verifySourceCaptureWithGating, runConsolidationCommandWithGating } from "./session-policy/source-capture.ts"
-import { bindSessionPolicyHandlers } from "./session-policy/handlers.ts"
+import { runSourceCaptureCommand, verifySourceCaptureWithGating, runConsolidationCommandWithGating, evaluateAutoConsolidationWithGating, armAutoConsolidationIdleTimerWithGating, noteAutoConsolidationActivityWithGating } from "./session-policy/source-capture.ts"
+import { bindSessionPolicyHandlers, issueRetryWithGating, maybeSpiralNudgeWithGating, maybeCheckpointWithGating } from "./session-policy/handlers.ts"
 import { bindToolExecuteBefore } from "./session-policy/tool-hook.ts"
 
 // Absolute path to the ElectricShepherd install root (the plugin's own repo).
@@ -1329,50 +1329,23 @@ export const TurnGuard = async ({ client, directory }: any) => {
   // in-flight) is only stamped once the lock is held, so a run blocked by another
   // process/instance can still fire on a later trigger.
   function evaluateAutoConsolidation(sid: string, trigger: AutoConsolidationTrigger): void {
-    const messagesSinceRun = autoConsolidationMessagesSinceRun.get(sid) ?? 0
-    const decision = decideAutoConsolidation({
-      enabled: autoConsolidationEnabled,
-      now: Date.now(),
-      lastRunAt: autoConsolidationLastRunAt.get(sid) ?? null,
-      cooldownMs: autoConsolidationCooldownMs,
-      messagesSinceRun,
-      messageThreshold: autoConsolidationMessageThreshold,
+    return evaluateAutoConsolidationWithGating({
+      sid,
       trigger,
-      inFlight: autoConsolidationInFlight,
-    })
-
-    if (!decision.shouldRun) {
-      if (autoConsolidationEnabled) {
-        console.log(
-          `[turn-guard] auto-consolidation skip sid=${sid} trigger=${trigger} reason=${decision.reason} msgsSince=${messagesSinceRun}`,
-        )
-      }
-      return
-    }
-
-    // Claim the cross-process lock before stamping any state. If another instance
-    // (or n8n/cron) is mid-run, skip without consuming the cooldown so a later
-    // trigger can retry.
-    if (!acquireAutoConsolidationLock(projectRoot, { sid, trigger: decision.reason }, autoConsolidationTimeoutMs)) {
-      console.log(`[turn-guard] auto-consolidation skip sid=${sid} trigger=${trigger} reason=locked`)
-      writeStatusFile(projectRoot, statusSnapshot({ type: "auto-consolidation-skip", sid, trigger, reason: "locked" }))
-      return
-    }
-
-    autoConsolidationInFlight = true
-    const previousLastRunAt = autoConsolidationLastRunAt.get(sid) ?? null
-    autoConsolidationLastRunAt.set(sid, Date.now())
-    autoConsolidationMessagesSinceRun.set(sid, 0)
-    pruneAutoConsolidationTracking(autoConsolidationMessagesSinceRun, autoConsolidationLastRunAt, autoConsolidationMaxTrackedSessions)
-    // If the run never actually starts, undo the cooldown stamp so the next
-    // trigger can retry immediately instead of waiting out a phantom cooldown.
-    runConsolidationCommand(sid, decision.reason, () => {
-      if (previousLastRunAt === null) autoConsolidationLastRunAt.delete(sid)
-      else autoConsolidationLastRunAt.set(sid, previousLastRunAt)
-    }).catch((err) => {
-      console.error("[turn-guard] auto-consolidation trigger failed:", err)
-      autoConsolidationInFlight = false
-      releaseAutoConsolidationLock(projectRoot)
+      projectRoot,
+      autoConsolidationEnabled,
+      autoConsolidationCooldownMs,
+      autoConsolidationMessageThreshold,
+      autoConsolidationTimeoutMs,
+      autoConsolidationMaxTrackedSessions,
+      autoConsolidationLastRunAt,
+      autoConsolidationMessagesSinceRun,
+      getAutoConsolidationInFlight: () => autoConsolidationInFlight,
+      setAutoConsolidationInFlight: (value) => { autoConsolidationInFlight = value },
+      acquireAutoConsolidationLock,
+      releaseAutoConsolidationLock,
+      runConsolidationCommand,
+      writeStatusFile: (extra) => writeStatusFile(projectRoot, statusSnapshot(extra)),
     })
   }
 
@@ -1380,33 +1353,31 @@ export const TurnGuard = async ({ client, directory }: any) => {
   // full delay\"; a new message clears it (see onMessageUpdated) so it is the
   // overridable delay rather than a fixed schedule.
   function armAutoConsolidationIdleTimer(sid: string): void {
-    if (!autoConsolidationEnabled || !autoConsolidationOnIdle) return
-    const existing = autoConsolidationPendingTimer.get(sid)
-    if (existing) clearTimeout(existing)
-    const timer = setTimeout(() => {
-      autoConsolidationPendingTimer.delete(sid)
-      evaluateAutoConsolidation(sid, "idle-timer")
-    }, autoConsolidationIdleDelayMs)
-    timer.unref?.()
-    autoConsolidationPendingTimer.set(sid, timer)
-    writeStatusFile(projectRoot, statusSnapshot({ type: "auto-consolidation-armed", sid, idleDelayMs: autoConsolidationIdleDelayMs }))
+    return armAutoConsolidationIdleTimerWithGating({
+      sid,
+      autoConsolidationEnabled,
+      autoConsolidationOnIdle,
+      autoConsolidationIdleDelayMs,
+      autoConsolidationPendingTimer,
+      evaluateAutoConsolidation,
+      writeStatusFile: (extra) => writeStatusFile(projectRoot, statusSnapshot(extra)),
+    })
   }
 
   // A new message means the session is active again: cancel any pending
   // idle-triggered run and, for terminal assistant turns, advance the volume
   // counter and eagerly evaluate the volume trigger.
   function noteAutoConsolidationActivity(sid: string, info: any): void {
-    if (!autoConsolidationEnabled) return
-    const pending = autoConsolidationPendingTimer.get(sid)
-    if (pending) {
-      clearTimeout(pending)
-      autoConsolidationPendingTimer.delete(sid)
-    }
-    if (info?.role === "assistant" && info?.finish) {
-      autoConsolidationMessagesSinceRun.set(sid, (autoConsolidationMessagesSinceRun.get(sid) ?? 0) + 1)
-      pruneAutoConsolidationTracking(autoConsolidationMessagesSinceRun, autoConsolidationLastRunAt, autoConsolidationMaxTrackedSessions)
-      evaluateAutoConsolidation(sid, "volume")
-    }
+    return noteAutoConsolidationActivityWithGating({
+      sid,
+      info,
+      autoConsolidationEnabled,
+      autoConsolidationMaxTrackedSessions,
+      autoConsolidationPendingTimer,
+      autoConsolidationMessagesSinceRun,
+      autoConsolidationLastRunAt,
+      evaluateAutoConsolidation,
+    })
   }
 
   // ── LEGACY OPT-IN: auto-retry guard ────────────────────────────────────────────
@@ -1421,186 +1392,29 @@ export const TurnGuard = async ({ client, directory }: any) => {
   // Returns true if a retry prompt was issued.
   const issueRetry = async (
     sid: string,
+
     last: MessageWithParts,
     prev: MessageWithParts | null,
   ): Promise<boolean> => {
-    if (!retryEnabled) return false
-    if (!isAssistantStop(last)) return false
-
-    const currentMode = String(last?.info?.mode ?? "").trim().toLowerCase()
-    const currentAgent = String(last?.info?.agent ?? "").trim().toLowerCase()
-    if (currentMode && retryDisabledModes.has(currentMode)) {
-      return false
-    }
-    if (currentAgent && retryDisabledAgents.has(currentAgent)) {
-      return false
-    }
-
-    const messageID = String(last?.info?.id ?? "")
-    if (messageID) {
-      const inspected = inspectedStopBySession.get(sid) ?? new Set<string>()
-      if (inspected.has(messageID)) return false
-      inspected.add(messageID)
-      inspectedStopBySession.set(sid, inspected)
-    }
-
-    const prevIsToolTurn = !!prev && isAssistantToolCallFinish(prev)
-    const prevIsUser = prev?.info?.role === "user"
-    if (!prevIsToolTurn && !prevIsUser) return false
-
-    const parentText = getText(prev?.parts ?? [])
-    // A reply to a memory-checkpoint prompt is terminal by design — never retry it.
-    if (parentText.trimStart().startsWith(CHECKPOINT_MARKER)) {
-      console.log(`[turn-guard] skip retry in ${sid}; turn is a memory-checkpoint reply`)
-      return false
-    }
-
-    const hasUseful = hasUsefulPayload(last)
-    const hasReview = hasFinalReviewSignal(last)
-    const lastTextLen = getText(last.parts ?? []).length
-    const prevWasSerenaMemory = isSerenaMemoryToolTurn(prev)
-    const midIntent = endsMidIntent(last)
-    const capabilityQuestion = prevIsUser && isCapabilityQuestion(parentText)
-    const actionLikeTurn = prevIsToolTurn || hasActionPart(last) || midIntent
-    const reviewRequired = actionLikeTurn && !capabilityQuestion
-
-    console.log(
-      `[turn-guard] evaluate sid=${sid} msg=${messageID || "?"} ` +
-      `prevRole=${String(prev?.info?.role ?? "?")} prevFinish=${String(prev?.info?.finish ?? "")} ` +
-      `prevSerenaMemory=${String(prevWasSerenaMemory)} hasUseful=${String(hasUseful)} ` +
-      `hasReview=${String(hasReview)} midIntent=${String(midIntent)} reviewRequired=${String(reviewRequired)} ` +
-      `capabilityQuestion=${String(capabilityQuestion)} textLen=${lastTextLen} partTypes=${partTypes(last)}`
-    )
-
-    const memoryOnlyLikelyPremature = prevWasSerenaMemory && (lastTextLen < 120 || (reviewRequired && !hasReview))
-    const consideredComplete = !memoryOnlyLikelyPremature && !midIntent && hasUseful && (!reviewRequired || hasReview)
-    if (consideredComplete) {
-      console.log(
-        `[turn-guard] skip retry in ${sid}; considered complete ` +
-        `(hasUseful=${String(hasUseful)} hasReview=${String(hasReview)} midIntent=${String(midIntent)} ` +
-        `reviewRequired=${String(reviewRequired)} capabilityQuestion=${String(capabilityQuestion)} ` +
-        `prevSerenaMemory=${String(prevWasSerenaMemory)})`
-      )
-      // Turn is genuinely complete — reset the retry chain counter for this session.
-      retryChainBySession.delete(sid)
-      // Phase 15 CREATE (success signal): a clean completion right after an
-      // attempted nudge is deterministic evidence the intervention worked —
-      // persist the pending patch(es); expire any that were not confirmed here.
-      void confirmPendingInterventions({ sid, confirmedKey: messageID, model: routing.model ?? null, taskText: parentText })
-      return false
-    }
-
-    const parentID = String(last?.info?.parentID ?? "")
-    if (!parentID) return false
-
-    // If the parent already is an auto-retry prompt, fold retries under the
-    // grandparent ID so we can cap the whole retry chain.
-    let retryKey = parentID
-    if (parentText.trimStart().startsWith(AUTO_RETRY_MARKER)) {
-      const grandParentID = String(prev?.info?.parentID ?? "")
-      if (grandParentID) retryKey = grandParentID
-    }
-
-    // Chain counter: the authoritative bound against runaway retry chains.
-    // Resets on consideredComplete or real user message (not injected prompts).
-    const chainCount = retryChainBySession.get(sid) ?? 0
-    if (chainCount >= MAX_RETRIES_PER_PARENT) {
-      console.log(
-        `[turn-guard] skip retry in ${sid}; retry chain cap ${MAX_RETRIES_PER_PARENT} reached`,
-      )
-      return false
-    }
-
-    const retriedParents = retriedParentBySession.get(sid) ?? new Map<string, number>()
-    const retryCount = retriedParents.get(retryKey) ?? 0
-    if (retryCount >= MAX_RETRIES_PER_PARENT) return false
-
-    // Keying-independent per-session ceiling: bounds the entire retry chain even
-    // when retryKey shifts every generation (see DEFAULT_MAX_RETRIES_PER_SESSION).
-    const sessionRetries = retriesTotalBySession.get(sid) ?? 0
-    if (sessionRetries >= maxRetriesPerSession) {
-      console.log(
-        `[turn-guard] skip retry in ${sid}; per-session retry cap ${maxRetriesPerSession} reached`,
-      )
-      return false
-    }
-
-    retriedParents.set(retryKey, retryCount + 1)
-    retriedParentBySession.set(sid, retriedParents)
-    retriesTotalBySession.set(sid, sessionRetries + 1)
-    retryChainBySession.set(sid, chainCount + 1)
-
-    const retryReason = memoryOnlyLikelyPremature
-      ? "memory checkpoint without concrete continuation"
-      : midIntent
-        ? "announced an action but stopped before executing it"
-        : !hasUseful
-          ? "no useful output"
-          : reviewRequired
-            ? "missing a final review of completed work"
-            : "incomplete continuation"
-
-    console.log(
-      `[turn-guard] low-value stop detected in ${sid}; ` +
-      `reason=${retryReason} prevRole=${String(prev?.info?.role ?? "?")} ` +
-      `prevFinish=${String(prev?.info?.finish ?? "")} issuing one auto-retry`
-    )
-
-    const routing = getPromptRouting(last, prev)
-    const activeModel = routing.model
-    if (activeModel) {
-      console.log(
-        `[turn-guard] retry model pin sid=${sid} ` +
-        `provider=${activeModel.providerID} model=${activeModel.modelID}`
-      )
-    } else {
-      console.log(`[turn-guard] retry model pin sid=${sid} unavailable; using session default`)
-    }
-
-    const body: any = {
-      parts: [
-        {
-          type: "text",
-          text:
-            `${AUTO_RETRY_MARKER} Your previous turn ended with finish=stop and ${retryReason}. ` +
-            "Before responding, evaluate why progression stalled. If uncertain, call your configured sequentialthinking MCP tool once to choose the next concrete action. " +
-            "Then continue execution immediately (do not stop at status-only output). If the tool result is empty/no-match, recover by checking alternative paths/patterns or report a precise blocker. " +
-            "End with a short 'Review' section containing: what you did, what changed or what failed, and the exact next action.",
-        },
-      ],
-    }
-
-    if (routing.agent) {
-      body.agent = routing.agent
-    }
-
-    if (activeModel) {
-      body.model = activeModel
-    }
-
-    await client.session.prompt({
-      path: { id: sid },
-      query: { directory },
-      body,
-    })
-
-    // Phase 15 CREATE: attribute the stalled stop to (model, shape) at nudge time.
-    // Task text = the real user prompt when prev is a user turn, else this turn's
-    // own text. The intervention text is only QUEUED here — it becomes durable
-    // knowledge only if confirmPendingInterventions later proves it worked (the
-    // next stop being considered complete). Fire-and-forget — best-effort.
-    const retryTaskText = prevIsUser ? parentText : getText(last.parts ?? [])
-    void maybeRecordModelFailure({
+    return issueRetryWithGating({
       sid,
-      model: activeModel ?? null,
-      taskText: retryTaskText,
-      event: "loop",
-      interventionLabel: "retry-nudge",
-      interventionText: String(body.parts[0].text),
+      last,
+      prev,
+      retryEnabled,
+      retryDisabledModes,
+      retryDisabledAgents,
+      inspectedStopBySession,
+      retriedParentBySession,
+      retriesTotalBySession,
+      retryChainBySession,
+      maxRetriesPerSession,
+      client,
+      directory,
+      getPromptRouting,
+      confirmPendingInterventions,
+      maybeRecordModelFailure,
+      queuePendingIntervention,
     })
-    queuePendingIntervention(sid, messageID, "retry-nudge", String(body.parts[0].text))
-
-    return true
   }
 
   // Reactive deliberation-spiral guard. Sibling to issueRetry: retry owns stalls
@@ -1609,215 +1423,47 @@ export const TurnGuard = async ({ client, directory }: any) => {
   // Fires independently of retryEnabled.
   const maybeSpiralNudge = async (
     sid: string,
+
     last: MessageWithParts,
     prev: MessageWithParts | null,
   ): Promise<boolean> => {
-    if (!spiralGuardEnabled) return false
-    if (!isAssistantStop(last)) return false
-
-    const messageID = String(last?.info?.id ?? "")
-    if (messageID) {
-      const inspected = spiralInspectedBySession.get(sid) ?? new Set<string>()
-      if (inspected.has(messageID)) return false
-      inspected.add(messageID)
-      spiralInspectedBySession.set(sid, inspected)
-    }
-
-    const currentMode = String(last?.info?.mode ?? "").trim().toLowerCase()
-    const currentAgent = String(last?.info?.agent ?? "").trim().toLowerCase()
-    if (currentMode && spiralGuardDisabledModes.has(currentMode)) return false
-    if (currentAgent && spiralGuardDisabledAgents.has(currentAgent)) return false
-
-    // Cloud models don't spiral the way local models do — skip them by default.
-    const spiralRouting = getPromptRouting(last, prev)
-    const spiralProvider = spiralRouting.model?.providerID?.toLowerCase() ?? ""
-    const spiralModelID = spiralRouting.model?.modelID?.toLowerCase() ?? ""
-    if (spiralProvider && spiralExemptProviders.has(spiralProvider)) return false
-    if (
-      spiralModelID &&
-      Array.from(spiralExemptModelPrefixes).some((prefix) => spiralModelID.startsWith(prefix))
-    ) {
-      return false
-    }
-
-    // A reply to any guard prompt is terminal — never guard the guard's own reply.
-    const parentText = getText(prev?.parts ?? [])
-    if (
-      parentText.trimStart().startsWith(SPIRAL_GUARD_MARKER) ||
-      parentText.trimStart().startsWith(AUTO_RETRY_MARKER) ||
-      parentText.trimStart().startsWith(CHECKPOINT_MARKER)
-    ) {
-      return false
-    }
-
-    // Explicit reflection/explanation asks are supposed to be long and tool-free.
-    const prevIsUser = prev?.info?.role === "user"
-    if (spiralExemptReflection && prevIsUser && isDeliberationExemptPrompt(parentText)) {
-      return false
-    }
-
-    const text = getText(last.parts ?? [])
-    const decision = detectDeliberationSpiral({
-      text,
-      hasActionPart: hasActionPart(last),
-      investigateThreshold: spiralInvestigateThreshold,
-      reversalThreshold: spiralReversalThreshold,
-    })
-    if (!decision.isSpiral) return false
-
-    const used = spiralNudgedBySession.get(sid) ?? 0
-    if (used >= spiralMaxInterventions) {
-      console.log(
-        `[turn-guard] spiral guard: budget ${spiralMaxInterventions} spent in ${sid}; letting it through`,
-      )
-      return false
-    }
-    spiralNudgedBySession.set(sid, used + 1)
-
-    console.log(
-      `[turn-guard] spiral detected sid=${sid} msg=${messageID || "?"} ` +
-        `investigate=${decision.investigateCount} reversal=${decision.reversalCount} ` +
-        `nudge=${used + 1}/${spiralMaxInterventions}`,
-    )
-
-    const routing = spiralRouting
-    // Phase 15 CREATE: task text for shape attribution — the real user prompt
-    // (prev) when it is a user turn, else this turn's own text. Deterministic and
-    // cheap; the shape function tolerates any text.
-    const spiralTaskText = prevIsUser ? parentText : text
-    const body: any = {
-      parts: [
-        {
-          type: "text",
-          text:
-            `${SPIRAL_GUARD_MARKER} Your last turn described ${decision.investigateCount} investigations ` +
-            `("let me check...", "let me re-read...") but executed none — it reasoned about the code instead of reading it. ` +
-            "Stop speculating and gather evidence:\n" +
-            "- Take the single most load-bearing \"let me check X\" from that turn and actually call the tool now (read/grep the file, run the command).\n" +
-            "- For runtime/ordering/async questions source cannot answer (\"does X fire before Y?\"), add a log or read the library source — do not infer execution order.\n" +
-            "- One tool call, then reassess against its real result. Do not narrate another plan without a tool call between.",
-        },
-      ],
-    }
-    if (routing.agent) body.agent = routing.agent
-    if (routing.model) body.model = routing.model
-
-    await client.session.prompt({
-      path: { id: sid },
-      query: { directory },
-      body,
-    })
-
-    // Phase 15 CREATE: attribute the spiral to (model, shape) at nudge time. The
-    // intervention text is only QUEUED — it becomes durable knowledge only if
-    // confirmPendingInterventions later proves it worked (the next stop being
-    // considered complete by issueRetry's predicates). Fire-and-forget — best-effort.
-    void maybeRecordModelFailure({
+    return maybeSpiralNudgeWithGating({
       sid,
-      model: routing.model ?? null,
-      taskText: spiralTaskText,
-      event: "spiral",
-      interventionLabel: "spiral-nudge",
-      interventionText: String(body.parts[0].text),
+      last,
+      prev,
+      spiralGuardEnabled,
+      spiralGuardDisabledModes,
+      spiralGuardDisabledAgents,
+      spiralExemptProviders,
+      spiralExemptModelPrefixes,
+      spiralExemptReflection,
+      spiralInvestigateThreshold,
+      spiralReversalThreshold,
+      spiralMaxInterventions,
+      spiralNudgedBySession,
+      spiralInspectedBySession,
+      client,
+      directory,
+      getPromptRouting,
+      maybeRecordModelFailure,
+      queuePendingIntervention,
     })
-    queuePendingIntervention(sid, messageID, "spiral-nudge", String(body.parts[0].text))
-
-    return true
   }
 
   // Returns true if a checkpoint prompt was issued. Idle-only, once per session,
   // and only on a genuinely complete turn so it never fires over a stall.
   const maybeCheckpoint = async (sid: string, last: MessageWithParts): Promise<boolean> => {
-    if (checkpointedSessions.has(sid)) return false
 
-    const mode = String(last?.info?.mode ?? "")
-    if (!CHECKPOINT_MODES.has(mode)) return false
-
-    const count = terminalCountBySession.get(sid) ?? 0
-    if (count < MIN_TERMINAL_MESSAGES_BEFORE_CHECKPOINT) return false
-
-    // Only checkpoint after a clean, SUCCESSFUL turn — a real stop with useful
-    // output, not a stall and not mid-intent. (Do NOT require a final-review
-    // signal: that is a build-mode convention and would block checkpoints in
-    // plan mode. On idle, retry already owns build stalls, so reaching here
-    // means the turn completed.)
-    if (!isAssistantStop(last)) return false
-    if (endsMidIntent(last)) return false
-    if (!hasUsefulPayload(last)) return false
-
-    // Utility subagents never checkpoint: they do no durable work of their own,
-    // and a checkpoint prompt would only burn a turn on them.
-    const routing = getPromptRouting(last)
-    const currentAgent = String(routing.agent ?? "").trim().toLowerCase()
-    if (currentAgent && checkpointDisabledAgents.has(currentAgent)) {
-      console.log(`[turn-guard] checkpoint skipped for sid=${sid}: agent=${currentAgent} is in checkpoint.disabledAgents`)
-      return false
-    }
-
-    checkpointedSessions.add(sid)
-    console.log(`[turn-guard] prompting memory checkpoint for sid=${sid} (mode=${mode})`)
-
-    try {
-      const body: any = {
-        parts: [
-          {
-            type: "text",
-            text:
-              `${CHECKPOINT_MARKER} Before this session winds down, run a two-part memory ` +
-              `check. These are independent — answer both; either can warrant saving alone.\n\n` +
-              `PART 1 — did durable STATE change? (the always-loaded blocks)\n` +
-              `- project-state — architecture, active work, or a major decision changed?\n` +
-              `- active-conventions — a naming/style/structural/tooling rule changed?\n` +
-              `- user-preferences — a new durable preference was stated?\n` +
-              `For each durable STATE change, write/update it via diary_write (derived memory ` +
-              `writes like add_drawer/kg_add are dreamer-only; write-authority will reject them from ` +
-              `this agent — diary_write is the correct tool here, and a dreamer consolidation pass ` +
-              `formalizes it into the derived layer).\n` +
-              `mem-core is a deterministic file-only render regenerated by the consolidation runtime from derived memory. ` +
-              `Do NOT hand-edit mem-core files and do NOT write any context-blocks drawer for mem-core.\n\n` +
-              `PART 2 — was substantive WORK done or something LEARNED? (diary / worked example)\n` +
-              `This applies EVEN IF no block changed. Save a derived entry if any happened:\n` +
-              `- a feature/fix was implemented (what was built, where, key choices),\n` +
-              `- a bug's root cause was found (the cause, not just the fix),\n` +
-              `- a non-obvious "how/why this works" was discovered,\n` +
-              `- a problem was solved in a reusable way (file as a worked example in the ` +
-              `apprenticeship room; if the reusable solution maps to a RECURRING TASK, also add one line ` +
-              `\`SKILL_EXERCISED: <concept name>\` so a later consolidation pass can link the worked ` +
-              `example to the skill it exercised — this is only a signal for the dreamer, never a write),\n` +
-              `- a dead end worth not repeating was hit.\n` +
-              `Use diary_write (the apprenticeship room included) for all of this. Synthesize — ` +
-              `don't dump a transcript; write what a future session would want to retrieve. ` +
-              `Lead each saved entry with a one-line \`DESC:\` (what it is + when it's ` +
-              `relevant) so it's discoverable without loading the body.\n\n` +
-              `IF this session's work appears to already be done / already correct / a ` +
-              `continuation of prior work: do NOT assume a prior session already saved it. ` +
-              `You cannot see whether that happened. SEARCH MemPalace (diary/drawers) for an ` +
-              `entry covering this specific work before concluding nothing needs saving. ` +
-              `If you find a matching entry: genuinely a no-op, say so and cite what you found. ` +
-              `If you find NO matching entry: this is unsaved work regardless of which session ` +
-              `did it — save it now per PART 2 above. Never write "a previous session should ` +
-              `have handled this" without having searched and found evidence it did.\n\n` +
-              `Do not invent changes just to have something to write — but "no block changed" ` +
-              `is NOT "nothing to save"; implementation work and discoveries belong in PART 2. ` +
-              `If genuinely nothing in either part, reply "No memory updates needed" and stop. ` +
-              `End by listing what you saved under each part.`,
-          },
-        ],
-      }
-      if (routing.agent) body.agent = routing.agent
-      if (routing.model) body.model = routing.model
-
-      await client.session.prompt({
-        path: { id: sid },
-        query: { directory },
-        body,
-      })
-    } catch (err) {
-      console.error("[turn-guard] failed to issue checkpoint prompt:", err)
-      return false
-    }
-
-    return true
+    return maybeCheckpointWithGating({
+      sid,
+      last,
+      checkpointedSessions,
+      terminalCountBySession,
+      checkpointDisabledAgents,
+      client,
+      directory,
+      getPromptRouting,
+    })
   }
 
   const boundHandlers = bindSessionPolicyHandlers({

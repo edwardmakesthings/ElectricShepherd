@@ -9,6 +9,121 @@ import { existsSync } from "node:fs"
 import { promisify } from "node:util"
 import { ESHEPHERD_ROOT, AUTOCONSOLIDATION_LOG_FILE, STATUS_DIR } from "./constants.ts"
 import { buildSourceCaptureEnv } from "./env.ts"
+import { decideAutoConsolidation, pruneAutoConsolidationTracking } from "../../adapter/turn-guard-helpers.ts"
+import type { AutoConsolidationTrigger } from "../../adapter/turn-guard-helpers.ts"
+
+// ── auto-consolidation maintenance helpers (moved verbatim from turn-guard.ts) ──
+// The *WithGating* variants take the closure state and callbacks as explicit DI
+// args; turn-guard.ts keeps same-named local wrappers that delegate here.
+
+export function evaluateAutoConsolidationWithGating(args: {
+  sid: string
+  trigger: AutoConsolidationTrigger
+  projectRoot: string
+  autoConsolidationEnabled: boolean
+  autoConsolidationCooldownMs: number
+  autoConsolidationMessageThreshold: number
+  autoConsolidationTimeoutMs: number
+  autoConsolidationMaxTrackedSessions: number
+  autoConsolidationLastRunAt: Map<string, number>
+  autoConsolidationMessagesSinceRun: Map<string, number>
+  getAutoConsolidationInFlight: () => boolean
+  setAutoConsolidationInFlight: (value: boolean) => void
+  acquireAutoConsolidationLock: (projectRoot: string, payload: Record<string, unknown>, staleMs: number) => boolean
+  releaseAutoConsolidationLock: (projectRoot: string) => void
+  runConsolidationCommand: (sid: string, trigger: string, onStartFailure?: () => void) => Promise<void>
+  writeStatusFile: (extra: Record<string, unknown>) => void
+}): void {
+  const messagesSinceRun = args.autoConsolidationMessagesSinceRun.get(args.sid) ?? 0
+  const decision = decideAutoConsolidation({
+    enabled: args.autoConsolidationEnabled,
+    now: Date.now(),
+    lastRunAt: args.autoConsolidationLastRunAt.get(args.sid) ?? null,
+    cooldownMs: args.autoConsolidationCooldownMs,
+    messagesSinceRun,
+    messageThreshold: args.autoConsolidationMessageThreshold,
+    trigger: args.trigger,
+    inFlight: args.getAutoConsolidationInFlight(),
+  })
+
+  if (!decision.shouldRun) {
+    if (args.autoConsolidationEnabled) {
+      console.log(
+        `[turn-guard] auto-consolidation skip sid=${args.sid} trigger=${args.trigger} reason=${decision.reason} msgsSince=${messagesSinceRun}`,
+      )
+    }
+    return
+  }
+
+  // Claim the cross-process lock before stamping any state. If another instance
+  // (or n8n/cron) is mid-run, skip without consuming the cooldown so a later
+  // trigger can retry.
+  if (!args.acquireAutoConsolidationLock(args.projectRoot, { sid: args.sid, trigger: decision.reason }, args.autoConsolidationTimeoutMs)) {
+    console.log(`[turn-guard] auto-consolidation skip sid=${args.sid} trigger=${args.trigger} reason=locked`)
+    args.writeStatusFile({ type: "auto-consolidation-skip", sid: args.sid, trigger: args.trigger, reason: "locked" })
+    return
+  }
+
+  args.setAutoConsolidationInFlight(true)
+  const previousLastRunAt = args.autoConsolidationLastRunAt.get(args.sid) ?? null
+  args.autoConsolidationLastRunAt.set(args.sid, Date.now())
+  args.autoConsolidationMessagesSinceRun.set(args.sid, 0)
+  pruneAutoConsolidationTracking(args.autoConsolidationMessagesSinceRun, args.autoConsolidationLastRunAt, args.autoConsolidationMaxTrackedSessions)
+  // If the run never actually starts, undo the cooldown stamp so the next
+  // trigger can retry immediately instead of waiting out a phantom cooldown.
+  args.runConsolidationCommand(args.sid, decision.reason, () => {
+    if (previousLastRunAt === null) args.autoConsolidationLastRunAt.delete(args.sid)
+    else args.autoConsolidationLastRunAt.set(args.sid, previousLastRunAt)
+  }).catch((err) => {
+    console.error("[turn-guard] auto-consolidation trigger failed:", err)
+    args.setAutoConsolidationInFlight(false)
+    args.releaseAutoConsolidationLock(args.projectRoot)
+  })
+}
+
+export function armAutoConsolidationIdleTimerWithGating(args: {
+  sid: string
+  autoConsolidationEnabled: boolean
+  autoConsolidationOnIdle: boolean
+  autoConsolidationIdleDelayMs: number
+  autoConsolidationPendingTimer: Map<string, ReturnType<typeof setTimeout>>
+  evaluateAutoConsolidation: (sid: string, trigger: AutoConsolidationTrigger) => void
+  writeStatusFile: (extra: Record<string, unknown>) => void
+}): void {
+  if (!args.autoConsolidationEnabled || !args.autoConsolidationOnIdle) return
+  const existing = args.autoConsolidationPendingTimer.get(args.sid)
+  if (existing) clearTimeout(existing)
+  const timer = setTimeout(() => {
+    args.autoConsolidationPendingTimer.delete(args.sid)
+    args.evaluateAutoConsolidation(args.sid, "idle-timer")
+  }, args.autoConsolidationIdleDelayMs)
+  timer.unref?.()
+  args.autoConsolidationPendingTimer.set(args.sid, timer)
+  args.writeStatusFile({ type: "auto-consolidation-armed", sid: args.sid, idleDelayMs: args.autoConsolidationIdleDelayMs })
+}
+
+export function noteAutoConsolidationActivityWithGating(args: {
+  sid: string
+  info: any
+  autoConsolidationEnabled: boolean
+  autoConsolidationMaxTrackedSessions: number
+  autoConsolidationPendingTimer: Map<string, ReturnType<typeof setTimeout>>
+  autoConsolidationMessagesSinceRun: Map<string, number>
+  autoConsolidationLastRunAt: Map<string, number>
+  evaluateAutoConsolidation: (sid: string, trigger: AutoConsolidationTrigger) => void
+}): void {
+  if (!args.autoConsolidationEnabled) return
+  const pending = args.autoConsolidationPendingTimer.get(args.sid)
+  if (pending) {
+    clearTimeout(pending)
+    args.autoConsolidationPendingTimer.delete(args.sid)
+  }
+  if (args.info?.role === "assistant" && args.info?.finish) {
+    args.autoConsolidationMessagesSinceRun.set(args.sid, (args.autoConsolidationMessagesSinceRun.get(args.sid) ?? 0) + 1)
+    pruneAutoConsolidationTracking(args.autoConsolidationMessagesSinceRun, args.autoConsolidationLastRunAt, args.autoConsolidationMaxTrackedSessions)
+    args.evaluateAutoConsolidation(args.sid, "volume")
+  }
+}
 
 export async function runSourceCaptureCommand(
   projectRoot: string,
