@@ -3,6 +3,8 @@ import { resolve } from "node:path";
 
 export type ErrorKind = "not_found" | "permission_denied" | "network" | "unknown";
 
+export type CoreFailureKind = ErrorKind | "transport" | "protocol" | "stale-library" | "not-found";
+
 export type BatchResultRow = {
   drawer_id?: string;
   ok?: boolean;

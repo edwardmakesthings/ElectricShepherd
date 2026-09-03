@@ -16,6 +16,7 @@
  */
 
 import type { JsonMap } from "../adapter/memgraph.ts";
+import type { CoreFailureKind } from "./substrate.ts";
 
 type MCPMessage = {
   jsonrpc: "2.0";
@@ -36,7 +37,7 @@ type MCPResponse = {
  * first-class outcome for a server refusing work because its library is stale;
  * it is never retried and never swallowed.
  */
-export type SubstrateFailureKind = "transport" | "protocol" | "stale-library" | "not-found";
+export type SubstrateFailureKind = CoreFailureKind;
 
 /**
  * Discriminated outcome for a substrate call. Success carries the parsed value;
