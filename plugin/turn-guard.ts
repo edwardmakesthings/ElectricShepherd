@@ -41,25 +41,15 @@ import {
   buildCommandExecutionPlan,
   buildCalibrationEscalationNote,
   computeToolSignature,
-  decideAutoConsolidation,
   decideCapabilityReroute,
-  decideLoopIntervention,
-  detectDeliberationSpiral,
-  isDeliberationExemptPrompt,
-  pruneAutoConsolidationTracking,
-  shouldFileWorkedExample,
   shouldInjectWorkedExamples,
-  shouldSkipWorkedExampleByCooldown,
 } from "../adapter/turn-guard-helpers.ts"
-import type { AutoConsolidationTrigger, MemcoreInjectionRecord } from "../adapter/turn-guard-helpers.ts"
+import type { AutoConsolidationTrigger } from "../adapter/turn-guard-helpers.ts"
 import { loadPackagedAssets, mergeWithoutOverride, loadInstructionPaths, dedupeAppendInstructions } from "../adapter/asset-loader.ts"
-import { loadRuntimeConfig, getRuntimeConfigEnvMap, DEFAULT_MCP_URL, DEFAULT_MCP_TOOL_PREFIX } from "../adapter/runtime-config.ts"
-// Substrate transport is constructed ONLY through the core/ seam (Check A2).
-import { createSubstrateClient } from "../core/substrate-client.ts"
-import { SubstrateError, resolveMCPHeadersFromEnv } from "../adapter/mcp-http-client.ts"
-import { createMemgraphClient } from "../adapter/memgraph.ts"
-import { retrieveSimilarWorkedExamples, formatWorkedExampleDemonstration, WORKED_EXAMPLE_MAX_INJECT, WORKED_EXAMPLE_RELEVANCE_FLOOR, extractWorkedExampleShape, buildWorkedExampleEntry, WORKED_EXAMPLE_FILE_AGENT_TYPES, WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS, CAPABILITY_TIER_BY_SUBAGENT, CAPABILITY_SUBAGENT_BY_TIER, mapTaskStatusToCapabilityOutcome, buildCapabilityCanonicalShape, buildCapabilityBucketId, canonicalModelId, buildFailureBucketId, buildFailurePatchId, FAILURE_PATCH_TEXT_MAX_CHARS, parseSelfReportedConfidence, buildCalibrationBucketId, INTERVENTION_REPLAY_HEADING, formatInterventionBlock } from "../adapter/retrieval-expansion.ts"
+import { loadRuntimeConfig, getRuntimeConfigEnvMap } from "../adapter/runtime-config.ts"
+import { retrieveSimilarWorkedExamples, formatWorkedExampleDemonstration, WORKED_EXAMPLE_MAX_INJECT, WORKED_EXAMPLE_RELEVANCE_FLOOR, CAPABILITY_TIER_BY_SUBAGENT, CAPABILITY_SUBAGENT_BY_TIER, canonicalModelId, extractWorkedExampleShape, buildFailurePatchId, parseSelfReportedConfidence, INTERVENTION_REPLAY_HEADING, formatInterventionBlock } from "../adapter/retrieval-expansion.ts"
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts"
+
 
 import { createHookHeadHandlers } from "./session-policy/hook-head.ts"
 import { createToolRegistry } from "./session-policy/registry.ts"
@@ -86,10 +76,10 @@ import {
   getToolNames, classifyMemoryTools, pruneToMax, sortByCreated, unwrapListResult, unwrapMessageResult,
 } from "./session-policy/pure-helpers.ts"
 import { findSessionID, getAgentIdentity, getActiveModel, getActiveAgent, getPromptRouting, normalizeModelSpec, resolveSessionPromptRoutingWithGating, resolveLoopGuardRoutingWithGating, resolveTaskSwapTarget, getPromptRoutingFromToolHook } from "./session-policy/routing.ts"
-import { maybeInjectMemcoreWithGating, persistWorkedInterventionWithGating, maybeRecordModelFailureWithGating, queuePendingInterventionWithGating, confirmPendingInterventionsWithGating } from "./session-policy/interventions.ts"
-import { maybeFileWorkedExampleWithGating, maybeFileWorkedExamplesFromMessageWithGating } from "./session-policy/worked-example.ts"
-import { maybeRecordCapabilityTupleWithGating, maybeCaptureCalibrationTupleWithGating } from "./session-policy/capability.ts"
+import { maybeInjectMemcoreWithGating } from "./session-policy/interventions.ts"
+import { createRecordingHelpers } from "./session-policy/turn-guard-recording.ts"
 import { runSourceCaptureCommand, verifySourceCaptureWithGating, runConsolidationCommandWithGating, evaluateAutoConsolidationWithGating, armAutoConsolidationIdleTimerWithGating, noteAutoConsolidationActivityWithGating } from "./session-policy/source-capture.ts"
+
 import { bindSessionPolicyHandlers, issueRetryWithGating, maybeSpiralNudgeWithGating, maybeCheckpointWithGating } from "./session-policy/handlers.ts"
 import { bindToolExecuteBefore } from "./session-policy/tool-hook.ts"
 import type { TurnGuardContext } from "./session-policy/context.ts"
@@ -234,295 +224,35 @@ export const TurnGuard = async ({ client, directory }: any) => {
         : "OFF by default (ESHEPHERD_RETRY_ENABLED=true to opt in)"
     }`,
   )
-  let workedExampleClientPromise: Promise<any> | null = null
-  // Phase 14/15 CONSUME (live routing): a full MemgraphClient used ONLY to read
-  // capability + failure evidence before choosing a delegation tier. Kept separate
-  // from the thin worked-example wrapper above because it needs the composed
-  // getFailureAdjustedRouting method, not just raw kgQuery. Lazy + cached exactly
-  // like getWorkedExampleClient; init failure degrades to null (neutral routing).
-  let routingEvidenceClientPromise: Promise<any> | null = null
-  function getRoutingEvidenceClient(): Promise<any> {
-    if (!routingEvidenceClientPromise) {
-      routingEvidenceClientPromise = (async () => {
-        const mcpURL = String(cfgRaw("mcp.url") || "").trim() || DEFAULT_MCP_URL
-        const toolPrefix = String(cfgRaw("mcp.toolPrefix") || "").trim() || DEFAULT_MCP_TOOL_PREFIX
-        // Pre-Rung-3 this path resolved headers directly from env with NO loopback
-        // strip (it always sent gateway credentials). Pass them explicitly so the
-        // core/ seam stays byte-identical to the old behavior.
-        const headers = resolveMCPHeadersFromEnv(runtimeEnv)
-        // Construct through the core/ seam (Check A2): owns transport + initialize.
-        const { client: mcp } = await createSubstrateClient({
-          env: runtimeEnv,
-          clientName: "electric-shepherd-turn-guard-routing",
-          urlOverride: mcpURL,
-          headersOverride: headers,
-          requestTimeoutMs: workedExampleSearchTimeoutMs,
-          maxRetries: 0,
-        })
-        return createMemgraphClient({
-          // Return the SubstrateResult directly so memgraph's typed failure handling
-          // (slice 2) can branch on ok/kind instead of treating a failure as an empty result.
-          callTool: async (name: string, args?: Record<string, unknown>) => mcp.callToolResult(name, args),
-          toolPrefix,
-        })
-      })().catch((err) => {
-        console.log(`[turn-guard] routing evidence client init failed (neutral routing): ${String(err)}`)
-        return null
-      })
-    }
-    return routingEvidenceClientPromise
-  }
-  function getWorkedExampleClient(): Promise<any> {
-    if (!workedExampleClientPromise) {
-      workedExampleClientPromise = (async () => {
-        const mcpURL = String(cfgRaw("mcp.url") || "").trim() || DEFAULT_MCP_URL
-        const toolPrefix = String(cfgRaw("mcp.toolPrefix") || "").trim() || DEFAULT_MCP_TOOL_PREFIX
-        // Pre-Rung-3 this path resolved headers directly from env with NO loopback
-        // strip (it always sent gateway credentials). Pass them explicitly so the
-        // core/ seam stays byte-identical to the old behavior.
-        const headers = resolveMCPHeadersFromEnv(runtimeEnv)
-        // Construct through the core/ seam (Check A2): owns transport + initialize.
-        const { client: mcp } = await createSubstrateClient({
-          env: runtimeEnv,
-          clientName: "electric-shepherd-turn-guard",
-          urlOverride: mcpURL,
-          headersOverride: headers,
-          requestTimeoutMs: workedExampleSearchTimeoutMs,
-          maxRetries: 0,
-        })
-        const callRaw = async (toolName: string, args?: Record<string, unknown>) => {
-          const result = await mcp.callToolResult(toolName, args)
-          if (!result.ok) throw new SubstrateError(result.kind, result.detail)
-          return result.value
-        }
-        return {
-          search: (q: string, limit?: number, wing?: string, room?: string) =>
-            callRaw(`${toolPrefix}search`, { query: q, limit, wing, room }),
-          getDrawer: (args: { drawer_id: string }) =>
-            callRaw(`${toolPrefix}get_drawer`, args),
-          // Phase 13 CREATE: write path for filing worked examples + stamping.
-          diaryWrite: (args: Record<string, unknown>) =>
-            mcp.callToolResult(`${toolPrefix}diary_write`, args),
-          kgAdd: (args: Record<string, unknown>) =>
-            mcp.callToolResult(`${toolPrefix}kg_add`, args),
-          // Phase 15 CONSUME: bounded one-hop KG read for failure-mode patches.
-          kgQuery: (args: Record<string, unknown>) =>
-            mcp.callToolResult(`${toolPrefix}kg_query`, args),
-        }
-      })().catch((err) => {
-        console.log(`[turn-guard] worked-example injection: palace client init failed: ${String(err)}`)
-        return null
-      })
-    }
-    return workedExampleClientPromise
-  }
-
-  // Phase 13 CREATE: file a compact worked example to the apprenticeship room when a
-  // cloud implementation subagent (implement-cloud, build-cloud) completes
-  // successfully with substantive output. Best-effort: any failure (MCP down, stamp
-  // rejected, dedup hit) degrades to a log line and NEVER throws into the turn. The
-  // entry is stamped es-source-type: worked-example via kg_add after filing — a
-  // distinct knowledge class from procedural skills; the CONSUME side admits both
-  // "worked-example" and (for backward compatibility) "skill" via
-  // WORKED_EXAMPLE_SOURCE_TYPES in adapter/retrieval-expansion.ts.
-  async function maybeFileWorkedExample(args: {
-    sid: string
-    subagentType: string
-    description: string
-    prompt: string
-    output: string
-  }): Promise<void> {
-    await maybeFileWorkedExampleWithGating({
-      sid: args.sid,
-      subagentType: args.subagentType,
-      description: args.description,
-      prompt: args.prompt,
-      output: args.output,
-      workedExampleFilingEnabled,
-      workedExampleFileAgentTypes: WORKED_EXAMPLE_FILE_AGENT_TYPES,
-      workedExampleMinSubstantiveChars: WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS,
-      workedExampleFiledByShape,
-      getWorkedExampleClient,
-      cfgRaw,
-      shouldFileWorkedExample,
-      extractWorkedExampleShape,
-      shouldSkipWorkedExampleByCooldown,
-      buildWorkedExampleEntry,
-    })
-  }
-
-  // Phase 14 CREATE: record a capability tuple (task shape, tier, outcome) when a
-  // routing-tier subagent completes. Best-effort: any failure (MCP down, stamp
-  // rejected, dedup hit) degrades to a log line and NEVER throws into the turn.
-  // The outcome is derived from the task tool part status — NOT from Phase 7's
-  // es-outcome axis (which is human-authoritative and attached to consulted memory
-  // nodes, not to units/tiers). This keeps Phase 7's policy intact while giving
-  // Phase 14 the unit-level evidence it needs for learned routing.
-  async function maybeRecordCapabilityTuple(args: {
-    sid: string
-    subagentType: string
-    description: string
-    prompt: string
-    status: string
-  }): Promise<void> {
-    await maybeRecordCapabilityTupleWithGating({
-      sid: args.sid,
-      subagentType: args.subagentType,
-      description: args.description,
-      prompt: args.prompt,
-      status: args.status,
-      capabilityRecordingEnabled,
-      capabilityTierBySubagent: CAPABILITY_TIER_BY_SUBAGENT,
-      capabilityRecordedBySession,
-      getWorkedExampleClient,
-      mapTaskStatusToCapabilityOutcome,
-      extractWorkedExampleShape,
-      buildCapabilityBucketId,
-      buildCapabilityCanonicalShape,
-    })
-  }
-
-  // Phase 16 CREATE: capture the self-reported confidence label from a completed
-  // subagent's terminal output and queue it as a PENDING calibration tuple for this
-  // session. The tuple (modelId, shapeKey, confidence) is stored session-locally;
-  // it becomes a durable es-calibration-outcome edge ONLY when the operator later
-  // records an es-outcome for that unit via record_outcome with matching args.
-  // No proxy outcome labels are written here — this is capture only.
-  async function maybeCaptureCalibrationTuple(args: {
-    sid: string
-    model?: { providerID: string; modelID: string } | null
-    description: string
-    prompt: string
-    outputText: string
-  }): Promise<void> {
-    await maybeCaptureCalibrationTupleWithGating({
-      sid: args.sid,
-      model: args.model ?? null,
-      description: args.description,
-      prompt: args.prompt,
-      outputText: args.outputText,
-      calibrationCaptureEnabled,
-      pendingCalibrationBySession,
-      canonicalModelId,
-      extractWorkedExampleShape,
-      parseSelfReportedConfidence,
-      buildCalibrationBucketId,
-    })
-  }
-
-  // Phase 15 CREATE (worked-intervention persistence): stamp the prompt patch that
-  // BROKE a loop/spiral for this (model, shape) — durable procedural knowledge.
-  // Called ONLY from confirmPendingInterventions with evidence of success; never
-  // called at nudge time (an attempted nudge is not proof it worked). Best-effort:
-  // any failure degrades to a log line and NEVER throws into the turn.
-  async function persistWorkedIntervention(args: {
-    sid: string
-    model?: { providerID: string; modelID: string } | null
-    taskText: string
-    interventionLabel: "spiral-nudge" | "retry-nudge" | "loop-block"
-    interventionText: string
-  }): Promise<void> {
-    await persistWorkedInterventionWithGating({
-      sid: args.sid,
-      model: args.model ?? null,
-      taskText: args.taskText,
-      interventionLabel: args.interventionLabel,
-      interventionText: args.interventionText,
-      failureRecordingEnabled,
-      canonicalModelId,
-      extractWorkedExampleShape,
-      failurePatchTextMaxChars: FAILURE_PATCH_TEXT_MAX_CHARS,
-      getWorkedExampleClient,
-      buildFailurePatchId,
-    })
-  }
-
-  // Phase 15 CREATE (failure-event recording): record a per-model failure event
-  // when a loop/spiral intervention FIRES, attributed to (model, task shape). The
-  // model is the deterministic `provider/model` from routing context; if unknown,
-  // skip — an unattributable event is worse than no event. The shape reuses
-  // Phase 14's extractWorkedExampleShape / buildCapabilityCanonicalShape (the SAME
-  // shape function, per spec). Failure events are recorded at event time: the
-  // nudge/spiral WAS attempted, and that attempt is a real data point for routing
-  // penalties. The intervention TEXT, by contrast, is only durable once proven to
-  // have worked — see queuePendingIntervention / confirmPendingInterventions.
-  // Best-effort: any failure degrades to a log line and NEVER throws into the turn.
-  async function maybeRecordModelFailure(args: {
-    sid: string
-    model?: { providerID: string; modelID: string } | null
-    taskText: string
-    event: "spiral" | "loop"
-    interventionLabel: "spiral-nudge" | "retry-nudge" | "loop-block"
-    interventionText: string
-  }): Promise<void> {
-    await maybeRecordModelFailureWithGating({
-      sid: args.sid,
-      model: args.model ?? null,
-      taskText: args.taskText,
-      event: args.event,
-      interventionLabel: args.interventionLabel,
-      interventionText: args.interventionText,
-      failureRecordingEnabled,
-      failureRecordedBySession,
-      canonicalModelId,
-      extractWorkedExampleShape,
-      buildFailureBucketId,
-      getWorkedExampleClient,
-      buildCapabilityCanonicalShape,
-    })
-  }
-
-  // Phase 15 CREATE: queue an attempted intervention patch for later success
-  // confirmation. Deduped by key (message id); a new nudge on the same message
-  // replaces the pending entry so only the latest wording is confirmable.
-  function queuePendingIntervention(sid: string, key: string, label: string, text: string): void {
-    queuePendingInterventionWithGating({
-      sid,
-      key,
-      label,
-      text,
-      failureRecordingEnabled,
-      pendingInterventionBySession,
-      failurePatchTextMaxChars: FAILURE_PATCH_TEXT_MAX_CHARS,
-    })
-  }
-
-  // Phase 15 CREATE (success signal): confirm or expire the pending intervention
-  // patches for this session and persist the ones with evidence of success.
-  // `confirmedKey` is the key whose nudge demonstrably broke the loop/spiral:
-  //   - retry / spiral nudges — called from onMessageUpdated when the next
-  //     assistant stop is considered complete by issueRetry's own predicates
-  //     (subsequent clean completion, no LLM);
-  //   - loop-block nudges — called from tool.execute.before when the model's next
-  //     tool call has a DIFFERENT signature than the blocked one.
-  // Every OTHER pending entry is expired (dropped without persistence): its
-  // intervention did not demonstrably work, so it must not become durable
-  // procedural knowledge. Best-effort: never throws into the turn.
-  async function confirmPendingInterventions(args: {
-    sid: string
-    confirmedKey?: string
-    model?: { providerID: string; modelID: string } | null
-    taskText: string
-  }): Promise<void> {
-    await confirmPendingInterventionsWithGating({
-      sid: args.sid,
-      confirmedKey: args.confirmedKey,
-      model: args.model ?? null,
-      taskText: args.taskText,
-      failureRecordingEnabled,
-      pendingInterventionBySession,
-      persistWorkedInterventionWithGating: (a) =>
-        persistWorkedInterventionWithGating({
-          ...a,
-          failureRecordingEnabled,
-          canonicalModelId,
-          extractWorkedExampleShape,
-          failurePatchTextMaxChars: FAILURE_PATCH_TEXT_MAX_CHARS,
-          getWorkedExampleClient,
-          buildFailurePatchId,
-        }),
-    })
-  }
+  // Recording/client helper cluster (lazy palace clients + Phase 13/14/15/16 CREATE
+  // recorders). Extracted to session-policy/turn-guard-recording.ts — same closures,
+  // built from an explicit deps object instead of this function's closure.
+  const recording = createRecordingHelpers({
+    cfgRaw,
+    runtimeEnv,
+    workedExampleSearchTimeoutMs,
+    workedExampleFilingEnabled,
+    capabilityRecordingEnabled,
+    failureRecordingEnabled,
+    calibrationCaptureEnabled,
+    workedExampleFiledByShape,
+    capabilityRecordedBySession,
+    pendingCalibrationBySession,
+    failureRecordedBySession,
+    pendingInterventionBySession,
+    getActiveModel,
+  })
+  const {
+    getRoutingEvidenceClient,
+    getWorkedExampleClient,
+    maybeFileWorkedExample,
+    maybeRecordCapabilityTuple,
+    maybeCaptureCalibrationTuple,
+    persistWorkedIntervention,
+    maybeRecordModelFailure,
+    queuePendingIntervention,
+    confirmPendingInterventions,
+  } = recording
 
   // Loop-guard status banner. Emitted HERE, after the consts above are
   // initialized — emitting it earlier is a temporal-dead-zone ReferenceError
@@ -991,7 +721,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
     pruneToMax,
     maybeCheckpoint,
     maybeInjectMemcore,
-    maybeFileWorkedExamplesFromMessage,
+    maybeFileWorkedExamplesFromMessage: recording.maybeFileWorkedExamplesFromMessage,
     armAutoConsolidationIdleTimer,
     sortByCreated,
     unwrapListResult,
@@ -1008,58 +738,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
     compactionPathBySession,
   })
 
-  // Phase 13 CREATE: scan a message for successful task tool completions and file
-  // worked examples. The task tool part carries the subagent_type in its input args
-  // and the output (the subagent's final text) in its state/output field. We only
-  // file when the part indicates success (no error status) and the output is
-  // substantive. This runs on session.idle — by then the task has completed and
-  // the message parts are finalized.
-  async function maybeFileWorkedExamplesFromMessage(sid: string, msg: MessageWithParts): Promise<void> {
-    return maybeFileWorkedExamplesFromMessageWithGating({
-      sid,
-      msg,
-      workedExampleFilingEnabled,
-      workedExampleFileAgentTypes: WORKED_EXAMPLE_FILE_AGENT_TYPES,
-      workedExampleMinSubstantiveChars: WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS,
-      getActiveModel,
-      maybeFileWorkedExampleWithGating: (a) =>
-        maybeFileWorkedExampleWithGating({
-          ...a,
-          workedExampleFilingEnabled,
-          workedExampleFileAgentTypes: WORKED_EXAMPLE_FILE_AGENT_TYPES,
-          workedExampleMinSubstantiveChars: WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS,
-          workedExampleFiledByShape,
-          getWorkedExampleClient,
-          cfgRaw,
-          shouldFileWorkedExample,
-          extractWorkedExampleShape,
-          shouldSkipWorkedExampleByCooldown,
-          buildWorkedExampleEntry,
-        }),
-      maybeRecordCapabilityTupleWithGating: (a) =>
-        maybeRecordCapabilityTupleWithGating({
-          ...a,
-          capabilityRecordingEnabled,
-          capabilityTierBySubagent: CAPABILITY_TIER_BY_SUBAGENT,
-          capabilityRecordedBySession,
-          getWorkedExampleClient,
-          mapTaskStatusToCapabilityOutcome,
-          extractWorkedExampleShape,
-          buildCapabilityBucketId,
-          buildCapabilityCanonicalShape,
-        }),
-      maybeCaptureCalibrationTupleWithGating: (a) =>
-        maybeCaptureCalibrationTupleWithGating({
-          ...a,
-          calibrationCaptureEnabled,
-          pendingCalibrationBySession,
-          canonicalModelId,
-          extractWorkedExampleShape,
-          parseSelfReportedConfidence,
-          buildCalibrationBucketId,
-        }),
-    })
-  }
 
 
   const hookHeadHandlers = createHookHeadHandlers({
