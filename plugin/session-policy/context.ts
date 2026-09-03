@@ -35,6 +35,7 @@ export interface TurnGuardContext {
   autoConsolidationTimeoutMs: number
   autoConsolidationMaxTrackedSessions: number
   allowedConsolidationWriters: Set<string>
+  spiralGuardEnabled: boolean
 
   // ── retry state ───────────────────────────────────────────────────
   retriedParentBySession: Map<string, Map<string, number>>

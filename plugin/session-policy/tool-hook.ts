@@ -1,4 +1,5 @@
 // @ts-nocheck
+import type { TurnGuardContext } from "./context.ts"
 import { decideLoopIntervention } from "../../adapter/turn-guard-helpers.ts"
 
 // Typed binder for the "tool.execute.before" hook. turn-guard.ts instantiates
@@ -6,19 +7,9 @@ import { decideLoopIntervention } from "../../adapter/turn-guard-helpers.ts"
 // inline monolith in the hook registration site, no free-global state. Every
 // dep is injected; there is no other runtime path for this hook.
 export interface ToolExecuteBeforeDeps {
-  loopGuardEnabled: boolean
-  loopExemptTools: Set<string>
-  taskWatchdogEnabled: boolean
-  taskSerializeTypes: Set<string>
-  taskSerializeCooldownMs: number
+  context: TurnGuardContext
+  directory: string
   computeToolSignature: (toolName: string, args: any) => string
-  taskWindowBySession: Map<string, string[]>
-  taskEscalationsBySession: Map<string, number>
-  taskRecentLaunchBySession: Map<string, Map<string, number>>
-  toolWindowBySession: Map<string, string[]>
-  loopInterventionsBySession: Map<string, number>
-  taskWatchdogThreshold: number
-  taskWatchdogMaxEscalations: number
   resolveLoopGuardRouting: (sid: string, input: any, output: any) => Promise<{ agent?: string; model?: { providerID: string; modelID: string } }>
   resolveTaskSwapTarget: (args: {
     current?: { providerID: string; modelID: string } | undefined
@@ -31,28 +22,16 @@ export interface ToolExecuteBeforeDeps {
     fallbackProvider?: string
     fallbackModel?: string
   }) => { providerID: string; modelID: string; reason: string } | null
-  taskSwapQwenMatch: string
-  taskSwapQwenToProvider: string
-  taskSwapQwenToModel: string
-  taskSwapGemmaMatch: string
-  taskSwapGemmaToProvider: string
-  taskSwapGemmaToModel: string
-  taskFallbackProvider: string
-  taskFallbackModel: string
-  workedExampleInjectionEnabled: boolean
-  getWorkedExampleClient: () => Promise<any>
   retrieveSimilarWorkedExamples: (client: any, opts: { query: string; limit: number; relevanceFloor: number }) => Promise<any[]>
   WORKED_EXAMPLE_MAX_INJECT: number
   WORKED_EXAMPLE_RELEVANCE_FLOOR: number
   formatWorkedExampleDemonstration: (examples: any[]) => string
   shouldInjectWorkedExamples: (args: { enabled: boolean; subagentType: string; prompt: string; heading: string }) => { shouldInject: boolean; hasPrompt: boolean; promptAlreadyAugmented: boolean }
-  failurePatchInjectionEnabled: boolean
   canonicalModelId: (providerID?: string, modelID?: string) => string | null
   extractWorkedExampleShape: (taskText: string) => { shapeKey: string; workClass: string; sizeBucket: string }
   buildFailurePatchId: (modelId: string, shapeKey: string, label: string) => string
   CAPABILITY_TIER_BY_SUBAGENT: Record<string, string>
   normalizeModelSpec: (spec: any) => { providerID: string; modelID: string } | null
-  getRoutingEvidenceClient: () => Promise<any>
   decideCapabilityReroute: (args: { requestedTier: string; recommendation: string; fallback: boolean }) => { rerouteTo: string | null; reason: string }
   CAPABILITY_SUBAGENT_BY_TIER: Record<string, string>
   CALIBRATION_MIN_HIT_RATE: number
@@ -62,44 +41,39 @@ export interface ToolExecuteBeforeDeps {
   INTERVENTION_REPLAY_HEADING: string
   formatInterventionBlock: (interventions: any[]) => string
   INTERVENTION_REPLAY_MAX_PATCHES: number
-  loopWindowSize: number
-  loopRepeatThreshold: number
-  loopMaxInterventions: number
-  loopMutationTools: Set<string>
   confirmPendingInterventions: (args: { sid: string; confirmedKey?: string; model?: { providerID: string; modelID: string } | null; taskText: string }) => Promise<void>
   activeRoutingBySession: Map<string, { agent?: string; model?: { providerID: string; modelID: string } }>
   LOOP_GUARD_MARKER: string
-  client: any
-  directory: string
   maybeRecordModelFailure: (args: { sid: string; model?: { providerID: string; modelID: string } | null; taskText: string; event: "spiral" | "loop"; interventionLabel: "spiral-nudge" | "retry-nudge" | "loop-block"; interventionText: string }) => Promise<void>
   queuePendingIntervention: (sid: string, key: string, label: string, text: string) => void
 }
 
 export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
+  const { context } = deps
   return async (input: any, output: any): Promise<void> => {
-    if (!deps.loopGuardEnabled) return
+    if (!context.loopGuardEnabled) return
     const toolName = String(input?.tool ?? "").trim()
     if (!toolName) return
     const sid = String(input?.sessionID ?? input?.sessionId ?? "")
     if (!sid) return
 
     const key = toolName.toLowerCase()
-    if (deps.loopExemptTools.has(key)) return
+    if (context.loopExemptTools.has(key)) return
 
     const args = output?.args ?? input?.args ?? {}
 
-    if (deps.taskWatchdogEnabled && key === "task") {
+    if (context.taskWatchdogEnabled && key === "task") {
       const subagentType = String(args?.subagent_type ?? "").trim().toLowerCase()
       const description = String(args?.description ?? "").trim()
       const prompt = String(args?.prompt ?? "").trim()
       const now = Date.now()
 
-      if (subagentType && deps.taskSerializeTypes.has(subagentType)) {
-        const launches = deps.taskRecentLaunchBySession.get(sid) ?? new Map<string, number>()
+      if (subagentType && context.taskSerializeTypes.has(subagentType)) {
+        const launches = context.taskRecentLaunchBySession.get(sid) ?? new Map<string, number>()
         const lastLaunchAt = Number(launches.get(subagentType) ?? 0)
         const elapsed = now - lastLaunchAt
-        if (lastLaunchAt > 0 && elapsed < deps.taskSerializeCooldownMs) {
-          const waitSec = Math.max(1, Math.ceil((deps.taskSerializeCooldownMs - elapsed) / 1000))
+        if (lastLaunchAt > 0 && elapsed < context.taskSerializeCooldownMs) {
+          const waitSec = Math.max(1, Math.ceil((context.taskSerializeCooldownMs - elapsed) / 1000))
           const nudgeText =
             `${deps.LOOP_GUARD_MARKER} STOP. You are spawning \`${subagentType}\` tasks too quickly in parallel.\n\n` +
             `This \`task\` call was BLOCKED. Wait about ${waitSec}s, then launch the next \`${subagentType}\` task serially.\n\n` +
@@ -107,7 +81,7 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
           throw new Error(nudgeText)
         }
         launches.set(subagentType, now)
-        deps.taskRecentLaunchBySession.set(sid, launches)
+        context.taskRecentLaunchBySession.set(sid, launches)
       }
 
       const taskSignature = deps.computeToolSignature("task", {
@@ -115,33 +89,33 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
         description,
         prompt,
       })
-      const taskWindow = deps.taskWindowBySession.get(sid) ?? []
-      const taskEscalationsUsed = deps.taskEscalationsBySession.get(sid) ?? 0
+      const taskWindow = context.taskWindowBySession.get(sid) ?? []
+      const taskEscalationsUsed = context.taskEscalationsBySession.get(sid) ?? 0
       const taskDecision = decideLoopIntervention({
         window: taskWindow,
         signature: taskSignature,
-        repeatThreshold: deps.taskWatchdogThreshold,
+        repeatThreshold: context.taskWatchdogThreshold,
         interventionsUsed: taskEscalationsUsed,
-        maxInterventions: deps.taskWatchdogMaxEscalations,
+        maxInterventions: context.taskWatchdogMaxEscalations,
       })
 
       if (taskDecision.exhausted) {
         console.log(
           `[turn-guard] task watchdog: repeated ${subagentType || "task"} ${taskDecision.count}x in sid=${sid} ` +
-            `but escalation budget (${deps.taskWatchdogMaxEscalations}) is spent; letting it through`,
+            `but escalation budget (${context.taskWatchdogMaxEscalations}) is spent; letting it through`,
         )
       } else if (taskDecision.shouldIntervene) {
         const routing = await deps.resolveLoopGuardRouting(sid, input, output)
         const swapTarget = deps.resolveTaskSwapTarget({
           current: routing.model,
-          qwenMatch: deps.taskSwapQwenMatch,
-          qwenToProvider: deps.taskSwapQwenToProvider,
-          qwenToModel: deps.taskSwapQwenToModel,
-          gemmaMatch: deps.taskSwapGemmaMatch,
-          gemmaToProvider: deps.taskSwapGemmaToProvider,
-          gemmaToModel: deps.taskSwapGemmaToModel,
-          fallbackProvider: deps.taskFallbackProvider,
-          fallbackModel: deps.taskFallbackModel,
+          qwenMatch: context.taskSwapQwenMatch,
+          qwenToProvider: context.taskSwapQwenToProvider,
+          qwenToModel: context.taskSwapQwenToModel,
+          gemmaMatch: context.taskSwapGemmaMatch,
+          gemmaToProvider: context.taskSwapGemmaToProvider,
+          gemmaToModel: context.taskSwapGemmaToModel,
+          fallbackProvider: context.taskFallbackProvider,
+          fallbackModel: context.taskFallbackModel,
         })
 
         if (swapTarget) {
@@ -151,12 +125,12 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
           }
           if (output?.args) output.args = args
           if (input?.args) input.args = args
-          deps.taskEscalationsBySession.set(sid, taskEscalationsUsed + 1)
-          deps.taskWindowBySession.delete(sid)
+          context.taskEscalationsBySession.set(sid, taskEscalationsUsed + 1)
+          context.taskWindowBySession.delete(sid)
 
           console.log(
             `[turn-guard] task watchdog: escalating repeated ${subagentType || "task"} call ` +
-              `(repeat ${taskDecision.count}x, escalation ${taskEscalationsUsed + 1}/${deps.taskWatchdogMaxEscalations}) ` +
+              `(repeat ${taskDecision.count}x, escalation ${taskEscalationsUsed + 1}/${context.taskWatchdogMaxEscalations}) ` +
               `sid=${sid} -> ${swapTarget.providerID}/${swapTarget.modelID} (${swapTarget.reason})`,
           )
         }
@@ -172,7 +146,7 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
       const demonstrationHeading =
         "## Demonstrations: how this class of problem was solved in this codebase before"
       const injectDecision = deps.shouldInjectWorkedExamples({
-        enabled: deps.workedExampleInjectionEnabled,
+        enabled: context.workedExampleInjectionEnabled,
         subagentType,
         prompt,
         heading: demonstrationHeading,
@@ -181,14 +155,14 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
       if (!injectDecision.shouldInject) {
         console.log(
           `[turn-guard] worked-example injection: skipped sid=${sid} ` +
-            `(enabled=${deps.workedExampleInjectionEnabled}, subagentType=${subagentType || ""}, ` +
+            `(enabled=${context.workedExampleInjectionEnabled}, subagentType=${subagentType || ""}, ` +
             `hasPrompt=${hasPrompt}, promptAlreadyAugmented=${injectDecision.promptAlreadyAugmented})`,
         )
       }
 
       if (injectDecision.shouldInject) {
         try {
-          const palaceClient = await deps.getWorkedExampleClient()
+          const palaceClient = await context.getWorkedExampleClient()
           if (palaceClient) {
             const examples = await deps.retrieveSimilarWorkedExamples(palaceClient, {
               query: prompt,
@@ -221,13 +195,13 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
       // 14's extractWorkedExampleShape on the ORIGINAL prompt (same text as the
       // CREATE side). Absent data => no injection, no prompt bloat. Any failure
       // degrades to no injection — a read hiccup must never block a delegation.
-      if (deps.failurePatchInjectionEnabled && hasPrompt) {
+      if (context.failurePatchInjectionEnabled && hasPrompt) {
         try {
           const routing = await deps.resolveLoopGuardRouting(sid, input, output)
           const modelId = deps.canonicalModelId(routing.model?.providerID, routing.model?.modelID)
           if (modelId) {
             const shape = deps.extractWorkedExampleShape(prompt)
-            const palaceClient = await deps.getWorkedExampleClient()
+            const palaceClient = await context.getWorkedExampleClient()
             if (palaceClient && typeof palaceClient.kgQuery === "function") {
               // Bounded read: one kg_query per candidate label (max 3).
               const patchTexts: string[] = []
@@ -302,7 +276,7 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
             (pinnedModel ? deps.canonicalModelId(pinnedModel.providerID, pinnedModel.modelID) : null) ??
             deps.canonicalModelId(routing.model?.providerID, routing.model?.modelID)
           const shape = deps.extractWorkedExampleShape(prompt)
-          const routingClient = await deps.getRoutingEvidenceClient()
+          const routingClient = await context.getRoutingEvidenceClient()
           if (routingClient && typeof routingClient.getFailureAdjustedRouting === "function") {
             const modelByTier: Record<string, string | null> = { local: null, cloud: null, deep: null }
             modelByTier[requestedTier] = effectiveModel
@@ -371,7 +345,7 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
             // misreported label only changes which cell is read; the decision
             // stays neutral below the 5-sample floor either way.
             const reportedConfidence = deps.parseSelfReportedConfidence(prompt) ?? "high"
-            const routingClient = await deps.getRoutingEvidenceClient()
+            const routingClient = await context.getRoutingEvidenceClient()
             if (routingClient && typeof routingClient.decideCalibratedEscalation === "function") {
               const decision = await routingClient.decideCalibratedEscalation({
                 modelId: effectiveModel,
@@ -434,7 +408,7 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
             deps.canonicalModelId(routing.model?.providerID, routing.model?.modelID)
           if (effectiveModel) {
             const shape = deps.extractWorkedExampleShape(prompt)
-            const routingClient = await deps.getRoutingEvidenceClient()
+            const routingClient = await context.getRoutingEvidenceClient()
             if (routingClient && typeof routingClient.getFailureInterventions === "function") {
               const interventions = await routingClient.getFailureInterventions(
                 effectiveModel,
@@ -465,26 +439,26 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
       }
 
       taskWindow.push(taskSignature)
-      while (taskWindow.length > deps.loopWindowSize) taskWindow.shift()
-      deps.taskWindowBySession.set(sid, taskWindow)
+      while (taskWindow.length > context.loopWindowSize) taskWindow.shift()
+      context.taskWindowBySession.set(sid, taskWindow)
     }
 
     const signature = deps.computeToolSignature(toolName, args)
-    const window = deps.toolWindowBySession.get(sid) ?? []
-    const interventionsUsed = deps.loopInterventionsBySession.get(sid) ?? 0
+    const window = context.toolWindowBySession.get(sid) ?? []
+    const interventionsUsed = context.loopInterventionsBySession.get(sid) ?? 0
 
     const { count, shouldIntervene, exhausted } = decideLoopIntervention({
       window,
       signature,
-      repeatThreshold: deps.loopRepeatThreshold,
+      repeatThreshold: context.loopRepeatThreshold,
       interventionsUsed,
-      maxInterventions: deps.loopMaxInterventions,
+      maxInterventions: context.loopMaxInterventions,
     })
 
     if (exhausted) {
       console.log(
         `[turn-guard] loop guard: ${toolName} repeated ${count}x in sid=${sid} but the ` +
-          `${deps.loopMaxInterventions}-nudge budget is spent; letting it through`,
+          `${context.loopMaxInterventions}-nudge budget is spent; letting it through`,
       )
       return
     }
@@ -502,12 +476,12 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
       // history of every other tool too. bash mutates sometimes, but it is
       // also the most common READ tool (grep / ls / git status / test runs),
       // so "saw bash, therefore progress" was never a safe assumption.
-      if (deps.loopMutationTools.has(key) && count === 1) {
-        deps.toolWindowBySession.set(sid, [signature])
+      if (context.loopMutationTools.has(key) && count === 1) {
+        context.toolWindowBySession.set(sid, [signature])
       } else {
         window.push(signature)
-        while (window.length > deps.loopWindowSize) window.shift()
-        deps.toolWindowBySession.set(sid, window)
+        while (window.length > context.loopWindowSize) window.shift()
+        context.toolWindowBySession.set(sid, window)
       }
       // Phase 15 CREATE (success signal): the model's next tool call after a
       // blocked loop is a DIFFERENT signature than the one that was blocked —
@@ -525,11 +499,11 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
 
     // Nudge, then wipe the window so the model gets a clean slate to recover in
     // rather than tripping the guard again on its very next call.
-    deps.loopInterventionsBySession.set(sid, interventionsUsed + 1)
-    deps.toolWindowBySession.delete(sid)
+    context.loopInterventionsBySession.set(sid, interventionsUsed + 1)
+    context.toolWindowBySession.delete(sid)
     const nudge = interventionsUsed + 1
     console.log(
-      `[turn-guard] loop guard: aborting ${toolName} (repeat ${count}x, nudge ${nudge}/${deps.loopMaxInterventions}) sid=${sid}`,
+      `[turn-guard] loop guard: aborting ${toolName} (repeat ${count}x, nudge ${nudge}/${context.loopMaxInterventions}) sid=${sid}`,
     )
 
     // WORDING IS LOAD-BEARING (measured 2026-08-18). A softer version of this
@@ -545,7 +519,7 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
     //    keep hammering the identical call. This alone is invisible in some
     //    OpenCode surfaces: the error shows as a bare tool error, not a
     //    conversational turn, so the model never "hears" the nudge.
-    const finalNudge = nudge >= deps.loopMaxInterventions
+    const finalNudge = nudge >= context.loopMaxInterventions
     const nudgeText =
       `${deps.LOOP_GUARD_MARKER} STOP. You have called \`${toolName}\` ${count} times with identical ` +
       `arguments. You are looping.\n\n` +
@@ -560,10 +534,10 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
       `Your next action must be different from the one just blocked. Do not explain the loop, do not ` +
       `apologise, and do not restate your plan - just take the next real step.` +
       (finalNudge
-        ? `\n\nThis is the LAST time this will be blocked (${nudge}/${deps.loopMaxInterventions}). If you ` +
+        ? `\n\nThis is the LAST time this will be blocked (${nudge}/${context.loopMaxInterventions}). If you ` +
           `repeat it after this, abandon this line of work entirely and report what you have with your ` +
           `remaining uncertainty stated.`
-        : `\n\n(nudge ${nudge}/${deps.loopMaxInterventions} this session)`)
+        : `\n\n(nudge ${nudge}/${context.loopMaxInterventions} this session)`)
 
     const routing = await deps.resolveLoopGuardRouting(sid, input, output)
 
@@ -580,7 +554,7 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
       if (routing.agent) body.agent = routing.agent
       if (routing.model) body.model = routing.model
 
-      await deps.client.session.prompt({
+      await context.client.session.prompt({
         path: { id: sid },
         query: { directory: deps.directory },
         body,

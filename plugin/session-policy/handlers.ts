@@ -11,6 +11,7 @@ import {
   STATUS_DIR, START_BANNER, AUTO_RETRY_MARKER, CHECKPOINT_MARKER, SPIRAL_GUARD_MARKER,
   MAX_RETRIES_PER_PARENT, MIN_TERMINAL_MESSAGES_BEFORE_CHECKPOINT, CHECKPOINT_MODES,
 } from "./constants.ts"
+import type { TurnGuardContext } from "./context.ts"
 import { getPromptRouting, findSessionID, getAgentIdentity } from "./routing.ts"
 import { detectDeliberationSpiral, isDeliberationExemptPrompt } from "../../adapter/turn-guard-helpers.ts"
 import {
@@ -927,14 +928,8 @@ export async function onSessionStartedWithGating(args: {
 // wrappers needed there anymore. Each returned function delegates verbatim to
 // the corresponding *WithGating* export (no behavior changes).
 export interface SessionPolicyHandlerDeps {
-  client: any
+  context: TurnGuardContext
   directory: string
-  projectRoot: string
-  retryEnabled: boolean
-  spiralGuardEnabled: boolean
-  autoConsolidationMaxTrackedSessions: number
-  compactArchiveEnabled: boolean
-  autoConsolidationOnCompact: boolean
   noteAutoConsolidationActivity: (sid: string, info: any) => void
   maybeWarnWriteAuthority: (sid: string, msg: MessageWithParts) => Promise<boolean>
   verifySourceCapture: (sid: string, eventType: string) => Promise<void>
@@ -950,24 +945,9 @@ export interface SessionPolicyHandlerDeps {
   unwrapListResult: (res: any) => MessageWithParts[]
   evaluateAutoConsolidation: (sid: string, trigger: string) => void
   statusSnapshot: (extra?: Record<string, unknown>) => Record<string, unknown>
-  retryChainBySession: Map<string, number>
-  startupConfirmedBySession: Set<string>
   terminalCountBySession: Map<string, number>
   activeRoutingBySession: Map<string, { agent?: string; model?: { providerID: string; modelID: string } }>
   memoryReadSessions: Set<string>
-  retriedParentBySession: Map<string, Map<string, number>>
-  retriesTotalBySession: Map<string, number>
-  inspectedStopBySession: Map<string, Set<string>>
-  toolWindowBySession: Map<string, string[]>
-  loopInterventionsBySession: Map<string, number>
-  taskWindowBySession: Map<string, string[]>
-  taskEscalationsBySession: Map<string, number>
-  taskRecentLaunchBySession: Map<string, Map<string, number>>
-  workedExampleFiledByShape: Map<string, Map<string, number>>
-  capabilityRecordedBySession: Map<string, Set<string>>
-  failureRecordedBySession: Map<string, Set<string>>
-  pendingCalibrationBySession: Map<string, Array<{ modelId: string; shapeKey: string; confidence: string }>>
-  pendingInterventionBySession: Map<string, Array<{ key: string; label: string; text: string }>>
   spiralNudgedBySession: Map<string, number>
   spiralInspectedBySession: Map<string, Set<string>>
   checkpointedSessions: Set<string>
@@ -977,15 +957,16 @@ export interface SessionPolicyHandlerDeps {
 }
 
 export function bindSessionPolicyHandlers(deps: SessionPolicyHandlerDeps) {
+  const { context } = deps
   return {
     onMessageUpdated(event: any): Promise<void> {
       return onMessageUpdatedWithGating({
         event,
-        client: deps.client,
+        client: context.client,
         directory: deps.directory,
-        projectRoot: deps.projectRoot,
-        retryChainBySession: deps.retryChainBySession,
-        startupConfirmedBySession: deps.startupConfirmedBySession,
+        projectRoot: context.projectRoot,
+        retryChainBySession: context.retryChainBySession,
+        startupConfirmedBySession: context.startupConfirmedBySession,
         terminalCountBySession: deps.terminalCountBySession,
         activeRoutingBySession: deps.activeRoutingBySession,
         memoryReadSessions: deps.memoryReadSessions,
@@ -994,23 +975,23 @@ export function bindSessionPolicyHandlers(deps: SessionPolicyHandlerDeps) {
         verifySourceCapture: deps.verifySourceCapture,
         issueRetry: deps.issueRetry,
         maybeSpiralNudge: deps.maybeSpiralNudge,
-        retryEnabled: deps.retryEnabled,
-        spiralGuardEnabled: deps.spiralGuardEnabled,
+        retryEnabled: context.retryEnabled,
+        spiralGuardEnabled: context.spiralGuardEnabled,
         unwrapMessageResult: deps.unwrapMessageResult,
-        autoConsolidationMaxTrackedSessions: deps.autoConsolidationMaxTrackedSessions,
+        autoConsolidationMaxTrackedSessions: context.autoConsolidationMaxTrackedSessions,
         pruneToMax: deps.pruneToMax,
-        retriedParentBySession: deps.retriedParentBySession,
-        inspectedStopBySession: deps.inspectedStopBySession,
-        toolWindowBySession: deps.toolWindowBySession,
-        loopInterventionsBySession: deps.loopInterventionsBySession,
-        taskWindowBySession: deps.taskWindowBySession,
-        taskEscalationsBySession: deps.taskEscalationsBySession,
-        taskRecentLaunchBySession: deps.taskRecentLaunchBySession,
-        workedExampleFiledByShape: deps.workedExampleFiledByShape,
-        capabilityRecordedBySession: deps.capabilityRecordedBySession,
-        failureRecordedBySession: deps.failureRecordedBySession,
-        pendingCalibrationBySession: deps.pendingCalibrationBySession,
-        pendingInterventionBySession: deps.pendingInterventionBySession,
+        retriedParentBySession: context.retriedParentBySession,
+        inspectedStopBySession: context.inspectedStopBySession,
+        toolWindowBySession: context.toolWindowBySession,
+        loopInterventionsBySession: context.loopInterventionsBySession,
+        taskWindowBySession: context.taskWindowBySession,
+        taskEscalationsBySession: context.taskEscalationsBySession,
+        taskRecentLaunchBySession: context.taskRecentLaunchBySession,
+        workedExampleFiledByShape: context.workedExampleFiledByShape,
+        capabilityRecordedBySession: context.capabilityRecordedBySession,
+        failureRecordedBySession: context.failureRecordedBySession,
+        pendingCalibrationBySession: context.pendingCalibrationBySession,
+        pendingInterventionBySession: context.pendingInterventionBySession,
         spiralNudgedBySession: deps.spiralNudgedBySession,
         spiralInspectedBySession: deps.spiralInspectedBySession,
         checkpointedSessions: deps.checkpointedSessions,
@@ -1023,10 +1004,10 @@ export function bindSessionPolicyHandlers(deps: SessionPolicyHandlerDeps) {
     onSessionIdle(event: any): Promise<void> {
       return onSessionIdleWithGating({
         event,
-        client: deps.client,
+        client: context.client,
         directory: deps.directory,
-        startupConfirmedBySession: deps.startupConfirmedBySession,
-        retryEnabled: deps.retryEnabled,
+        startupConfirmedBySession: context.startupConfirmedBySession,
+        retryEnabled: context.retryEnabled,
         issueRetry: deps.issueRetry,
         maybeCheckpoint: deps.maybeCheckpoint,
         maybeInjectMemcore: deps.maybeInjectMemcore,
@@ -1034,22 +1015,22 @@ export function bindSessionPolicyHandlers(deps: SessionPolicyHandlerDeps) {
         armAutoConsolidationIdleTimer: deps.armAutoConsolidationIdleTimer,
         sortByCreated: deps.sortByCreated,
         unwrapListResult: deps.unwrapListResult,
-        autoConsolidationMaxTrackedSessions: deps.autoConsolidationMaxTrackedSessions,
+        autoConsolidationMaxTrackedSessions: context.autoConsolidationMaxTrackedSessions,
         pruneToMax: deps.pruneToMax,
-        retriedParentBySession: deps.retriedParentBySession,
-        retriesTotalBySession: deps.retriesTotalBySession,
-        retryChainBySession: deps.retryChainBySession,
-        inspectedStopBySession: deps.inspectedStopBySession,
-        toolWindowBySession: deps.toolWindowBySession,
-        loopInterventionsBySession: deps.loopInterventionsBySession,
-        taskWindowBySession: deps.taskWindowBySession,
-        taskEscalationsBySession: deps.taskEscalationsBySession,
-        taskRecentLaunchBySession: deps.taskRecentLaunchBySession,
-        workedExampleFiledByShape: deps.workedExampleFiledByShape,
-        capabilityRecordedBySession: deps.capabilityRecordedBySession,
-        failureRecordedBySession: deps.failureRecordedBySession,
-        pendingCalibrationBySession: deps.pendingCalibrationBySession,
-        pendingInterventionBySession: deps.pendingInterventionBySession,
+        retriedParentBySession: context.retriedParentBySession,
+        retriesTotalBySession: context.retriesTotalBySession,
+        retryChainBySession: context.retryChainBySession,
+        inspectedStopBySession: context.inspectedStopBySession,
+        toolWindowBySession: context.toolWindowBySession,
+        loopInterventionsBySession: context.loopInterventionsBySession,
+        taskWindowBySession: context.taskWindowBySession,
+        taskEscalationsBySession: context.taskEscalationsBySession,
+        taskRecentLaunchBySession: context.taskRecentLaunchBySession,
+        workedExampleFiledByShape: context.workedExampleFiledByShape,
+        capabilityRecordedBySession: context.capabilityRecordedBySession,
+        failureRecordedBySession: context.failureRecordedBySession,
+        pendingCalibrationBySession: context.pendingCalibrationBySession,
+        pendingInterventionBySession: context.pendingInterventionBySession,
         spiralNudgedBySession: deps.spiralNudgedBySession,
         spiralInspectedBySession: deps.spiralInspectedBySession,
         checkpointedSessions: deps.checkpointedSessions,
@@ -1065,10 +1046,10 @@ export function bindSessionPolicyHandlers(deps: SessionPolicyHandlerDeps) {
     archiveCompactedRegion(sid: string): Promise<void> {
       return archiveCompactedRegionWithGating({
         sid,
-        client: deps.client,
+        client: context.client,
         directory: deps.directory,
-        projectRoot: deps.projectRoot,
-        compactArchiveEnabled: deps.compactArchiveEnabled,
+        projectRoot: context.projectRoot,
+        compactArchiveEnabled: context.compactArchiveEnabled,
         sortByCreated: deps.sortByCreated,
         unwrapListResult: deps.unwrapListResult,
         statusSnapshot: deps.statusSnapshot,
@@ -1082,35 +1063,35 @@ export function bindSessionPolicyHandlers(deps: SessionPolicyHandlerDeps) {
         archiveCompactedRegion: (sid) =>
           archiveCompactedRegionWithGating({
             sid,
-            client: deps.client,
+            client: context.client,
             directory: deps.directory,
-            projectRoot: deps.projectRoot,
-            compactArchiveEnabled: deps.compactArchiveEnabled,
+            projectRoot: context.projectRoot,
+            compactArchiveEnabled: context.compactArchiveEnabled,
             sortByCreated: deps.sortByCreated,
             unwrapListResult: deps.unwrapListResult,
             statusSnapshot: deps.statusSnapshot,
           }),
         compactionPathBySession: deps.compactionPathBySession,
         maybeInjectMemcore: deps.maybeInjectMemcore,
-        autoConsolidationOnCompact: deps.autoConsolidationOnCompact,
+        autoConsolidationOnCompact: context.autoConsolidationOnCompact,
         evaluateAutoConsolidation: deps.evaluateAutoConsolidation,
-        autoConsolidationMaxTrackedSessions: deps.autoConsolidationMaxTrackedSessions,
+        autoConsolidationMaxTrackedSessions: context.autoConsolidationMaxTrackedSessions,
         pruneToMax: deps.pruneToMax,
-        retriedParentBySession: deps.retriedParentBySession,
-        retriesTotalBySession: deps.retriesTotalBySession,
-        retryChainBySession: deps.retryChainBySession,
-        startupConfirmedBySession: deps.startupConfirmedBySession,
-        inspectedStopBySession: deps.inspectedStopBySession,
-        toolWindowBySession: deps.toolWindowBySession,
-        loopInterventionsBySession: deps.loopInterventionsBySession,
-        taskWindowBySession: deps.taskWindowBySession,
-        taskEscalationsBySession: deps.taskEscalationsBySession,
-        taskRecentLaunchBySession: deps.taskRecentLaunchBySession,
-        workedExampleFiledByShape: deps.workedExampleFiledByShape,
-        capabilityRecordedBySession: deps.capabilityRecordedBySession,
-        failureRecordedBySession: deps.failureRecordedBySession,
-        pendingCalibrationBySession: deps.pendingCalibrationBySession,
-        pendingInterventionBySession: deps.pendingInterventionBySession,
+        retriedParentBySession: context.retriedParentBySession,
+        retriesTotalBySession: context.retriesTotalBySession,
+        retryChainBySession: context.retryChainBySession,
+        startupConfirmedBySession: context.startupConfirmedBySession,
+        inspectedStopBySession: context.inspectedStopBySession,
+        toolWindowBySession: context.toolWindowBySession,
+        loopInterventionsBySession: context.loopInterventionsBySession,
+        taskWindowBySession: context.taskWindowBySession,
+        taskEscalationsBySession: context.taskEscalationsBySession,
+        taskRecentLaunchBySession: context.taskRecentLaunchBySession,
+        workedExampleFiledByShape: context.workedExampleFiledByShape,
+        capabilityRecordedBySession: context.capabilityRecordedBySession,
+        failureRecordedBySession: context.failureRecordedBySession,
+        pendingCalibrationBySession: context.pendingCalibrationBySession,
+        pendingInterventionBySession: context.pendingInterventionBySession,
         spiralNudgedBySession: deps.spiralNudgedBySession,
         spiralInspectedBySession: deps.spiralInspectedBySession,
         checkpointedSessions: deps.checkpointedSessions,
@@ -1124,8 +1105,8 @@ export function bindSessionPolicyHandlers(deps: SessionPolicyHandlerDeps) {
     onSessionStarted(event: any): Promise<void> {
       return onSessionStartedWithGating({
         event,
-        toolWindowBySession: deps.toolWindowBySession,
-        loopInterventionsBySession: deps.loopInterventionsBySession,
+        toolWindowBySession: context.toolWindowBySession,
+        loopInterventionsBySession: context.loopInterventionsBySession,
         activeRoutingBySession: deps.activeRoutingBySession,
         maybeInjectMemcore: deps.maybeInjectMemcore,
       })
