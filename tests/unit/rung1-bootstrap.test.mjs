@@ -251,8 +251,9 @@ test("rung1: memgraph client surfaces transport failure as a named error", async
 // Deterministic: fixed timestamps, no network, no timing.
 
 /** Names of substrate tools that mutate palace state — any one of these in a
- *  dry-run call log is a rung violation. */
-const WRITE_TOOL_NAMES = ["kg_add", "add_drawer", "update_drawer", "delete_drawer"];
+ *  dry-run call log is a rung violation. `checkpoint` files drawers (the shared
+ *  AC #11 write path), so it counts as a write here too. */
+const WRITE_TOOL_NAMES = ["kg_add", "add_drawer", "checkpoint", "update_drawer", "delete_drawer"];
 
 function writeCallsOf(calls) {
   return calls.filter((c) => WRITE_TOOL_NAMES.includes(c.name));

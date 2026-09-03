@@ -40,6 +40,13 @@ function makeInMemoryPalace() {
 
   const domains = {}; // id -> es-domain value (Phase 12; absent = unstamped)
 
+  const fileItem = (item) => {
+    const id = `drawer_${item.wing}_${item.room}_new`;
+    drawers[id] = { drawer_id: id, wing: item.wing, room: item.room, content: item.content, desc: "promoted skill" };
+    sourceTypes[id] = undefined; // stamped separately via kg_add below
+    return { drawer_id: id };
+  };
+
   const call = async (name, payload) => {
     if (name === "get_taxonomy") return { taxonomy: { projA: { skills: 1 } } };
     if (name === "list_drawers") {
@@ -69,11 +76,10 @@ function makeInMemoryPalace() {
         .map((e) => ({ subject: e.subject, predicate: e.predicate, object: e.object, current: true }));
       return { facts };
     }
-    if (name === "add_drawer") {
-      const id = `drawer_${payload.wing}_${payload.room}_new`;
-      drawers[id] = { drawer_id: id, wing: payload.wing, room: payload.room, content: payload.content, desc: "promoted skill" };
-      sourceTypes[id] = undefined; // stamped separately via kg_add below
-      return { drawer_id: id };
+    if (name === "checkpoint") {
+      // AC #11: promotion files the shared copy through the checkpoint write path.
+      const results = (payload.items || []).map((item) => fileItem(item));
+      return { ok: true, results };
     }
     if (name === "kg_add") {
       edges.push({ ...payload });

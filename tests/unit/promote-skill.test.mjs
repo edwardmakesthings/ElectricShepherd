@@ -15,18 +15,19 @@ import {
  * Phase 10 (unified memory): the `promote_skill` core (`runSkillPromotion`) and the
  * candidate predicate (`isPromotionCandidate` / `findPromotionCandidates`) against a
  * fake MCP transport — no network. Proves:
- *   1. dry-run makes NO add_drawer / kg_add calls and returns a plan with the
+ *   1. dry-run makes NO checkpoint / kg_add calls and returns a plan with the
  *      duplicate-guard result;
  *   2. apply is a COPY (source untouched), files verbatim into the shared wing's
- *      skills room, stamps es-source-type: skill, and writes exactly one
- *      promoted-from edge (shared -> origin); never touches es-status;
+ *      skills room through the shared checkpoint write path (AC #11), stamps
+ *      es-source-type: skill, and writes exactly one promoted-from edge
+ *      (shared -> origin); never touches es-status;
  *   3. idempotency: an exact-duplicate guard skips filing on re-apply, and an
  *      existing promoted-from edge short-circuits before any write;
  *   4. a non-skill source (wrong / missing es-source-type) is refused;
  *   4b. Phase 12: an explicit source domain propagates to the shared copy; a source
  *      with no (or out-of-vocabulary) domain is refused in dry-run AND apply, writing
  *      nothing — promotion REQUIRES an explicit es-domain;
- *   5. add_drawer failure stops the pass before stamp/edge; stamp and edge failures
+ *   5. checkpoint failure stops the pass before stamp/edge; stamp and edge failures
  *      are counted independently with retry next_steps;
  *   6. candidate rule: >= 2 distinct wings = candidate, 1 wing = not (pure function);
  *   7. findPromotionCandidates scans project wings only (shared wing excluded),
@@ -58,6 +59,18 @@ function makeFakePalace({
   const state = {};
   for (const [key, rows] of Object.entries(rooms)) state[key] = rows.map((row) => ({ ...row }));
 
+  // AC #11: production drawer creation goes through the checkpoint write path;
+  // the fake emulates the substrate's per-item add_drawer semantics.
+  const fileItem = (item) => {
+    if (failAddDrawer) throw new Error("add_drawer exploded");
+    const id = `drawer_${item.wing}_${item.room}_new`;
+    state[`${item.wing}/${item.room}`] = [
+      ...(state[`${item.wing}/${item.room}`] || []),
+      { drawer_id: id, wing: item.wing, room: item.room, content: item.content },
+    ];
+    return { drawer_id: id };
+  };
+
   const call = async (name, payload) => {
     calls.push({ name, args: payload });
     if (name === "get_taxonomy") return { taxonomy };
@@ -72,6 +85,12 @@ function makeFakePalace({
     }
     if (name === "check_duplicate") {
       return duplicateOf ? { is_duplicate: true, drawer_id: duplicateOf } : { is_duplicate: false };
+    }
+    // AC #11: production drawer creation goes through the checkpoint write path;
+    // the fake emulates the substrate's per-item add_drawer semantics.
+    if (name === "checkpoint") {
+      const results = (payload.items || []).map(fileItem);
+      return { ok: true, results };
     }
     if (name === "kg_query") {
       // es-source-type lookup for a node.
@@ -98,15 +117,6 @@ function makeFakePalace({
         return { facts: [] };
       }
       return { facts: [] };
-    }
-    if (name === "add_drawer") {
-      if (failAddDrawer) throw new Error("add_drawer exploded");
-      const id = `drawer_${payload.wing}_${payload.room}_new`;
-      state[`${payload.wing}/${payload.room}`] = [
-        ...(state[`${payload.wing}/${payload.room}`] || []),
-        { drawer_id: id, wing: payload.wing, room: payload.room, content: payload.content },
-      ];
-      return { drawer_id: id };
     }
     if (name === "kg_add") {
       if (failKgAddFor.has(String(payload.subject))) throw new Error(`kg_add failed for ${payload.subject}`);
@@ -150,7 +160,7 @@ test("dry-run makes zero add_drawer / kg_add calls and returns a plan", async ()
   assert.equal(report.to.wing, SHARED_WING);
   assert.equal(report.to.room, SHARED_SKILLS_ROOM);
   assert.deepEqual(
-    fake.calls.filter((c) => c.name === "add_drawer" || c.name === "kg_add"),
+    fake.calls.filter((c) => c.name === "checkpoint" || c.name === "kg_add"),
     [],
     "dry-run must make no mutating calls"
   );
@@ -171,10 +181,13 @@ test("apply is a COPY: files verbatim into the shared wing, stamps skill + domai
   assert.ok(report.drawer_id, "apply must return the new shared drawer id");
   assert.equal(report.from.wing, "proj");
 
-  const add = fake.calls.find((c) => c.name === "add_drawer");
-  assert.equal(add.args.wing, SHARED_WING, "shared copy goes to the shared wing");
-  assert.equal(add.args.room, SHARED_SKILLS_ROOM);
-  assert.equal(add.args.content, CONTENT, "content is verbatim");
+  // AC #11: filing goes through the shared checkpoint write path with one item.
+  const add = fake.calls.find((c) => c.name === "checkpoint");
+  assert.ok(add, "apply must file via the checkpoint write path");
+  assert.equal(add.args.items.length, 1);
+  assert.equal(add.args.items[0].wing, SHARED_WING, "shared copy goes to the shared wing");
+  assert.equal(add.args.items[0].room, SHARED_SKILLS_ROOM);
+  assert.equal(add.args.items[0].content, CONTENT, "content is verbatim");
 
   const kgAdds = fake.calls.filter((c) => c.name === "kg_add");
   const stamp = kgAdds.find((c) => c.args.predicate === "es-source-type");
@@ -214,7 +227,7 @@ test("idempotency: existing promoted-from edge short-circuits before any write",
   assert.equal(report.ok, true);
   assert.equal(report.already_promoted_to, `drawer_${SHARED_WING}_skills_existing`);
   assert.deepEqual(
-    fake.calls.filter((c) => c.name === "add_drawer" || c.name === "kg_add"),
+    fake.calls.filter((c) => c.name === "checkpoint" || c.name === "kg_add"),
     [],
     "an already-promoted origin must write nothing"
   );
@@ -232,7 +245,7 @@ test("idempotency: exact-duplicate guard skips filing on re-apply", async () => 
 
   assert.equal(report.ok, true);
   assert.equal(report.duplicate_drawer_id, `drawer_${SHARED_WING}_skills_dup`);
-  assert.ok(!fake.calls.some((c) => c.name === "add_drawer"), "duplicate must not file a second copy");
+  assert.ok(!fake.calls.some((c) => c.name === "checkpoint"), "duplicate must not file a second copy");
 });
 
 test("a non-skill source is refused (wrong es-source-type)", async () => {
@@ -245,7 +258,7 @@ test("a non-skill source is refused (wrong es-source-type)", async () => {
 
   assert.equal(report.ok, false);
   assert.match(report.error, /not skill/);
-  assert.ok(!fake.calls.some((c) => c.name === "add_drawer"), "refused promotion must not file");
+  assert.ok(!fake.calls.some((c) => c.name === "checkpoint"), "refused promotion must not file");
 });
 
 test("an unstamped source is refused (missing es-source-type)", async () => {
@@ -277,7 +290,7 @@ test("Phase 12: a source with an explicit domain propagates that domain to the s
   assert.match(preview.next_step, /es-domain: code/);
   assert.match(preview.next_step, /requires an explicit domain/i);
   assert.deepEqual(
-    fake.calls.filter((c) => c.name === "add_drawer" || c.name === "kg_add"),
+    fake.calls.filter((c) => c.name === "checkpoint" || c.name === "kg_add"),
     [],
     "dry-run must make no mutating calls"
   );
@@ -305,7 +318,7 @@ test("Phase 12: a source without a domain is refused (dry-run and apply write no
   assert.match(preview.error, /REQUIRES an explicit domain/);
   assert.equal(preview.domain, undefined, "no domain is reported when the source has none");
   assert.deepEqual(
-    dryFake.calls.filter((c) => c.name === "add_drawer" || c.name === "kg_add"),
+    dryFake.calls.filter((c) => c.name === "checkpoint" || c.name === "kg_add"),
     [],
     "refused dry-run must make no mutating calls"
   );
@@ -320,7 +333,7 @@ test("Phase 12: a source without a domain is refused (dry-run and apply write no
   assert.equal(report.ok, false);
   assert.match(report.error, /es-domain/);
   assert.deepEqual(
-    applyFake.calls.filter((c) => c.name === "add_drawer" || c.name === "kg_add"),
+    applyFake.calls.filter((c) => c.name === "checkpoint" || c.name === "kg_add"),
     [],
     "refused apply must write nothing — no shared copy, no stamp, no edge"
   );
@@ -338,13 +351,13 @@ test("Phase 12: an out-of-vocabulary domain on the source is refused (no writes)
   assert.equal(report.ok, false);
   assert.match(report.error, /es-domain/);
   assert.deepEqual(
-    fake.calls.filter((c) => c.name === "add_drawer" || c.name === "kg_add"),
+    fake.calls.filter((c) => c.name === "checkpoint" || c.name === "kg_add"),
     [],
     "an out-of-vocabulary domain must be treated as unstamped: refuse, write nothing"
   );
 });
 
-test("add_drawer failure stops the pass before stamp/edge", async () => {
+test("checkpoint failure stops the pass before stamp/edge", async () => {
   const fake = makeFakePalace({
     taxonomy: { proj: { skills: 2 } },
     drawers: { [ORIGIN_ID]: originDrawer() },
@@ -355,7 +368,7 @@ test("add_drawer failure stops the pass before stamp/edge", async () => {
   const report = await runSkillPromotion({ call: fake.call, skillId: ORIGIN_ID, sharedWing: SHARED_WING, dryRun: false });
 
   assert.equal(report.ok, false);
-  assert.match(report.error, /add_drawer failed/);
+  assert.match(report.error, /checkpoint failed/);
   assert.equal(fake.calls.filter((c) => c.name === "kg_add").length, 0, "no stamp or edge after a filing failure");
 });
 
@@ -412,7 +425,7 @@ test("findPromotionCandidates: >= 2 wings of near-duplicate content is a candida
 
   // Read-only: no mutating calls.
   assert.ok(
-    !fake.calls.some((c) => c.name === "add_drawer" || c.name === "kg_add"),
+    !fake.calls.some((c) => c.name === "checkpoint" || c.name === "kg_add"),
     "candidate detection must not write anything"
   );
 });

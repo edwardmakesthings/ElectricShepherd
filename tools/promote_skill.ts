@@ -8,8 +8,8 @@
  * place); promotion generalises something correctly filed (the drawer belongs in
  * two places now). The spec is explicit: "Do not overload one command with both."
  * So this tool does NOT call relocate_memory; it reuses its pattern (dry-run
- * default, verbatim content, add_drawer + kg_add, per-item error counting) and
- * adds the `promoted-from` lineage edge that relocation never writes.
+ * default, verbatim content, checkpoint write + kg_add, per-item error counting)
+ * and adds the `promoted-from` lineage edge that relocation never writes.
  *
  * Promotion is proposed, never automatic: dry-run by default, explicit apply only
  * after operator approval of a numbered proposal list (the dreamer's pass owns the
@@ -43,6 +43,7 @@ import { tool } from "@opencode-ai/plugin";
 import { asObject, asText, createPalaceClient, drawerContentFrom, parseFacts, parseTaxonomy } from "../adapter/palace-tools.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
 import { normalizeDryRunArg } from "../core/substrate.ts";
+import { runCheckpointWrite } from "../core/operation.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
 import { SKILLS_ROOM, SKILL_LIKE_STEMS } from "./file_skill.ts";
 import { pickPurposeRoom } from "./ingest_docs.ts";
@@ -348,32 +349,39 @@ export async function runSkillPromotion(args: {
     // best-effort guard; proceed to filing (substrate dedup is the backstop)
   }
 
-  let created: Record<string, unknown>;
-  try {
-    created = asObject(
-      await args.call("add_drawer", {
-        wing: sharedWing,
-        room,
-        content,
-        source_file: `promoted-from:${skillId}`,
-        added_by: "electric-shepherd-promote-skill",
-      }),
-    );
-  } catch (error) {
-    return {
-      ok: false,
-      dry_run: false,
-      skill_id: skillId,
-      from,
-      to: { wing: sharedWing, room },
-      reused_room: reused,
-      error: `add_drawer failed: ${asText((error as Error | undefined)?.message || error).slice(0, 500)}`,
-      next_step: "Filing aborted — nothing else ran. Re-run to retry.",
-    };
-  }
+  // AC #11: production drawer creation goes through runCheckpointWrite (the shared
+  // checkpoint write path) instead of a direct add_drawer call. Behavior is
+  // preserved: one item, same wing/room/content; the duplicate guard above and the
+  // stamps below are unchanged.
+  const checkpoint = await runCheckpointWrite(
+    args.call,
+    {
+      items: [
+        {
+          wing: sharedWing,
+          room,
+          content,
+          desc: `promoted skill (origin ${skillId})`,
+          added_by: "electric-shepherd-promote-skill",
+        },
+      ],
+    },
+    { dry_run: false },
+  );
 
-  const drawerId = asText(created.drawer_id || created.id).trim();
-  if (!drawerId) {
+  const raw = asObject(checkpoint.raw);
+  const rows = [
+    ...(Array.isArray(raw.results) ? raw.results : []),
+    ...(Array.isArray(raw.items) ? raw.items : []),
+  ].map(asObject);
+  const drawerId = asText(
+    raw.drawer_id
+      || raw.id
+      || rows.find((row) => row.ok !== false && asText(row.drawer_id || row.id).trim())?.drawer_id
+      || rows.find((row) => row.ok !== false && asText(row.drawer_id || row.id).trim())?.id,
+  ).trim();
+
+  if (!checkpoint.ok || !drawerId) {
     return {
       ok: false,
       dry_run: false,
@@ -381,8 +389,8 @@ export async function runSkillPromotion(args: {
       from,
       to: { wing: sharedWing, room },
       reused_room: reused,
-      error: "add_drawer returned no drawer_id",
-      next_step: "Inspect the raw result and re-run; identical content maps to the same deterministic drawer ID.",
+      error: `checkpoint failed${drawerId ? "" : " (no drawer_id returned)"}: ${asText(checkpoint.error || checkpoint.failure_summary).slice(0, 500)}`,
+      next_step: "Filing aborted — nothing else ran. Re-run to retry; identical content maps to the same deterministic drawer ID.",
     };
   }
 
@@ -572,7 +580,7 @@ export async function findPromotionCandidates(args: {
 
 export default tool({
   description:
-    "Phase 10 (unified memory): promote a project skill into the shared skills wing so procedural-intent retrieval from ANY project wing can reach it. COPY, not move — the source drawer stays untouched; the shared copy is stamped es-source-type: skill + es-domain (propagated from the origin) and linked back via a promoted-from edge (NOT lineage). Phase 12: promotion REQUIRES an explicit es-domain on the source — an unstamped/out-of-vocabulary domain is refused with no writes. Promotion is explicit and approval-gated only: dry-run by default, apply writes add_drawer + kg_add after operator approval of the numbered proposal. Idempotent: an exact-duplicate guard plus an existing-edge guard make re-runs no-ops. Use findPromotionCandidates (via the memory-status surface) to discover skills present in >= 2 project wings before proposing.",
+    "Phase 10 (unified memory): promote a project skill into the shared skills wing so procedural-intent retrieval from ANY project wing can reach it. COPY, not move — the source drawer stays untouched; the shared copy is stamped es-source-type: skill + es-domain (propagated from the origin) and linked back via a promoted-from edge (NOT lineage). Phase 12: promotion REQUIRES an explicit es-domain on the source — an unstamped/out-of-vocabulary domain is refused with no writes. Promotion is explicit and approval-gated only: dry-run by default, apply files via the shared checkpoint write path + kg_add after operator approval of the numbered proposal. Idempotent: an exact-duplicate guard plus an existing-edge guard make re-runs no-ops. Use findPromotionCandidates (via the memory-status surface) to discover skills present in >= 2 project wings before proposing.",
   args: {
     skill_id: tool.schema.string().describe("Drawer ID of the project skill to promote (must carry es-source-type: skill)."),
     shared_wing: tool.schema
