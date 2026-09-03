@@ -170,8 +170,6 @@ export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
   { envKey: "ESHEPHERD_SPIRALGUARD_EXEMPT_PROVIDERS", path: "spiralGuard.exemptProviders", kind: "csv", defaultValue: DEFAULT_SPIRAL_EXEMPT_PROVIDERS.join(",") },
   { envKey: "ESHEPHERD_SPIRALGUARD_EXEMPT_MODEL_PREFIXES", path: "spiralGuard.exemptModelPrefixes", kind: "csv", defaultValue: DEFAULT_SPIRAL_EXEMPT_MODEL_PREFIXES.join(",") },
 
-  { envKey: "ESHEPHERD_CONSOLIDATION_WRITE_GUARD_ENABLED", path: "consolidation.writeGuardEnabled", kind: "boolean", defaultValue: true },
-  { envKey: "ESHEPHERD_ALLOWED_CONSOLIDATION_WRITERS", path: "consolidation.allowedWriters", kind: "csv", defaultValue: "dreamer" },
   { envKey: "ESHEPHERD_AUTO_CONSOLIDATION_ENABLED", path: "consolidation.auto.enabled", kind: "boolean", defaultValue: true },
   { envKey: "ESHEPHERD_AUTO_CONSOLIDATION_ON_IDLE", path: "consolidation.auto.onIdle", kind: "boolean", defaultValue: true },
   { envKey: "ESHEPHERD_AUTO_CONSOLIDATION_ON_COMPACT", path: "consolidation.auto.onCompact", kind: "boolean", defaultValue: true },

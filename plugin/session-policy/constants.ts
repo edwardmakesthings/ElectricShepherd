@@ -20,7 +20,6 @@ export type MessageWithParts = {
 export const AUTO_RETRY_MARKER = "[Auto-Retry Guard]"
 export const CHECKPOINT_MARKER = "[Memory Checkpoint]"
 export const MEMCORE_REINJECT_MARKER = "[Mem-core Reinjection]"
-export const WRITE_AUTHORITY_MARKER = "[Write-Authority Gate]"
 export const MIN_USEFUL_TEXT = 24
 export const START_BANNER = "[turn-guard] START"
 export const MAX_RETRIES_PER_PARENT = 2

@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import test from "node:test";
 
-import { applyRuntimeConfigToEnv, getRuntimeConfigEnvMap, getRuntimeConfigValueByPath, loadRuntimeConfig } from "../../adapter/runtime-config.ts";
+import {
+  applyRuntimeConfigToEnv,
+  getRuntimeConfigEnvMap,
+  getRuntimeConfigValueByPath,
+  listRuntimeConfigEnvKeys,
+  loadRuntimeConfig,
+} from "../../adapter/runtime-config.ts";
 
 function makeTempDir(prefix) {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -75,6 +81,10 @@ test("runtime config reads eshepherd-config.jsonc and exposes values by path/env
   assert.equal(envMap.ESHEPHERD_ENV_FILE, "../docker/.env");
   assert.equal(envMap.MEMPALACE_MCP_AUTH_HEADER, "x-litellm-api-key");
   assert.equal(envMap.MEMPALACE_MCP_AUTH_SCHEME, "Bearer");
+
+  const envKeys = listRuntimeConfigEnvKeys();
+  assert.equal(envKeys.includes("ESHEPHERD_ALLOWED_CONSOLIDATION_WRITERS"), false);
+  assert.equal(envKeys.includes("ESHEPHERD_CONSOLIDATION_WRITE_GUARD_ENABLED"), false);
 
   rmSync(root, { recursive: true, force: true });
 });
