@@ -78,9 +78,14 @@ function classifyPostError(err: unknown): SubstrateFailureKind {
 }
 
 function classifyJSONRPCError(name: string, error: { code: number; message: string; data?: unknown }): { kind: SubstrateFailureKind; detail: string } {
-  const detail = `Tool call failed (${name}): ${error.message}`;
+  const actionRequired = isPlainObject(error.data) && typeof error.data.action_required === "string"
+    ? error.data.action_required
+    : "";
+  const detail = actionRequired
+    ? `Tool call failed (${name}): ${error.message} (action_required: "${actionRequired}")`
+    : `Tool call failed (${name}): ${error.message}`;
   if (error.code === -32005) return { kind: "stale-library", detail };
-  if (isPlainObject(error.data) && error.data.action_required === "restart_mcp_server") {
+  if (actionRequired === "restart_mcp_server") {
     return { kind: "stale-library", detail };
   }
   if (/not found|no such tool/i.test(error.message)) return { kind: "not-found", detail };

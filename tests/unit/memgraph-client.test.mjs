@@ -307,7 +307,7 @@ test("createDerivedDrawer: a failed es-status stamp does not block the es-source
     wing: "w",
     room: "synthesis",
     content: "c",
-    source_drawer_ids: [],
+    source_drawer_ids: ["drawer-a"],
     desc: "d",
   });
 
@@ -330,7 +330,7 @@ test("createDerivedDrawer: a failed es-source-type stamp does not block the es-s
     wing: "w",
     room: "synthesis",
     content: "c",
-    source_drawer_ids: [],
+    source_drawer_ids: ["drawer-a"],
     desc: "d",
   });
 
@@ -338,6 +338,26 @@ test("createDerivedDrawer: a failed es-source-type stamp does not block the es-s
   const kgAdds = calls.filter((call) => call.name.endsWith("kg_add"));
   // The es-status stamp still went out even though es-source-type failed.
   assert.ok(kgAdds.some((call) => call.args.predicate === "es-status" && call.args.object === "provisional"));
+});
+
+test("createDerivedDrawer rejects empty lineage (orphan synthesis is unrepresentable)", async () => {
+  const { client, calls } = makeRecordingClient({
+    add_drawer: () => ({ drawer_id: "drawer-should-not-be-created" }),
+  });
+
+  const result = await client.createDerivedDrawer({
+    wing: "w",
+    room: "synthesis",
+    content: "c",
+    source_drawer_ids: [],
+    desc: "d",
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.error, "createDerivedDrawer: at least one source_drawer_id is required");
+  assert.deepEqual(result.lineage_errors, ["createDerivedDrawer: at least one source_drawer_id is required"]);
+  assert.equal(result.lineage_edges_added, 0);
+  assert.equal(calls.some((call) => call.name.endsWith("add_drawer")), false, "must not create a drawer without lineage");
 });
 
 test("getClosetSourceType reads the stamped value and returns null when unstamped", async () => {

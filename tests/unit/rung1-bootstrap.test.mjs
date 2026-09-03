@@ -163,6 +163,34 @@ test("rung1: MCPHttpClient.callTool throws SubstrateError(kind=stale-library) on
   }
 });
 
+test('rung1: MCPHttpClient surfaces action_required: "restart_mcp_server" verbatim and never retries it', async () => {
+  let callCount = 0;
+  const restore = withFetch(async () => {
+    callCount += 1;
+    return jsonRpcResponse({
+      jsonrpc: "2.0",
+      id: 1,
+      error: {
+        code: -32005,
+        message: "Server library is stale; restart required",
+        data: { action_required: "restart_mcp_server" },
+      },
+    });
+  });
+
+  try {
+    const client = new MCPHttpClient("https://example.test/mcp", {}, { maxRetries: 3 });
+    const result = await client.callToolResult("mempalace_get_height", { node_id: "node-1" });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.kind, "stale-library");
+    assert.match(result.detail, /action_required: "restart_mcp_server"/);
+    assert.equal(callCount, 1, "-32005 stale-library must never enter transport retry loop");
+  } finally {
+    restore();
+  }
+});
+
 test("rung1: memgraph client surfaces -32005 as a named error, never an empty result", async () => {
   // The real transport (mcp.callToolResult) returns SubstrateResult{ok:false,
   // kind:"stale-library"} for -32005; the memgraph boundary must turn that into
@@ -680,4 +708,3 @@ test("rung1: dry-run relocate_memory writes nothing (move + excerpt modes)", asy
   assert.match(excerpted.report.next_step, /dry_run:false/);
   assert.equal(bulkWriteCallsOf(excerpted.toolCalls).length, 0, `relocate excerpt dry-run produced write calls: ${JSON.stringify(bulkWriteCallsOf(excerpted.toolCalls))}`);
 });
-

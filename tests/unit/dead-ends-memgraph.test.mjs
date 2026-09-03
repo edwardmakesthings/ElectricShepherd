@@ -82,7 +82,7 @@ test("fileDeadEnd files one synthesis drawer + one rules-out edge per statement 
     content: "cache_control injection on the openai/ prefix | outcome: this does not work, LiteLLM strips the marker | because: \"marker removed\" | polarity: tried-failed",
     statements: ["cache_control injection on the openai/ prefix"],
     polarity: "tried-failed",
-    source_drawer_ids: [],
+    source_drawer_ids: ["raw-1"],
   });
 
   assert.equal(result.success, true);
@@ -138,6 +138,7 @@ test("fileDeadEnd is best-effort per edge: one failed edge does not abort the fi
     content: "content",
     statements: ["statement A", "statement B"],
     polarity: "tried-failed",
+    source_drawer_ids: ["raw-1"],
   });
 
   // The drawer was still filed; the failed edge is reported, not swallowed.

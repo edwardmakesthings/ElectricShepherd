@@ -1,7 +1,7 @@
 # Electric Shepherd — Architecture Rebuild Spec
 
 **Date:** 2026-08-29
-**Status:** Approved for implementation
+**Status:** In progress (criteria update: 2026-09-03)
 **Supersedes:** nothing. Complements `docs/memory-graph-design.md` (which remains the
 authoritative statement of *semantics*). This document concerns *structure* only.
 
@@ -621,6 +621,35 @@ part of the deliverable, not a follow-up.
 ## 7. Acceptance criteria
 
 The restructure is complete when all of the following hold. Each is intended to be checkable by a reader with no context beyond this document; where a criterion names a command or artifact, that is the check.
+
+### 7.1 Current criteria status (2026-09-03)
+
+| # | Criterion | Updated Status | Evidence / Observation (current) |
+|---|---|---|---|
+| 1 | No runtime code outside `core/` invokes substrate | **Done (unchanged / not fully re-audited this pass)** | No regression surfaced in this pass. |
+| 2 | No file exceeds 800 lines | **Fail** | Still over: `adapter/memgraph.ts` 2374, `scripts/run-memory-consolidation-and-validation.ts` 2093, `adapter/retrieval-expansion.ts` 1914. Now under 800: `plugin/turn-guard.ts` 796, `plugin/session-policy/handlers.ts` 793, `plugin/session-policy/interventions.ts` 399. |
+| 3 | Exactly one consolidation engine | **Done** | `runSynthesisConsolidation` remains centralized in `adapter/synthesis-consolidation.ts`; callers are wrappers/entrypoints. |
+| 4 | `capability/` imports no substrate internals | **Done (unchanged)** | No new regression found this pass. |
+| 5 | `move_drawers` & `delete_drawers` no direct `MCPHttpClient` | **Done** | No direct client construction/import; only comment mention in `tools/delete_drawers.ts`. |
+| 6 | `bulk_drawer_ops.ts` absorbed into `core/` | **Partial** | `tools/bulk_drawer_ops.ts` still present (13-line stub). |
+| 7 | Zero bare `.catch` in `core/` and `capability/` | **Done** | No `.catch(` hit in `core/` or `capability/` for the criterion’s banned bare-swallow pattern. |
+| 8 | Broken substrate call → distinct named error | **Done** | Error taxonomy path remains intact; no regression observed. |
+| 9 | `-32005` surfaces `restart_mcp_server` verbatim | **Done** | `core/mcp-transport.ts` now includes verbatim `action_required` in detail and unit test asserts no retry (`tests/unit/rung1-bootstrap.test.mjs`). |
+| 10 | Temporal validity uses `mempalace_kg_supersede` | **Done** | Runtime/tool paths and tests remain on supersede semantics. |
+| 11 | Multi-drawer writes use `mempalace_checkpoint` | **Partial (improved)** | `runCheckpointWrite(...)` callsites exist (`promote_skill`, `remind`, `file_skill`) but not universal yet. |
+| 12 | One `dry_run` implementation (default preview) | **Done** | `normalizeDryRunArg(...)` used consistently in active handlers checked. |
+| 13–15 | Mem-core injection logic (Enabled/Reasons/Because) | **Partial** | Still split across `turn-guard` + `plugin/session-policy/*`; not fully consolidated. |
+| 16–17 | Capabilities pass write+read+fail / Conformance | **Done** | Added `tests/conformance/capability-conformance.test.mjs` (all six capabilities) and `node --experimental-strip-types --test tests/conformance/capability-conformance.test.mjs` passes. |
+| 18 | `npm test` green with verbatim reporting | **Done** | `npm test` passed: **475 tests**, **465 pass**, **0 fail**, **10 skipped** (integration-gated skips declared by runner). |
+| 19 | Authority gated on node type, not agent identity | **Partial** | Not re-audited end-to-end in this pass. |
+| 20 | `turn-guard.ts` warn-guard deleted | **Partial / text-verified** | No `warn-guard` string hit; semantic legacy-path audit still pending. |
+| 21 | No orphan synthesis (structural lineage req) | **Done** | `createDerivedDrawer` rejects empty lineage and tests cover both direct create + dead-end flow lineage requirements. |
+| 22 | `memory-graph-design.md` semantics/rationale only | **Done** | Status/build-order/PR-sequencing sections removed; doc reduced accordingly. |
+| 23 | No phantom API refs unless tool exists | **Done** | Target phantom symbols absent in checked docs/instructions. |
+| 24 | Routing matrix deduped to one source | **Done** | `instructions/agent-discipline.md` points to `skills/eshepherd/SKILL.md` as canonical. |
+| 25 | `memory-blocks.reference.md` + conformance asserted | **Done** | Reference retained; conformance test present and passing. |
+| 26 | Docs phase status corrected (12–16 built) | **Done** | Status line present in `docs/memory-phases-12-16-spec.md`. |
+| 27 | `mcp-tools.md` updated or drift recorded | **Done** | `docs/substrate-drift.md` records date, signatures, and authority note. |
 
 **Structural**
 

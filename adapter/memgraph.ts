@@ -404,6 +404,14 @@ export class MemgraphClient {
     source_run_id?: string;
   }) {
     const sourceDrawerIds = this.uniq(args.source_drawer_ids || []);
+    if (sourceDrawerIds.length === 0) {
+      return {
+        success: false,
+        error: "createDerivedDrawer: at least one source_drawer_id is required",
+        lineage_edges_added: 0,
+        lineage_errors: ["createDerivedDrawer: at least one source_drawer_id is required"],
+      };
+    }
     const addResult = await this.addDrawer({
       wing: args.wing,
       room: args.room,
