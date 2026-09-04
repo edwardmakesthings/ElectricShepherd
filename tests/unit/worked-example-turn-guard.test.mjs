@@ -4,11 +4,11 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const { TurnGuard } = await import("../../plugin/turn-guard.ts");
+const { TurnGuard } = await import("../../plugin/session-policy.ts");
 
 // Import smoke: plugin module must load (P0-6 acceptance).
-test("plugin/turn-guard.ts imports successfully", async () => {
-  const mod = await import("../../plugin/turn-guard.ts");
+test("plugin/session-policy.ts imports successfully", async () => {
+  const mod = await import("../../plugin/session-policy.ts");
   assert.ok(mod && typeof mod.TurnGuard === "function");
 });
 

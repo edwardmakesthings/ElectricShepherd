@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const { TurnGuard } = await import("../../plugin/turn-guard.ts");
+const { TurnGuard } = await import("../../plugin/session-policy.ts");
 
 /**
  * Rung 2 (R2-01..R2-05) — the positive side of the mem-core reinjection matrix.

@@ -3,7 +3,7 @@ import test from "node:test";
 
 /**
  * P0-2 acceptance: Phase 16's decision API decideCalibratedEscalation is now
- * wired into the LIVE delegation path in plugin/turn-guard.ts (tool.execute.before,
+ * wired into the LIVE delegation path in plugin/session-policy.ts (tool.execute.before,
  * task branch) — the site where a subagent's self-reported confidence would
  * otherwise be trusted at face value. Operator judgment: ACTIVE BY DEFAULT with a
  * neutral fallback that requires >= 5 samples per cell; below that (or on any
@@ -20,7 +20,7 @@ import test from "node:test";
 
 const { createMemgraphClient } = await import("../../adapter/memgraph.ts");
 
-// The same constants the live hook passes (kept in sync with plugin/turn-guard.ts).
+// The same constants the live hook passes (kept in sync with plugin/session-policy.ts).
 const CALIBRATION_OVERRIDE_MIN_SAMPLES = 5;
 const CALIBRATION_MIN_HIT_RATE = 0.6;
 const SHAPE = "live0001";

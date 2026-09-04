@@ -4,7 +4,7 @@ import test from "node:test";
 /**
  * P0-3 acceptance: getFailureInterventions (adapter/memgraph.ts) — the sole reader
  * of the es-intervention-label / es-intervention-text predicates — is now wired into
- * the LIVE delegation path in plugin/turn-guard.ts (tool.execute.before, task
+ * the LIVE delegation path in plugin/session-policy.ts (tool.execute.before, task
  * branch). When a (model, shape) pair has recorded interventions from prior
  * failures, those interventions are injected into the outgoing delegation prompt:
  * "last time this shape failed, here is what fixed it." Operator judgment: ALWAYS
@@ -32,7 +32,7 @@ const { createMemgraphClient } = await import("../../adapter/memgraph.ts");
 const { buildFailurePatchId, extractWorkedExampleShape, canonicalModelId, INTERVENTION_REPLAY_HEADING, formatInterventionBlock } =
   await import("../../adapter/retrieval-expansion.ts");
 
-// The same constants the live hook passes (kept in sync with plugin/turn-guard.ts).
+// The same constants the live hook passes (kept in sync with plugin/session-policy.ts).
 const INTERVENTION_REPLAY_MAX_PATCHES = 3;
 const MODEL = "litellm/model-a";
 const PROMPT_IN = "Fix the failing test in web/src/foo.test.ts for the auth flow.";
@@ -204,7 +204,7 @@ test("LIVE intervention replay: more recorded than the bound => only INTERVENTIO
 
 test("LIVE intervention replay: bound is a live constant — mutating it changes the injected count", async () => {
   // Mutation-verified: this test pins the SAME constant the hook passes. If
-  // INTERVENTION_REPLAY_MAX_PATCHES in plugin/turn-guard.ts were changed, the
+  // INTERVENTION_REPLAY_MAX_PATCHES in plugin/session-policy.ts were changed, the
   // source assertion below would fail (the hook must pass the named constant), and
   // the adapter-level bound check here would reflect the new value.
   const shape = shapeKeyFor(PROMPT_IN);

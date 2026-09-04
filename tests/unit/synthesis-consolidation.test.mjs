@@ -26,7 +26,7 @@ function richSummaries() {
       durableFacts: ["ElectricShepherd is the policy layer", "MemPalace is the substrate"],
       decisions: ["Use append-only source drawers", "Consolidation requires two distinct sources"],
       rootCausesAndWorkedExamples: ["Gateway blocked scoped lineage listing via allow-list"],
-      subsystemsAndFiles: ["adapter/synthesis-consolidation.ts", "plugin/turn-guard.ts"],
+      subsystemsAndFiles: ["adapter/synthesis-consolidation.ts", "plugin/session-policy.ts"],
       openItems: ["Add an end-to-end retrieval test"],
     },
     {

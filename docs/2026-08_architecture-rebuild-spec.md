@@ -67,7 +67,7 @@ so that specific bug is closed — but the pattern that hid it for months is unt
 
 ### 2.3 Policy exists twice
 
-`plugin/turn-guard.ts` (4004 lines) and
+`plugin/session-policy.ts` (4004 lines) and
 `scripts/run-memory-consolidation-and-validation.ts` (2087 lines) are both consolidation
 engines, built at different phases, sharing only `adapter/memgraph.ts`. Roughly 6000 lines
 of policy with no declared boundary between them.
@@ -435,7 +435,7 @@ out-of-vocabulary value is a type error rather than a silently-written triple.
 
 ---
 
-## 5. Decomposing `plugin/turn-guard.ts`
+## 5. Decomposing `plugin/session-policy.ts`
 
 The 4004-line file becomes a thin hook adapter plus a policy dispatcher. Its nine concerns
 are redistributed:
@@ -502,7 +502,7 @@ Three properties are required:
 | `compacting` | `memcore.reinject.onCompact` (same gate — there is deliberately no separate `onCompacting` flag) |
 | `manual` | no per-reason flag; still requires `memcore.reinject.enabled` |
 
-`memcore.reinject.enabled` is checked FIRST for every reason without exception. No lifecycle path may reach the renderer before that check. The pre-compact probe and the compact-prompt override described in `plugin/turn-guard.ts` at L3325 and L3357 — both of which currently run *before* the gate on purpose — are the specific behaviour this table abolishes.
+`memcore.reinject.enabled` is checked FIRST for every reason without exception. No lifecycle path may reach the renderer before that check. The pre-compact probe and the compact-prompt override described in `plugin/session-policy.ts` at L3325 and L3357 — both of which currently run *before* the gate on purpose — are the specific behaviour this table abolishes.
 
 The `because` string on refusal is not decoration — it is what makes the mem-core
 behaviour testable and debuggable, and it feeds the status file.
@@ -627,7 +627,7 @@ The restructure is complete when all of the following hold. Each is intended to 
 | # | Criterion | Updated Status | Evidence / Observation (current) |
 |---|---|---|---|
 | 1 | No runtime code outside `core/` invokes substrate | **Done (unchanged / not fully re-audited this pass)** | No regression surfaced in this pass. |
-| 2 | No file exceeds 800 lines | **Fail** | Still over: `adapter/memgraph.ts` 2374, `scripts/run-memory-consolidation-and-validation.ts` 2093, `adapter/retrieval-expansion.ts` 1914. Now under 800: `plugin/turn-guard.ts` 796, `plugin/session-policy/handlers.ts` 793, `plugin/session-policy/interventions.ts` 399. |
+| 2 | No file exceeds 800 lines | **Fail** | Still over: `adapter/memgraph.ts` 2374, `scripts/run-memory-consolidation-and-validation.ts` 2093, `adapter/retrieval-expansion.ts` 1914. Now under 800: `plugin/session-policy.ts` 796, `plugin/session-policy/handlers.ts` 793, `plugin/session-policy/interventions.ts` 399. |
 | 3 | Exactly one consolidation engine | **Done** | `runSynthesisConsolidation` remains centralized in `adapter/synthesis-consolidation.ts`; callers are wrappers/entrypoints. |
 | 4 | `capability/` imports no substrate internals | **Done (unchanged)** | No new regression found this pass. |
 | 5 | `move_drawers` & `delete_drawers` no direct `MCPHttpClient` | **Done** | No direct client construction/import; only comment mention in `tools/delete_drawers.ts`. |
@@ -643,7 +643,7 @@ The restructure is complete when all of the following hold. Each is intended to 
 | 16–17 | Capabilities pass write+read+fail / Conformance | **Done** | Added `tests/conformance/capability-conformance.test.mjs` (all six capabilities) and `node --experimental-strip-types --test tests/conformance/capability-conformance.test.mjs` passes. |
 | 18 | `npm test` green with verbatim reporting | **Done** | `npm test` passed: **475 tests**, **465 pass**, **0 fail**, **10 skipped** (integration-gated skips declared by runner). |
 | 19 | Authority gated on node type, not agent identity | **Done** | Identity-based runtime knobs/messages were removed (`ESHEPHERD_ALLOWED_CONSOLIDATION_WRITERS`, `consolidation.allowedWriters`, `consolidation.writeGuardEnabled`, and dreamer-only checkpoint wording). Lineage-bearing synthesis authority is structural at node boundary: `createDerivedDrawer` enforces non-empty lineage and synthesis consolidation enforces distinct-source minimum (`adapter/synthesis-consolidation.ts`). |
-| 20 | `turn-guard.ts` warn-guard deleted | **Done** | Legacy event-time warn-guard path is absent; `plugin/turn-guard.ts` is now orchestration + config-warning only. Remaining write-authority text is instructional (`plugin/session-policy/checkpoint-handler.ts`), while enforcement is hard rejection at write-authority boundary. |
+| 20 | `turn-guard.ts` warn-guard deleted | **Done** | Legacy event-time warn-guard path is absent; `plugin/session-policy.ts` is now orchestration + config-warning only. Remaining write-authority text is instructional (`plugin/session-policy/checkpoint-handler.ts`), while enforcement is hard rejection at write-authority boundary. |
 | 21 | No orphan synthesis (structural lineage req) | **Done** | `createDerivedDrawer` rejects empty lineage and tests cover both direct create + dead-end flow lineage requirements. |
 | 22 | `memory-graph-design.md` semantics/rationale only | **Done** | Status/build-order/PR-sequencing sections removed; doc reduced accordingly. |
 | 23 | No phantom API refs unless tool exists | **Done** | Target phantom symbols absent in checked docs/instructions. |
@@ -658,7 +658,7 @@ The restructure is complete when all of the following hold. Each is intended to 
 2. No file exceeds 800 lines. `turn-guard.ts` (4004),
    `run-memory-consolidation-and-validation.ts` (2087), `memgraph.ts` (2191), and
    `retrieval-expansion.ts` (1915) are all decomposed. Scope: maintained TypeScript source under `core/`, `capability/`, `policy/`, `surface/`, `adapter/`, `tools/`, `plugin/`. Generated files, vendored code, and test fixtures are excluded.
-3. There is exactly one consolidation engine. Concretely: `plugin/turn-guard.ts` and `scripts/run-memory-consolidation-and-validation.ts` no longer both implement consolidation policy. One is the engine; the other either delegates to it or is deleted with its unique behaviour absorbed, and that unique behaviour is enumerated in the migration notes before deletion.
+3. There is exactly one consolidation engine. Concretely: `plugin/session-policy.ts` and `scripts/run-memory-consolidation-and-validation.ts` no longer both implement consolidation policy. One is the engine; the other either delegates to it or is deleted with its unique behaviour absorbed, and that unique behaviour is enumerated in the migration notes before deletion.
 4. `capability/` contains no import of the substrate transport internals — specifically
    `MCPHttpClient`, `resolveMCPHeadersFromEnv`, `resolveMemPalaceMCPUrl`, or raw JSON-RPC envelope types. Capabilities import only the published interface from `core/substrate.ts`.
 5. `tools/move_drawers.ts` and `tools/delete_drawers.ts` no longer construct

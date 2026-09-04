@@ -7,7 +7,7 @@
  * ... }`), so a plugin-triggered run, a cron run, and an n8n run all coordinate
  * through one lock and can never overlap.
  *
- * The format must stay byte-compatible with the copy in `plugin/turn-guard.ts`
+ * The format must stay byte-compatible with the copy in `plugin/session-policy.ts`
  * (which cannot import this module because it is constrained to a single file with
  * node built-ins only). If you change the field names here, change them there too.
  *

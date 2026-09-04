@@ -192,7 +192,7 @@ markdown files at startup and injects them into the resolved config:
 
 | Asset | Bundled | Auto-loaded in any consumer project | Mechanism |
 |---|---|---|---|
-| Plugin (`plugin/turn-guard.ts`) | Yes | Yes | `"plugin": ["electric-shepherd"]` |
+| Plugin (`plugin/session-policy.ts`) | Yes | Yes | `"plugin": ["electric-shepherd"]` |
 | Agents (`agents/*.md`) | Yes | Yes | Injected into `config.agent` by the plugin's `config` hook |
 | Commands (`command/*.md`) | Yes | Yes | Injected into `config.command` by the plugin's `config` hook |
 | Instructions (`instructions/agent-discipline.md`) | Yes | Yes | Absolute paths appended to `config.instructions` (opt out: `assets.injectInstructions=false` in `eshepherd-config.jsonc`) |
@@ -405,10 +405,10 @@ Core policy runtime in place. The following are committed and usable now:
 - OpenCode plugin/snippet/instruction assets in `plugin/`, `snippets/`, and `instructions/`
 - OpenCode slash commands in `command/` (both `command/` and `commands/` are recognized by OpenCode)
 - Command execution defaults come from each command frontmatter (`agent:` + `subtask:`); for example in this repo `/memory-status` is subtask-isolated, while `/consolidate`, `/consolidate-deep`, and `/memory-refresh` are in-session by default.
-- Compaction-aware mem-core reinjection + scope-aware loader wiring in `plugin/turn-guard.ts` (`session.compacted`, `session.started`, `session.idle`)
-- consolidation write-authority guard in `plugin/turn-guard.ts` (alerts when non-dreamer agents call protected consolidation write tools)
-- OpenCode source-transcript capture verification heartbeat in `plugin/turn-guard.ts` with status output in `./.electric-shepherd/turn-guard-status.json`
-- Opt-in auto-consolidation in `plugin/turn-guard.ts` (idle/volume/compaction triggers + cooldown + watchdog)
+- Compaction-aware mem-core reinjection + scope-aware loader wiring in `plugin/session-policy.ts` (`session.compacted`, `session.started`, `session.idle`)
+- consolidation write-authority guard in `plugin/session-policy.ts` (alerts when non-dreamer agents call protected consolidation write tools)
+- OpenCode source-transcript capture verification heartbeat in `plugin/session-policy.ts` with status output in `./.electric-shepherd/turn-guard-status.json`
+- Opt-in auto-consolidation in `plugin/session-policy.ts` (idle/volume/compaction triggers + cooldown + watchdog)
 - Orphan/hang hardening for auto-consolidation (cross-process lockfile, native MemPalace PID-liveness probe, process-tree kill, bounded tracking maps, start-failure cooldown rollback)
 - Native-first standalone consolidation coordination via `scripts/native-consolidation-coord.py` with lockfile fallback (`scripts/consolidation-lock.ts`), while plugin-triggered runs keep inherited-lock behavior
 - Policy adapter scaffold in `adapter/memgraph.ts`, retrieval expansion in `adapter/retrieval-expansion.ts`, source-to-derived consolidation in `adapter/synthesis-consolidation.ts`, and validation+merge review in `adapter/validation-merge-review.ts`

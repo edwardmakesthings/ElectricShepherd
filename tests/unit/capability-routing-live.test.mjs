@@ -3,7 +3,7 @@ import test from "node:test";
 
 /**
  * P0-1 acceptance: Phase 14/15 CONSUME (getFailureAdjustedRouting) is now wired
- * into the LIVE delegation routing in plugin/turn-guard.ts (tool.execute.before,
+ * into the LIVE delegation routing in plugin/session-policy.ts (tool.execute.before,
  * task branch). This file proves the live call site behaves correctly:
  *
  *   1. baseline selection UNCHANGED when no evidence (fallback / no-data),

@@ -132,7 +132,7 @@ export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
   { envKey: "ESHEPHERD_RETRY_DISABLED_AGENTS", path: "retry.disabledAgents", kind: "csv", defaultValue: "" },
   { envKey: "ESHEPHERD_RETRY_DISABLED_MODES", path: "retry.disabledModes", kind: "csv", defaultValue: "" },
   // End-of-session memory-checkpoint prompt: agents to skip (utility subagents by
-  // default — see DEFAULT_CHECKPOINT_DISABLED_AGENTS in plugin/turn-guard.ts). An
+  // default — see DEFAULT_CHECKPOINT_DISABLED_AGENTS in plugin/session-policy.ts). An
   // empty CSV falls back to that built-in list.
   { envKey: "ESHEPHERD_CHECKPOINT_DISABLED_AGENTS", path: "checkpoint.disabledAgents", kind: "csv", defaultValue: "" },
 
