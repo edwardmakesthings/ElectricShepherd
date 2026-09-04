@@ -84,11 +84,6 @@ import { bindSessionPolicyHandlers, issueRetryWithGating, maybeSpiralNudgeWithGa
 import { bindToolExecuteBefore } from "./session-policy/tool-hook.ts"
 import type { TurnGuardContext } from "./session-policy/context.ts"
 import { initSessionPolicyState } from "./session-policy/state.ts"
-
-// Absolute path to the ElectricShepherd install root (the plugin's own repo).
-// Runtime scripts must run from HERE — not the consumer project's cwd — so
-// loadRuntimeEnv finds ElectricShepherd/.env (or the sibling docker/.env) and
-// scripts resolve their sibling adapter modules.
 const ESHEPHERD_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 
 export const TurnGuard = async ({ client, directory }: any) => {
@@ -108,8 +103,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
     env: runtimeEnv,
     cwd: projectRoot,
   })
-  // Config readers + all startup-resolved values and per-session Maps/Sets live in
-  // one helper so this file stays a thin adapter; see session-policy/state.ts.
   const state = initSessionPolicyState(runtimeConfig.valuesByPath)
   const {
     cfgRaw,
@@ -201,9 +194,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
     console.log(`${START_BANNER}: duplicate plugin load detected for directory=${rootDirectory}; skipping secondary instance`)
     return {}
   }
-  // Test seam: tests run the real handler in-process and need a fresh instance
-  // per temp project dir; the plugin dedupes on globalThis, so allow an explicit
-  // reset from test code (never set in production).
   if ((globalState as any)[TURN_GUARD_INSTANCE_RESET_KEY]) {
     delete (globalState as any)[TURN_GUARD_INSTANCE_RESET_KEY]
     instanceDirs.clear()
@@ -227,9 +217,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
         : "OFF by default (ESHEPHERD_RETRY_ENABLED=true to opt in)"
     }`,
   )
-  // Recording/client helper cluster (lazy palace clients + Phase 13/14/15/16 CREATE
-  // recorders). Extracted to session-policy/turn-guard-recording.ts — same closures,
-  // built from an explicit deps object instead of this function's closure.
   const recording = createRecordingHelpers({
     cfgRaw,
     runtimeEnv,
@@ -256,10 +243,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
     queuePendingIntervention,
     confirmPendingInterventions,
   } = recording
-
-  // Loop-guard status banner. Emitted HERE, after the consts above are
-  // initialized — emitting it earlier is a temporal-dead-zone ReferenceError
-  // that throws before the hooks object returns, silently disabling the plugin.
   console.log(
     `[turn-guard] loop guard: ${
       loopGuardEnabled
@@ -275,8 +258,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
     : "OFF (ESHEPHERD_SPIRALGUARD_ENABLED=true to opt in)"
      }`,
    )
-
-  // P3-7: structured effective-config echo — single JSON line for programmatic parsing
   console.log(
     `[turn-guard] config=${JSON.stringify({
       retryEnabled,
@@ -317,17 +298,10 @@ export const TurnGuard = async ({ client, directory }: any) => {
       autoConsolidationMaxTrackedSessions,
     })}`,
   )
-
-  // --- checkpoint state ---
-  // Agents exempt from the end-of-session memory-checkpoint prompt. Config CSV
-  // (checkpoint.disabledAgents) overrides; empty falls back to the built-in
-  // utility-subagent list above.
   const checkpointDisabledAgents = toLowerSet(
     cfgCSV("checkpoint.disabledAgents").length > 0 ? cfgCSV("checkpoint.disabledAgents") : DEFAULT_CHECKPOINT_DISABLED_AGENTS,
   )
   const checkpointedSessions = new Set<string>()
-  // Count only TERMINAL assistant messages, not streaming updates — otherwise a
-  // single reply satisfies the "real work" gate within the first turn.
   const terminalCountBySession = new Map<string, number>()
   const memcoreInjectionBySession = new Map<string, { signature: string; at: number; scopeDir: string }>()
   const activeRoutingBySession = new Map<string, {
@@ -336,12 +310,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
   }>()
   const memoryReadSessions = new Set<string>()
   const sourceCaptureBySession = new Map<string, { totalEvents: number; lastEvent: string; lastAt: string; lastSuccess: boolean }>()
-  // Tracks post-compaction mem-core reinjection events per session.
   const compactionPathBySession = new Map<string, { path: "post-compact-fallback"; at: string }>()
-
-  // Shared runtime context for the policy binders. Built once after all config
-  // values and per-session Maps above are initialized; the binders read their
-  // closure deps from here instead of closing over ~40 separate locals.
   const context: TurnGuardContext = {
     cfgRaw,
     cfgBool,
@@ -419,12 +388,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
     projectRoot,
     client,
   }
-
-  // --- auto-consolidation state ---
-  // Pending idle-delay timers (cleared/overridden when a new message arrives),
-  // last-run timestamps for the cooldown throttle, and a count of new assistant
-  // turns since the last run for the volume trigger. A single in-flight flag
-  // prevents overlapping background consolidations across all sessions.
   const autoConsolidationPendingTimer = new Map<string, ReturnType<typeof setTimeout>>()
   const autoConsolidationLastRunAt = new Map<string, number>()
   const autoConsolidationMessagesSinceRun = new Map<string, number>()
@@ -540,20 +503,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
       writeStatusFile: (extra) => writeStatusFile(projectRoot, statusSnapshot(extra)),
     })
   }
-
-  // Spawn the deterministic consolidation script in the background. Deterministic
-  // (no live mapper) so it never forces a model load. The caller has already set
-  // autoConsolidationInFlight and acquired the cross-process lock; this function owns the
-  // process lifecycle and is the SOLE place that clears both, via settle().
-  //
-  // Robustness:
-  //   - The default path spawns `node` directly (no shell) so the watchdog can
-  //     actually kill the process tree; a user-provided command is free-form and
-  //     needs a shell.
-  //   - A watchdog kills a run that exceeds autoConsolidationTimeoutMs, so a hung MCP
-  //     endpoint can never wedge the in-flight flag permanently.
-  //   - settle() is idempotent, so exit/error/timeout racing each other only
-  //     clears state once.
   async function runConsolidationCommand(sid: string, trigger: string, onStartFailure?: () => void): Promise<void> {
     return runConsolidationCommandWithGating({
       sid,
@@ -574,11 +523,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
       onStartFailure,
     })
   }
-
-  // Evaluate the opt-in/cooldown/threshold gate and, if it passes, claim the
-  // cross-process lock and start a run. State (cooldown stamp, message reset,
-  // in-flight) is only stamped once the lock is held, so a run blocked by another
-  // process/instance can still fire on a later trigger.
   function evaluateAutoConsolidation(sid: string, trigger: AutoConsolidationTrigger): void {
     return evaluateAutoConsolidationWithGating({
       sid,
@@ -599,10 +543,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
       writeStatusFile: (extra) => writeStatusFile(projectRoot, statusSnapshot(extra)),
     })
   }
-
-  // Arm/replace the idle-delay timer. The timer represents \"stayed quiet for the
-  // full delay\"; a new message clears it (see onMessageUpdated) so it is the
-  // overridable delay rather than a fixed schedule.
   function armAutoConsolidationIdleTimer(sid: string): void {
     return armAutoConsolidationIdleTimerWithGating({
       sid,
@@ -614,10 +554,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
       writeStatusFile: (extra) => writeStatusFile(projectRoot, statusSnapshot(extra)),
     })
   }
-
-  // A new message means the session is active again: cancel any pending
-  // idle-triggered run and, for terminal assistant turns, advance the volume
-  // counter and eagerly evaluate the volume trigger.
   function noteAutoConsolidationActivity(sid: string, info: any): void {
     return noteAutoConsolidationActivityWithGating({
       sid,
@@ -630,17 +566,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
       evaluateAutoConsolidation,
     })
   }
-
-  // ── LEGACY OPT-IN: auto-retry guard ────────────────────────────────────────────
-  // This block compensates for Ollama/LiteLLM returning finish_reason="stop" on
-  // turns that still contained structured tool_calls, causing premature agent-loop
-  // exit (opencode#20719). With llama-server (or any correctly-signalling backend),
-  // finish="stop" and finish="tool-calls" mean what they say.
-  //
-  // Default: DISABLED (ESHEPHERD_RETRY_ENABLED=true to opt in). When disabled the
-  // entire function returns immediately — zero per-message overhead.
-  // Retain as an opt-in safety net for providers that still mis-signal.
-  // Returns true if a retry prompt was issued.
   const issueRetry = async (
     sid: string,
 
@@ -667,11 +592,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
       queuePendingIntervention,
     })
   }
-
-  // Reactive deliberation-spiral guard. Sibling to issueRetry: retry owns stalls
-  // (no useful output / mid-intent); this owns the opposite failure — a finish=stop
-  // turn dense with announced-but-unexecuted investigation and zero action parts.
-  // Fires independently of retryEnabled.
   const maybeSpiralNudge = async (
     sid: string,
 
@@ -700,9 +620,6 @@ export const TurnGuard = async ({ client, directory }: any) => {
       queuePendingIntervention,
     })
   }
-
-  // Returns true if a checkpoint prompt was issued. Idle-only, once per session,
-  // and only on a genuinely complete turn so it never fires over a stall.
   const maybeCheckpoint = async (sid: string, last: MessageWithParts): Promise<boolean> => {
 
     return maybeCheckpointWithGating({
