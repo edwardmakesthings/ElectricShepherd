@@ -28,7 +28,7 @@ import { tool } from "@opencode-ai/plugin";
 import { SKILL_DOMAINS, type SkillDomain } from "../adapter/memgraph.ts";
 import { asObject, asText, createPalaceClient, parseRows, parseTaxonomy } from "../adapter/palace-tools.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
-import { runCheckpointWrite } from "../core/operation.ts";
+import { runCheckDuplicate, runCheckpointWrite, runKgAddWrites } from "../core/operation.ts";
 import { normalizeDryRunArg } from "../core/substrate.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
 import { pickPurposeRoom } from "./ingest_docs.ts";
@@ -123,13 +123,8 @@ export async function runSkillFiling(args: {
       pre = { total: 0, covered: 0 }; // unreadable room — report it, do not guess
     }
 
-    let duplicateDrawerId: string | undefined;
-    try {
-      const dup = asObject(await args.call("check_duplicate", { content }));
-      if (dup.is_duplicate === true) duplicateDrawerId = asText(dup.drawer_id || dup.id).trim() || undefined;
-    } catch {
-      // guard is best-effort: an unreadable check_duplicate must not block filing
-    }
+    const dup = await runCheckDuplicate(args.call, content);
+    const duplicateDrawerId = dup.isDuplicate ? dup.drawerId : undefined;
 
     return {
       ok: true,
@@ -148,21 +143,17 @@ export async function runSkillFiling(args: {
   }
 
   // ---- APPLY: duplicate guard → add_drawer → stamp. ----
-  try {
-    const dup = asObject(await args.call("check_duplicate", { content }));
-    if (dup.is_duplicate === true) {
-      return {
-        ok: true,
-        wing,
-        room,
-        reused,
-        dry_run: false,
-        duplicate_drawer_id: asText(dup.drawer_id || dup.id).trim() || undefined,
-        next_step: "Exact duplicate already filed — nothing written. Re-file with different content only if the procedure genuinely changed.",
-      };
-    }
-  } catch {
-    // best-effort guard; proceed to filing (substrate dedup is the backstop)
+  const dup = await runCheckDuplicate(args.call, content);
+  if (dup.isDuplicate === true) {
+    return {
+      ok: true,
+      wing,
+      room,
+      reused,
+      dry_run: false,
+      duplicate_drawer_id: dup.drawerId,
+      next_step: "Exact duplicate already filed — nothing written. Re-file with different content only if the procedure genuinely changed.",
+    };
   }
 
   // AC #11: production drawer creation goes through runCheckpointWrite (the shared
@@ -211,17 +202,11 @@ export async function runSkillFiling(args: {
 
   // Stamp the source-type axis, then the Phase 12 domain axis. `es-status` is
   // intentionally NOT touched — orthogonal axes; a skill is authoritative on arrival.
-  let stampFailed = 0;
-  try {
-    await args.call("kg_add", { subject: drawerId, predicate: "es-source-type", object: "skill", source_closet: drawerId });
-  } catch {
-    stampFailed += 1;
-  }
-  try {
-    await args.call("kg_add", { subject: drawerId, predicate: "es-domain", object: domain, source_closet: drawerId });
-  } catch {
-    stampFailed += 1;
-  }
+  const stampResults = await runKgAddWrites(args.call, [
+    { payload: { subject: drawerId, predicate: "es-source-type", object: "skill", source_closet: drawerId } },
+    { payload: { subject: drawerId, predicate: "es-domain", object: domain, source_closet: drawerId } },
+  ]);
+  const stampFailed = stampResults.filter((result) => !result.ok).length;
 
   const report: SkillFilingReport = { ok: true, wing, room, reused, dry_run: false, drawer_id: drawerId, domain };
   if (stampFailed > 0) {

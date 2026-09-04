@@ -262,6 +262,7 @@ test("TurnGuard CREATE wiring: loop-block failure records event and persists int
   process.env.ESHEPHERD_AUTO_CONSOLIDATION_ENABLED = "false";
   process.env.ESHEPHERD_MEMCORE_REINJECT_ENABLED = "false";
   process.env.ESHEPHERD_LOOPGUARD_THRESHOLD = "3";
+  process.env.ESHEPHERD_LOOPGUARD_MESSAGE_DISTANCE_WINDOW = "2";
 
   const prompts = [];
   const client = {
@@ -295,6 +296,25 @@ test("TurnGuard CREATE wiring: loop-block failure records event and persists int
     await new Promise((resolve) => setTimeout(resolve, 0));
     await hook({ ...input }, { args: { ...input.args } });
     await new Promise((resolve) => setTimeout(resolve, 0));
+
+    for (let i = 0; i < 16; i += 1) {
+      await plugin.event({
+        event: {
+          type: "message.updated",
+          properties: {
+            info: {
+              id: `msg-${i}`,
+              role: "assistant",
+              finish: "tool-calls",
+              sessionID: "sid-loop",
+            },
+          },
+        },
+      });
+    }
+
+    await hook({ ...input }, { args: { ...input.args } });
+    await hook({ ...input }, { args: { ...input.args } });
 
     const failureEvent = kgAdds.find((row) => row.predicate === "es-failure-event" && row.object === "loop");
     assert.ok(failureEvent, "blocked loop must record es-failure-event=loop");

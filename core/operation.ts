@@ -56,6 +56,40 @@ export type CheckpointWriteResult = {
   raw?: Record<string, unknown>;
 };
 
+export type KgAddWrite = {
+  payload: Record<string, unknown>;
+};
+
+export type KgAddWriteResult = {
+  ok: boolean;
+  error?: string;
+};
+
+export type KgSupersedeWrite = {
+  payload: Record<string, unknown>;
+};
+
+export type KgSupersedeWriteResult = {
+  ok: boolean;
+  error?: string;
+};
+
+export type KgInvalidateWrite = {
+  payload: Record<string, unknown>;
+};
+
+export type KgInvalidateWriteResult = {
+  ok: boolean;
+  error?: string;
+};
+
+export type CheckDuplicateResult = {
+  ok: boolean;
+  isDuplicate: boolean;
+  drawerId?: string;
+  error?: string;
+};
+
 function asObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
 }
@@ -150,5 +184,57 @@ export async function runCheckpointWrite(
       dry_run: false,
       error: String(err),
     };
+  }
+}
+
+export async function runKgAddWrites(call: CallTool, writes: KgAddWrite[]): Promise<KgAddWriteResult[]> {
+  const results: KgAddWriteResult[] = [];
+  for (const write of writes) {
+    try {
+      await call("kg_add", write.payload);
+      results.push({ ok: true });
+    } catch (err) {
+      results.push({ ok: false, error: String(err) });
+    }
+  }
+  return results;
+}
+
+export async function runKgSupersedeWrites(call: CallTool, writes: KgSupersedeWrite[]): Promise<KgSupersedeWriteResult[]> {
+  const results: KgSupersedeWriteResult[] = [];
+  for (const write of writes) {
+    try {
+      await call("kg_supersede", write.payload);
+      results.push({ ok: true });
+    } catch (err) {
+      results.push({ ok: false, error: String(err) });
+    }
+  }
+  return results;
+}
+
+export async function runKgInvalidateWrites(call: CallTool, writes: KgInvalidateWrite[]): Promise<KgInvalidateWriteResult[]> {
+  const results: KgInvalidateWriteResult[] = [];
+  for (const write of writes) {
+    try {
+      await call("kg_invalidate", write.payload);
+      results.push({ ok: true });
+    } catch (err) {
+      results.push({ ok: false, error: String(err) });
+    }
+  }
+  return results;
+}
+
+export async function runCheckDuplicate(call: CallTool, content: string): Promise<CheckDuplicateResult> {
+  try {
+    const raw = asObject(await call("check_duplicate", { content }));
+    return {
+      ok: true,
+      isDuplicate: raw.is_duplicate === true,
+      drawerId: String(raw.drawer_id || raw.id || "").trim() || undefined,
+    };
+  } catch (err) {
+    return { ok: false, isDuplicate: false, error: String(err) };
   }
 }

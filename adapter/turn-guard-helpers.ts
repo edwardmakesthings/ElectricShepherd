@@ -279,6 +279,8 @@ export function computeToolSignature(tool: string, args: unknown): string {
 
 export type LoopGuardDecision = { count: number; shouldIntervene: boolean; exhausted: boolean }
 
+type LoopWindowEntry = string | { signature: string; atMessage: number }
+
 /**
  * Decide whether the current tool call is a loop worth interrupting.
  *
@@ -293,13 +295,24 @@ export type LoopGuardDecision = { count: number; shouldIntervene: boolean; exhau
  * from "not a loop" — the caller should log the former rather than intervene.
  */
 export function decideLoopIntervention(args: {
-  window: string[]
+  window: LoopWindowEntry[]
   signature: string
   repeatThreshold: number
   interventionsUsed: number
   maxInterventions: number
+  currentMessage?: number
+  messageDistanceWindow?: number
 }): LoopGuardDecision {
-  const count = args.window.reduce((n, sig) => (sig === args.signature ? n + 1 : n), 0) + 1
+  const currentMessage = Number(args.currentMessage ?? 0)
+  const distanceWindow = Number(args.messageDistanceWindow ?? 0)
+  const count = args.window.reduce((n, entry) => {
+    if (typeof entry === "string") {
+      return entry === args.signature ? n + 1 : n
+    }
+    if (entry.signature !== args.signature) return n
+    if (distanceWindow <= 0) return n + 1
+    return currentMessage - Number(entry.atMessage ?? 0) <= distanceWindow ? n + 1 : n
+  }, 0) + 1
   const repeated = count >= args.repeatThreshold
   const exhausted = repeated && args.interventionsUsed >= args.maxInterventions
   return { count, shouldIntervene: repeated && !exhausted, exhausted }

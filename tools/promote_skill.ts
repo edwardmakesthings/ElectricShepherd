@@ -43,7 +43,7 @@ import { tool } from "@opencode-ai/plugin";
 import { asObject, asText, createPalaceClient, drawerContentFrom, parseFacts, parseTaxonomy } from "../adapter/palace-tools.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
 import { normalizeDryRunArg } from "../core/substrate.ts";
-import { runCheckpointWrite } from "../core/operation.ts";
+import { runCheckDuplicate, runCheckpointWrite, runKgAddWrites } from "../core/operation.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
 import { SKILLS_ROOM, SKILL_LIKE_STEMS } from "./file_skill.ts";
 import { pickPurposeRoom } from "./ingest_docs.ts";
@@ -306,13 +306,8 @@ export async function runSkillPromotion(args: {
       pre = { total: 0, covered: 0 }; // unreadable room — report it, do not guess
     }
 
-    let duplicateDrawerId: string | undefined;
-    try {
-      const dup = asObject(await args.call("check_duplicate", { content }));
-      if (dup.is_duplicate === true) duplicateDrawerId = asText(dup.drawer_id || dup.id).trim() || undefined;
-    } catch {
-      // guard is best-effort: an unreadable check_duplicate must not block promotion
-    }
+    const dup = await runCheckDuplicate(args.call, content);
+    const duplicateDrawerId = dup.isDuplicate ? dup.drawerId : undefined;
 
     return {
       ok: true,
@@ -331,22 +326,18 @@ export async function runSkillPromotion(args: {
   }
 
   // ---- APPLY: duplicate guard → add_drawer → stamp → promoted-from edge. ----
-  try {
-    const dup = asObject(await args.call("check_duplicate", { content }));
-    if (dup.is_duplicate === true) {
-      return {
-        ok: true,
-        dry_run: false,
-        skill_id: skillId,
-        from,
-        to: { wing: sharedWing, room },
-        reused_room: reused,
-        duplicate_drawer_id: asText(dup.drawer_id || dup.id).trim() || undefined,
-        next_step: "Exact duplicate already filed — nothing written (idempotent re-apply).",
-      };
-    }
-  } catch {
-    // best-effort guard; proceed to filing (substrate dedup is the backstop)
+  const dup = await runCheckDuplicate(args.call, content);
+  if (dup.isDuplicate === true) {
+    return {
+      ok: true,
+      dry_run: false,
+      skill_id: skillId,
+      from,
+      to: { wing: sharedWing, room },
+      reused_room: reused,
+      duplicate_drawer_id: dup.drawerId,
+      next_step: "Exact duplicate already filed — nothing written (idempotent re-apply).",
+    };
   }
 
   // AC #11: production drawer creation goes through runCheckpointWrite (the shared
@@ -397,31 +388,19 @@ export async function runSkillPromotion(args: {
   // Stamp es-source-type: skill on the shared copy. `es-status` is intentionally
   // NOT touched — orthogonal axes. A failed stamp is reported, never fatal (the
   // duplicate guard makes the re-run safe).
-  let stampFailed = 0;
-  try {
-    await args.call("kg_add", { subject: drawerId, predicate: "es-source-type", object: "skill", source_closet: drawerId });
-  } catch {
-    stampFailed = 1;
-  }
-
   // Phase 12: propagate the origin's es-domain to the shared copy. The filter is a
   // HARD match (null/general/requesting-domain), so an unstamped shared copy would be
   // admitted everywhere — the domain must travel with the skill or the promotion
   // silently degrades every project's procedural retrieval.
-  try {
-    await args.call("kg_add", { subject: drawerId, predicate: "es-domain", object: sourceDomain, source_closet: drawerId });
-  } catch {
-    stampFailed = 1;
-  }
-
   // The promoted-from lineage edge: shared copy -> origin. NOT synthesized-from —
   // it must never feed height or recursive lineage traversal (see memgraph.ts).
-  let edgeFailed = 0;
-  try {
-    await args.call("kg_add", { subject: drawerId, predicate: PROMOTED_FROM_PREDICATE, object: skillId, source_drawer_id: drawerId });
-  } catch {
-    edgeFailed = 1;
-  }
+  const writeResults = await runKgAddWrites(args.call, [
+    { payload: { subject: drawerId, predicate: "es-source-type", object: "skill", source_closet: drawerId } },
+    { payload: { subject: drawerId, predicate: "es-domain", object: sourceDomain, source_closet: drawerId } },
+    { payload: { subject: drawerId, predicate: PROMOTED_FROM_PREDICATE, object: skillId, source_drawer_id: drawerId } },
+  ]);
+  const stampFailed = writeResults[0]?.ok && writeResults[1]?.ok ? 0 : 1;
+  const edgeFailed = writeResults[2]?.ok ? 0 : 1;
 
   const report: SkillPromotionReport = {
     ok: true,

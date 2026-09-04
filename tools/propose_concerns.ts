@@ -29,6 +29,7 @@
 import { tool } from "@opencode-ai/plugin";
 import { asObject, asText, createPalaceClient, parseFacts } from "../adapter/palace-tools.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
+import { runKgAddWrites } from "../core/operation.ts";
 import { normalizeDryRunArg } from "../core/substrate.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
 
@@ -185,20 +186,27 @@ export async function runConcernProposal(args: {
 
   // APPLY: one kg_add per approved edge. Best-effort per edge — one failure never
   // aborts the rest (relocate_memory lineage pattern).
-  for (const edge of edges) {
-    if (edge.status !== "proposed") continue;
-    try {
-      await args.call("kg_add", {
+  const proposed = edges.filter((edge) => edge.status === "proposed");
+  const results = await runKgAddWrites(
+    args.call,
+    proposed.map((edge) => ({
+      payload: {
         subject: synthesisId,
         predicate: CONCERNS_PREDICATE,
         object: edge.doc_id,
         source_closet: synthesisId,
-      });
+      },
+    })),
+  );
+  for (let i = 0; i < proposed.length; i += 1) {
+    const edge = proposed[i];
+    const result = results[i];
+    if (result?.ok) {
       edge.status = "added";
       counts.added += 1;
-    } catch (err) {
+    } else {
       edge.status = "add-failed";
-      edge.error = String(err);
+      edge.error = String(result?.error || "kg_add failed");
       counts.add_failed += 1;
     }
   }

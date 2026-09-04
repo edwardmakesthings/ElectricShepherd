@@ -147,9 +147,11 @@ export const TurnGuard = async ({ client, directory }: any) => {
     taskEscalationsBySession,
     taskRecentLaunchBySession,
     workedExampleFiledByShape,
+    messageCountBySession,
     loopGuardEnabled,
     loopRepeatThreshold,
     loopWindowSize,
+    loopMessageDistanceWindow,
     loopMaxInterventions,
     loopMutationTools,
     loopExemptTools,
@@ -177,6 +179,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
     pendingCalibrationBySession,
     failureRecordedBySession,
     pendingInterventionBySession,
+    lastCountedMessageIdBySession,
     spiralGuardEnabled,
     spiralInvestigateThreshold,
     spiralReversalThreshold,
@@ -260,7 +263,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
   console.log(
     `[turn-guard] loop guard: ${
       loopGuardEnabled
-        ? `ON (aborts a tool call repeated ${loopRepeatThreshold}x with no edit between; max ${loopMaxInterventions} nudges/session)`
+        ? `ON (aborts a tool call repeated ${loopRepeatThreshold}x within ${loopMessageDistanceWindow} messages with no edit between; max ${loopMaxInterventions} nudges/session)`
         : "OFF (ESHEPHERD_LOOPGUARD_ENABLED=true to opt in)"
     }`,
   )
@@ -287,6 +290,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
       loopGuardEnabled,
       loopRepeatThreshold,
       loopWindowSize,
+      loopMessageDistanceWindow,
       loopMaxInterventions,
       taskWatchdogEnabled,
       taskWatchdogThreshold,
@@ -370,6 +374,8 @@ export const TurnGuard = async ({ client, directory }: any) => {
     startupConfirmedBySession,
     inspectedStopBySession,
     toolWindowBySession,
+    messageCountBySession,
+    lastCountedMessageIdBySession,
     loopInterventionsBySession,
     taskWindowBySession,
     taskEscalationsBySession,
@@ -378,6 +384,7 @@ export const TurnGuard = async ({ client, directory }: any) => {
     loopGuardEnabled,
     loopRepeatThreshold,
     loopWindowSize,
+    loopMessageDistanceWindow,
     loopMaxInterventions,
     loopMutationTools,
     loopExemptTools,
@@ -736,6 +743,8 @@ export const TurnGuard = async ({ client, directory }: any) => {
     memcoreInjectionBySession,
     sourceCaptureBySession,
     compactionPathBySession,
+    messageCountBySession,
+    lastCountedMessageIdBySession,
   })
 
 

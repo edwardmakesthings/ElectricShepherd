@@ -44,7 +44,9 @@ export interface TurnGuardContext {
   inspectedStopBySession: Map<string, Set<string>>
 
   // ── loop guard state ──────────────────────────────────────────────
-  toolWindowBySession: Map<string, string[]>
+  toolWindowBySession: Map<string, Array<{ signature: string; atMessage: number }>>
+  messageCountBySession: Map<string, number>
+  lastCountedMessageIdBySession: Map<string, string>
   loopInterventionsBySession: Map<string, number>
   taskWindowBySession: Map<string, string[]>
   taskEscalationsBySession: Map<string, number>
@@ -53,6 +55,7 @@ export interface TurnGuardContext {
   loopGuardEnabled: boolean
   loopRepeatThreshold: number
   loopWindowSize: number
+  loopMessageDistanceWindow: number
   loopMaxInterventions: number
   loopMutationTools: Set<string>
   loopExemptTools: Set<string>

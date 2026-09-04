@@ -164,9 +164,12 @@ function pruneAllSessionState(args: {
   retriedParentBySession: Map<string, Map<string, number>>
   retriesTotalBySession: Map<string, number>
   retryChainBySession: Map<string, number>
+  retriesTotalBySession: Map<string, number>
   startupConfirmedBySession: Set<string>
   inspectedStopBySession: Map<string, Set<string>>
-  toolWindowBySession: Map<string, string[]>
+  toolWindowBySession: Map<string, Array<{ signature: string; atMessage: number }>>
+  messageCountBySession: Map<string, number>
+  lastCountedMessageIdBySession: Map<string, string>
   loopInterventionsBySession: Map<string, number>
   taskWindowBySession: Map<string, string[]>
   taskEscalationsBySession: Map<string, number>
@@ -194,6 +197,8 @@ function pruneAllSessionState(args: {
   pruneToMax(args.startupConfirmedBySession, autoConsolidationMaxTrackedSessions)
   pruneToMax(args.inspectedStopBySession, autoConsolidationMaxTrackedSessions)
   pruneToMax(args.toolWindowBySession, autoConsolidationMaxTrackedSessions)
+  pruneToMax(args.messageCountBySession, autoConsolidationMaxTrackedSessions)
+  pruneToMax(args.lastCountedMessageIdBySession, autoConsolidationMaxTrackedSessions)
   pruneToMax(args.loopInterventionsBySession, autoConsolidationMaxTrackedSessions)
   pruneToMax(args.taskWindowBySession, autoConsolidationMaxTrackedSessions)
   pruneToMax(args.taskEscalationsBySession, autoConsolidationMaxTrackedSessions)
@@ -234,7 +239,9 @@ export async function onMessageUpdatedWithGating(args: {
   pruneToMax: (collection: Map<string, any> | Set<string>, max: number) => void
   retriedParentBySession: Map<string, Map<string, number>>
   inspectedStopBySession: Map<string, Set<string>>
-  toolWindowBySession: Map<string, string[]>
+  toolWindowBySession: Map<string, Array<{ signature: string; atMessage: number }>>
+  messageCountBySession: Map<string, number>
+  lastCountedMessageIdBySession: Map<string, string>
   loopInterventionsBySession: Map<string, number>
   taskWindowBySession: Map<string, string[]>
   taskEscalationsBySession: Map<string, number>
@@ -255,6 +262,14 @@ export async function onMessageUpdatedWithGating(args: {
   const info = event?.properties?.info
   const sid = String(info?.sessionID ?? findSessionID(event))
   if (!sid) return
+  const messageID = String(info?.id ?? "")
+  if (messageID) {
+    const previousMessageID = args.lastCountedMessageIdBySession.get(sid)
+    if (previousMessageID !== messageID) {
+      args.messageCountBySession.set(sid, (args.messageCountBySession.get(sid) ?? 0) + 1)
+      args.lastCountedMessageIdBySession.set(sid, messageID)
+    }
+  }
 
   // A real (non-injected) user message resets the retry chain counter.
   if (info?.role === "user") {
@@ -355,7 +370,9 @@ export async function onSessionIdleWithGating(args: {
   retriesTotalBySession: Map<string, number>
   retryChainBySession: Map<string, number>
   inspectedStopBySession: Map<string, Set<string>>
-  toolWindowBySession: Map<string, string[]>
+  toolWindowBySession: Map<string, Array<{ signature: string; atMessage: number }>>
+  messageCountBySession: Map<string, number>
+  lastCountedMessageIdBySession: Map<string, string>
   loopInterventionsBySession: Map<string, number>
   taskWindowBySession: Map<string, string[]>
   taskEscalationsBySession: Map<string, number>
@@ -527,7 +544,9 @@ export async function onSessionCompactedWithGating(args: {
   retryChainBySession: Map<string, number>
   startupConfirmedBySession: Set<string>
   inspectedStopBySession: Map<string, Set<string>>
-  toolWindowBySession: Map<string, string[]>
+  toolWindowBySession: Map<string, Array<{ signature: string; atMessage: number }>>
+  messageCountBySession: Map<string, number>
+  lastCountedMessageIdBySession: Map<string, string>
   loopInterventionsBySession: Map<string, number>
   taskWindowBySession: Map<string, string[]>
   taskEscalationsBySession: Map<string, number>
@@ -580,7 +599,9 @@ export async function onSessionCompactedWithGating(args: {
 
 export async function onSessionStartedWithGating(args: {
   event: any
-  toolWindowBySession: Map<string, string[]>
+  toolWindowBySession: Map<string, Array<{ signature: string; atMessage: number }>>
+  messageCountBySession: Map<string, number>
+  lastCountedMessageIdBySession: Map<string, string>
   loopInterventionsBySession: Map<string, number>
   activeRoutingBySession: Map<string, { agent?: string; model?: { providerID: string; modelID: string } }>
   maybeInjectMemcore: (opts: { sid: string; event: any; reason: "idle" | "compacted" | "compacting" | "started"; messages?: MessageWithParts[]; anchor?: MessageWithParts | null; force?: boolean }) => Promise<boolean>
@@ -590,6 +611,8 @@ export async function onSessionStartedWithGating(args: {
   if (!sid) return
 
   args.toolWindowBySession.delete(sid)
+  args.messageCountBySession.delete(sid)
+  args.lastCountedMessageIdBySession.delete(sid)
   args.loopInterventionsBySession.delete(sid)
   args.activeRoutingBySession.delete(sid)
 
@@ -633,6 +656,8 @@ export interface SessionPolicyHandlerDeps {
   memcoreInjectionBySession: Map<string, { signature: string; at: number; scopeDir: string }>
   sourceCaptureBySession: Map<string, { totalEvents: number; lastEvent: string; lastAt: string; lastSuccess: boolean }>
   compactionPathBySession: Map<string, { path: "post-compact-fallback"; at: string }>
+  messageCountBySession: Map<string, number>
+  lastCountedMessageIdBySession: Map<string, string>
 }
 
 export function bindSessionPolicyHandlers(deps: SessionPolicyHandlerDeps) {
@@ -645,6 +670,7 @@ export function bindSessionPolicyHandlers(deps: SessionPolicyHandlerDeps) {
         directory: deps.directory,
         projectRoot: context.projectRoot,
         retryChainBySession: context.retryChainBySession,
+        retriesTotalBySession: context.retriesTotalBySession,
         startupConfirmedBySession: context.startupConfirmedBySession,
         terminalCountBySession: deps.terminalCountBySession,
         activeRoutingBySession: deps.activeRoutingBySession,
@@ -661,6 +687,8 @@ export function bindSessionPolicyHandlers(deps: SessionPolicyHandlerDeps) {
         retriedParentBySession: context.retriedParentBySession,
         inspectedStopBySession: context.inspectedStopBySession,
         toolWindowBySession: context.toolWindowBySession,
+        messageCountBySession: context.messageCountBySession,
+        lastCountedMessageIdBySession: context.lastCountedMessageIdBySession,
         loopInterventionsBySession: context.loopInterventionsBySession,
         taskWindowBySession: context.taskWindowBySession,
         taskEscalationsBySession: context.taskEscalationsBySession,
@@ -700,6 +728,8 @@ export function bindSessionPolicyHandlers(deps: SessionPolicyHandlerDeps) {
         retryChainBySession: context.retryChainBySession,
         inspectedStopBySession: context.inspectedStopBySession,
         toolWindowBySession: context.toolWindowBySession,
+        messageCountBySession: context.messageCountBySession,
+        lastCountedMessageIdBySession: context.lastCountedMessageIdBySession,
         loopInterventionsBySession: context.loopInterventionsBySession,
         taskWindowBySession: context.taskWindowBySession,
         taskEscalationsBySession: context.taskEscalationsBySession,
@@ -761,6 +791,8 @@ export function bindSessionPolicyHandlers(deps: SessionPolicyHandlerDeps) {
         startupConfirmedBySession: context.startupConfirmedBySession,
         inspectedStopBySession: context.inspectedStopBySession,
         toolWindowBySession: context.toolWindowBySession,
+        messageCountBySession: context.messageCountBySession,
+        lastCountedMessageIdBySession: context.lastCountedMessageIdBySession,
         loopInterventionsBySession: context.loopInterventionsBySession,
         taskWindowBySession: context.taskWindowBySession,
         taskEscalationsBySession: context.taskEscalationsBySession,
@@ -784,6 +816,8 @@ export function bindSessionPolicyHandlers(deps: SessionPolicyHandlerDeps) {
       return onSessionStartedWithGating({
         event,
         toolWindowBySession: context.toolWindowBySession,
+        messageCountBySession: context.messageCountBySession,
+        lastCountedMessageIdBySession: context.lastCountedMessageIdBySession,
         loopInterventionsBySession: context.loopInterventionsBySession,
         activeRoutingBySession: deps.activeRoutingBySession,
         maybeInjectMemcore: deps.maybeInjectMemcore,

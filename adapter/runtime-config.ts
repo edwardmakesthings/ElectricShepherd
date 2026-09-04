@@ -139,6 +139,7 @@ export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
   { envKey: "ESHEPHERD_LOOPGUARD_ENABLED", path: "loopGuard.enabled", kind: "boolean", defaultValue: true },
   { envKey: "ESHEPHERD_LOOPGUARD_THRESHOLD", path: "loopGuard.repeatThreshold", kind: "number", defaultValue: 3, min: 1 },
   { envKey: "ESHEPHERD_LOOPGUARD_WINDOW", path: "loopGuard.windowSize", kind: "number", defaultValue: 12, min: 1 },
+  { envKey: "ESHEPHERD_LOOPGUARD_MESSAGE_DISTANCE_WINDOW", path: "loopGuard.messageDistanceWindow", kind: "number", defaultValue: 15, min: 1 },
   { envKey: "ESHEPHERD_LOOPGUARD_MAX_INTERVENTIONS", path: "loopGuard.maxInterventions", kind: "number", defaultValue: 3, min: 1 },
   { envKey: "ESHEPHERD_LOOPGUARD_MUTATION_TOOLS", path: "loopGuard.mutationTools", kind: "csv", defaultValue: DEFAULT_LOOP_MUTATION_TOOLS.join(",") },
   { envKey: "ESHEPHERD_LOOPGUARD_EXEMPT_TOOLS", path: "loopGuard.exemptTools", kind: "csv", defaultValue: DEFAULT_LOOP_EXEMPT_TOOLS.join(",") },

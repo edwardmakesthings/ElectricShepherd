@@ -37,6 +37,11 @@ import { existsSync, statSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import { tool } from "@opencode-ai/plugin";
 import {
+  runKgAddWrites,
+  runKgInvalidateWrites,
+  runKgSupersedeWrites,
+} from "../core/operation.ts";
+import {
   asObject,
   asText,
   createPalaceClient,
@@ -208,26 +213,29 @@ export async function invalidateAndRestamp(
   const facts = await openOutgoingFacts(call, drawerId);
   if (facts === null) return { invalidated: 0, invalidateFailed: 0, factCheckFailed: true, restamped: false, stampFailed: false };
 
-  let invalidated = 0;
-  let invalidateFailed = 0;
+  const invalidateWrites: Array<{ payload: Record<string, unknown> }> = [];
   for (const fact of facts) {
     const predicate = asText(fact.predicate || fact.relation || fact.type).trim();
     const object = asText(fact.object || fact.target || fact.to || fact.tail || fact.value).trim();
     if (!predicate || !object) continue;
-    try {
-      await call("kg_invalidate", { subject: drawerId, predicate, object });
-      invalidated += 1;
-    } catch {
-      invalidateFailed += 1;
-    }
+    invalidateWrites.push({ payload: { subject: drawerId, predicate, object } });
+  }
+  const invalidateResults = await runKgInvalidateWrites(call, invalidateWrites);
+  let invalidated = 0;
+  let invalidateFailed = 0;
+  for (const result of invalidateResults) {
+    if (result.ok) invalidated += 1;
+    else invalidateFailed += 1;
   }
 
   let restamped = false;
   let stampFailed = false;
-  try {
-    await call("kg_add", { subject: drawerId, predicate: "es-source-type", object: "doc", source_closet: drawerId });
+  const [restamp] = await runKgAddWrites(call, [
+    { payload: { subject: drawerId, predicate: "es-source-type", object: "doc", source_closet: drawerId } },
+  ]);
+  if (restamp?.ok) {
     restamped = true;
-  } catch {
+  } else {
     stampFailed = true;
   }
 
@@ -343,22 +351,28 @@ export async function flagConcernedSyntheses(
       }
       if (previous) {
         // A different open marker exists: atomically supersede it on the same axis.
-        await call("kg_supersede", {
-          subject: synthesisId,
-          predicate: STALENESS_PREDICATE,
-          old_object: previous,
-          new_object: STALENESS_SOURCE_CHANGED,
-          source_closet: synthesisId,
-          ...(sourceRunId ? { source_run_id: sourceRunId } : {}),
-        });
+        const [supersede] = await runKgSupersedeWrites(call, [{
+          payload: {
+            subject: synthesisId,
+            predicate: STALENESS_PREDICATE,
+            old_object: previous,
+            new_object: STALENESS_SOURCE_CHANGED,
+            source_closet: synthesisId,
+            ...(sourceRunId ? { source_run_id: sourceRunId } : {}),
+          },
+        }]);
+        if (!supersede?.ok) throw new Error(supersede?.error || "kg_supersede failed");
       } else {
-        await call("kg_add", {
-          subject: synthesisId,
-          predicate: STALENESS_PREDICATE,
-          object: STALENESS_SOURCE_CHANGED,
-          source_closet: synthesisId,
-          ...(sourceRunId ? { source_run_id: sourceRunId } : {}),
-        });
+        const [stamp] = await runKgAddWrites(call, [{
+          payload: {
+            subject: synthesisId,
+            predicate: STALENESS_PREDICATE,
+            object: STALENESS_SOURCE_CHANGED,
+            source_closet: synthesisId,
+            ...(sourceRunId ? { source_run_id: sourceRunId } : {}),
+          },
+        }]);
+        if (!stamp?.ok) throw new Error(stamp?.error || "kg_add failed");
       }
       flagged += 1;
     } catch {

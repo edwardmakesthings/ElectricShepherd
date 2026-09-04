@@ -445,6 +445,7 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
 
     const signature = deps.computeToolSignature(toolName, args)
     const window = context.toolWindowBySession.get(sid) ?? []
+    const currentMessage = context.messageCountBySession.get(sid) ?? 0
     const interventionsUsed = context.loopInterventionsBySession.get(sid) ?? 0
 
     const { count, shouldIntervene, exhausted } = decideLoopIntervention({
@@ -453,6 +454,8 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
       repeatThreshold: context.loopRepeatThreshold,
       interventionsUsed,
       maxInterventions: context.loopMaxInterventions,
+      currentMessage,
+      messageDistanceWindow: context.loopMessageDistanceWindow,
     })
 
     if (exhausted) {
@@ -477,9 +480,9 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
       // also the most common READ tool (grep / ls / git status / test runs),
       // so "saw bash, therefore progress" was never a safe assumption.
       if (context.loopMutationTools.has(key) && count === 1) {
-        context.toolWindowBySession.set(sid, [signature])
+        context.toolWindowBySession.set(sid, [{ signature, atMessage: currentMessage }])
       } else {
-        window.push(signature)
+        window.push({ signature, atMessage: currentMessage })
         while (window.length > context.loopWindowSize) window.shift()
         context.toolWindowBySession.set(sid, window)
       }

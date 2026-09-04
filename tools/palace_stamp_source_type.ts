@@ -16,6 +16,10 @@
 
 import { tool } from "@opencode-ai/plugin";
 import {
+  runKgAddWrites,
+  runKgSupersedeWrites,
+} from "../core/operation.ts";
+import {
   asObject,
   asText,
   createPalaceClient,
@@ -315,20 +319,26 @@ export async function runSourceTypeBackfill(args: {
   await mapLimit(toStamp, concurrency, async ({ entry }) => {
     try {
       if (entry.current && entry.current !== entry.inferred) {
-        await args.call("kg_supersede", {
-          subject: entry.drawer_id,
-          predicate: "es-source-type",
-          old_object: entry.current,
-          new_object: entry.inferred,
-          source_closet: entry.drawer_id,
-        });
+        const [result] = await runKgSupersedeWrites(args.call, [{
+          payload: {
+            subject: entry.drawer_id,
+            predicate: "es-source-type",
+            old_object: entry.current,
+            new_object: entry.inferred,
+            source_closet: entry.drawer_id,
+          },
+        }]);
+        if (!result?.ok) throw new Error(result?.error || "kg_supersede failed");
       } else {
-        await args.call("kg_add", {
-          subject: entry.drawer_id,
-          predicate: "es-source-type",
-          object: entry.inferred,
-          source_closet: entry.drawer_id,
-        });
+        const [result] = await runKgAddWrites(args.call, [{
+          payload: {
+            subject: entry.drawer_id,
+            predicate: "es-source-type",
+            object: entry.inferred,
+            source_closet: entry.drawer_id,
+          },
+        }]);
+        if (!result?.ok) throw new Error(result?.error || "kg_add failed");
       }
       totals.stamped += 1;
     } catch {

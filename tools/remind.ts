@@ -24,7 +24,7 @@
  */
 
 import { tool } from "@opencode-ai/plugin";
-import { runCheckpointWrite } from "../core/operation.ts";
+import { runCheckpointWrite, runKgAddWrites } from "../core/operation.ts";
 import { asObject, asText, createPalaceClient } from "../adapter/palace-tools.ts";
 import { normalizeDryRunArg } from "../core/substrate.ts";
 import {
@@ -203,13 +203,18 @@ export async function runRemind(args: {
         { op: "kg_add es-reminder-status", index: 2, payload: { subject: drawerId, predicate: REMINDER_STATUS_PREDICATE, object: "active", valid_from: nowIso, source_drawer_id: drawerId } },
         { op: `kg_add ${REMINDER_EXPIRES_AT_PREDICATE}`, index: 3, payload: { subject: drawerId, predicate: REMINDER_EXPIRES_AT_PREDICATE, object: expiresDate.toISOString(), valid_from: nowIso, source_drawer_id: drawerId } },
       ];
-      for (const edge of edgePayloads) {
-        try {
-          await args.call("kg_add", edge.payload);
+      const edgeResults = await runKgAddWrites(
+        args.call,
+        edgePayloads.map((edge) => ({ payload: edge.payload })),
+      );
+      for (let i = 0; i < edgePayloads.length; i += 1) {
+        const edge = edgePayloads[i];
+        const result = edgeResults[i];
+        if (result?.ok) {
           steps[edge.index].status = "done";
-        } catch (err) {
+        } else {
           steps[edge.index].status = "failed";
-          steps[edge.index].error = String(err);
+          steps[edge.index].error = String(result?.error || "kg_add failed");
         }
       }
     } else {
@@ -269,18 +274,20 @@ export async function runRemind(args: {
     }
     if (expiresDate) {
       const index = what ? 1 : 0;
-      try {
-        await args.call("kg_add", {
+      const [write] = await runKgAddWrites(args.call, [{
+        payload: {
           subject: drawerId,
           predicate: REMINDER_EXPIRES_AT_PREDICATE,
           object: expiresDate.toISOString(),
           valid_from: nowIso,
           source_drawer_id: drawerId,
-        });
+        },
+      }]);
+      if (write?.ok) {
         steps[index].status = "done";
-      } catch (err) {
+      } else {
         steps[index].status = "failed";
-        steps[index].error = String(err);
+        steps[index].error = String(write?.error || "kg_add failed");
       }
     }
 
@@ -317,32 +324,33 @@ export async function runRemind(args: {
     };
   }
 
-  try {
-    await args.call("kg_add", {
+  const closePayloads: Array<Record<string, unknown>> = [{
+    subject: drawerId,
+    predicate: REMINDER_STATUS_PREDICATE,
+    object: status,
+    valid_from: nowIso,
+    source_drawer_id: drawerId,
+  }];
+  if (status === "satisfied") {
+    closePayloads.push({
       subject: drawerId,
-      predicate: REMINDER_STATUS_PREDICATE,
-      object: status,
+      predicate: REMINDER_SATISFIED_AT_PREDICATE,
+      object: nowIso,
       valid_from: nowIso,
       source_drawer_id: drawerId,
     });
-    steps[0].status = "done";
-  } catch (err) {
-    steps[0].status = "failed";
-    steps[0].error = String(err);
   }
-  if (status === "satisfied") {
-    try {
-      await args.call("kg_add", {
-        subject: drawerId,
-        predicate: REMINDER_SATISFIED_AT_PREDICATE,
-        object: nowIso,
-        valid_from: nowIso,
-        source_drawer_id: drawerId,
-      });
-      steps[1].status = "done";
-    } catch (err) {
-      steps[1].status = "failed";
-      steps[1].error = String(err);
+  const closeResults = await runKgAddWrites(
+    args.call,
+    closePayloads.map((payload) => ({ payload })),
+  );
+  for (let i = 0; i < closeResults.length; i += 1) {
+    const result = closeResults[i];
+    if (result?.ok) {
+      steps[i].status = "done";
+    } else {
+      steps[i].status = "failed";
+      steps[i].error = String(result?.error || "kg_add failed");
     }
   }
 

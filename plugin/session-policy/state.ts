@@ -20,6 +20,7 @@ import {
   DEFAULT_LOOP_GUARD_ENABLED,
   DEFAULT_LOOP_REPEAT_THRESHOLD,
   DEFAULT_LOOP_WINDOW_SIZE,
+  DEFAULT_LOOP_MESSAGE_DISTANCE_WINDOW,
   DEFAULT_LOOP_MAX_INTERVENTIONS,
   DEFAULT_LOOP_MUTATION_TOOLS,
   DEFAULT_LOOP_EXEMPT_TOOLS,
@@ -92,7 +93,9 @@ export interface SessionPolicyState {
   inspectedStopBySession: Map<string, Set<string>>
 
   // ── loop guard state ──────────────────────────────────────────────
-  toolWindowBySession: Map<string, string[]>
+  toolWindowBySession: Map<string, Array<{ signature: string; atMessage: number }>>
+  messageCountBySession: Map<string, number>
+  lastCountedMessageIdBySession: Map<string, string>
   loopInterventionsBySession: Map<string, number>
   taskWindowBySession: Map<string, string[]>
   taskEscalationsBySession: Map<string, number>
@@ -101,6 +104,7 @@ export interface SessionPolicyState {
   loopGuardEnabled: boolean
   loopRepeatThreshold: number
   loopWindowSize: number
+  loopMessageDistanceWindow: number
   loopMaxInterventions: number
   loopMutationTools: Set<string>
   loopExemptTools: Set<string>
@@ -228,7 +232,9 @@ export function initSessionPolicyState(valuesByPath: any): SessionPolicyState {
   // --- loop guard state ---
   // Recent tool-call signatures per session (oldest first), cleared by any
   // mutating tool and by each intervention (so the nudge gets a clean slate).
-  const toolWindowBySession = new Map<string, string[]>()
+  const toolWindowBySession = new Map<string, Array<{ signature: string; atMessage: number }>>()
+  const messageCountBySession = new Map<string, number>()
+  const lastCountedMessageIdBySession = new Map<string, string>()
   const loopInterventionsBySession = new Map<string, number>()
   const taskWindowBySession = new Map<string, string[]>()
   const taskEscalationsBySession = new Map<string, number>()
@@ -239,6 +245,7 @@ export function initSessionPolicyState(valuesByPath: any): SessionPolicyState {
   const loopGuardEnabled = cfgBool("loopGuard.enabled", DEFAULT_LOOP_GUARD_ENABLED)
   const loopRepeatThreshold = cfgNum("loopGuard.repeatThreshold", DEFAULT_LOOP_REPEAT_THRESHOLD)
   const loopWindowSize = cfgNum("loopGuard.windowSize", DEFAULT_LOOP_WINDOW_SIZE)
+  const loopMessageDistanceWindow = cfgNum("loopGuard.messageDistanceWindow", DEFAULT_LOOP_MESSAGE_DISTANCE_WINDOW)
   const loopMaxInterventions = cfgNum("loopGuard.maxInterventions", DEFAULT_LOOP_MAX_INTERVENTIONS)
   const loopMutationTools = toLowerSet(
     cfgCSV("loopGuard.mutationTools").length > 0
@@ -397,6 +404,8 @@ export function initSessionPolicyState(valuesByPath: any): SessionPolicyState {
     startupConfirmedBySession,
     inspectedStopBySession,
     toolWindowBySession,
+    messageCountBySession,
+    lastCountedMessageIdBySession,
     loopInterventionsBySession,
     taskWindowBySession,
     taskEscalationsBySession,
@@ -405,6 +414,7 @@ export function initSessionPolicyState(valuesByPath: any): SessionPolicyState {
     loopGuardEnabled,
     loopRepeatThreshold,
     loopWindowSize,
+    loopMessageDistanceWindow,
     loopMaxInterventions,
     loopMutationTools,
     loopExemptTools,

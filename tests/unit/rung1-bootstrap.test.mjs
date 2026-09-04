@@ -531,6 +531,16 @@ function makeBulkFakeTransport({ drawers = {}, listings = {} } = {}) {
         );
       }
 
+      if (name === "mempalace_checkpoint") {
+        const first = Array.isArray(args.items) ? args.items[0] : null;
+        const createdId = `drawer_${String(first?.wing || "wing")}_${String(first?.room || "room")}_new`;
+        const body = { results: [{ ok: true, drawer_id: createdId }] };
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: payload.id, result: { content: [{ type: "text", text: JSON.stringify(body) }] } }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+
       // Any write tool reaching here means the dry-run leaked a write — record it
       // and answer benignly so the report still completes for inspection.
       return new Response(
@@ -707,4 +717,24 @@ test("rung1: dry-run relocate_memory writes nothing (move + excerpt modes)", asy
   assert.equal(excerpted.report.verbatim_verified, true);
   assert.match(excerpted.report.next_step, /dry_run:false/);
   assert.equal(bulkWriteCallsOf(excerpted.toolCalls).length, 0, `relocate excerpt dry-run produced write calls: ${JSON.stringify(bulkWriteCallsOf(excerpted.toolCalls))}`);
+});
+
+test("rung1: apply relocate_memory excerpt files via checkpoint (no direct add_drawer)", async () => {
+  const applied = await runBulkToolHermetically(relocateMemoryTool, {
+    drawer_id: "drawer_wingB_roomY_c3",
+    target_wing: "wingA",
+    target_room: "roomX",
+    mode: "excerpt",
+    excerpt: "Middle sentence about another project.",
+    dry_run: false,
+  });
+
+  assert.equal(applied.report.ok, true);
+  assert.equal(applied.report.dry_run, false);
+  assert.equal(applied.report.mode, "excerpt");
+
+  const checkpointCalls = applied.toolCalls.filter((c) => c.name === "mempalace_checkpoint");
+  assert.equal(checkpointCalls.length, 1, `expected one checkpoint call, saw ${JSON.stringify(checkpointCalls)}`);
+  assert.equal(applied.toolCalls.filter((c) => c.name === "mempalace_add_drawer").length, 0, "excerpt apply must not call add_drawer directly");
+  assert.equal(applied.toolCalls.filter((c) => c.name === "mempalace_kg_add").length, 1, "excerpt apply should attempt one lineage edge");
 });

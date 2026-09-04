@@ -8,6 +8,7 @@ import {
   sliceVerbatimBetween,
   verifyVerbatimExcerpt,
 } from "../adapter/palace-tools.ts";
+import { runCheckpointWrite, runKgAddWrites } from "../core/operation.ts";
 import { normalizeDryRunArg } from "../core/substrate.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
@@ -164,26 +165,46 @@ export default tool({
       });
     }
 
-    const created = asObject(
-      await call("add_drawer", {
-        wing: targetWing,
-        room: targetRoom,
-        content: excerpt,
-        source_file: `relocated-from:${drawerID}`,
-        added_by: String(args.added_by || "electric-shepherd-relocate"),
-      }),
+    const checkpoint = await runCheckpointWrite(
+      call,
+      {
+        items: [
+          {
+            wing: targetWing,
+            room: targetRoom,
+            content: excerpt,
+            source_file: `relocated-from:${drawerID}`,
+            added_by: String(args.added_by || "electric-shepherd-relocate"),
+          },
+        ],
+      },
+      { dry_run: false },
     );
-    const newDrawerID = asText(created.drawer_id || created.id);
+    const raw = asObject(checkpoint.raw);
+    const rows = [
+      ...(Array.isArray(raw.results) ? raw.results : []),
+      ...(Array.isArray(raw.items) ? raw.items : []),
+    ].map(asObject);
+    const newDrawerID = asText(
+      raw.drawer_id
+        || raw.id
+        || rows.find((row) => row.ok !== false && asText(row.drawer_id || row.id).trim())?.drawer_id
+        || rows.find((row) => row.ok !== false && asText(row.drawer_id || row.id).trim())?.id,
+    ).trim();
+    if (!checkpoint.ok) {
+      return json({ ok: false, mode, drawer_id: drawerID, error: `checkpoint failed: ${asText(checkpoint.error || checkpoint.failure_summary)}` });
+    }
     if (!newDrawerID) {
-      return json({ ok: false, mode, drawer_id: drawerID, error: "add_drawer returned no drawer_id", raw: created });
+      return json({ ok: false, mode, drawer_id: drawerID, error: "checkpoint returned no drawer_id", raw });
     }
 
     const predicate = String(args.link_predicate || "excerpted-from").trim() || "excerpted-from";
     let lineage: Record<string, unknown> = { ok: true, predicate };
-    try {
-      await call("kg_add", { subject: newDrawerID, predicate, object: drawerID, source_drawer_id: newDrawerID });
-    } catch (err) {
-      lineage = { ok: false, predicate, error: String(err) };
+    const [lineageWrite] = await runKgAddWrites(call, [
+      { payload: { subject: newDrawerID, predicate, object: drawerID, source_drawer_id: newDrawerID } },
+    ]);
+    if (!lineageWrite?.ok) {
+      lineage = { ok: false, predicate, error: String(lineageWrite?.error || "kg_add failed") };
     }
 
     return json({
@@ -196,7 +217,7 @@ export default tool({
       to: { wing: targetWing, room: targetRoom },
       resolved_via: resolvedVia,
       excerpt_characters: excerpt.length,
-      duplicate: Boolean(created.is_duplicate),
+      duplicate: Boolean(raw.is_duplicate),
       lineage,
       note: "Source drawer left untouched; the excerpt is an additional verbatim copy in its proper scope.",
     });

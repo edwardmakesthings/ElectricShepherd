@@ -32,6 +32,7 @@
 import { tool } from "@opencode-ai/plugin";
 import { asText } from "../adapter/palace-tools.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../adapter/runtime-config.ts";
+import { runKgAddWrites } from "../core/operation.ts";
 import { normalizeDryRunArg } from "../core/substrate.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
 
@@ -161,21 +162,28 @@ export async function runOutcomeRecord(args: {
   // APPLY: one kg_add per node. Accumulation — no dedup skip, no invalidation of
   // prior edges; a repeated same-value edge is the operator recording another cycle
   // with the same judgment. Best-effort per node — one failure never aborts the rest.
-  for (const edge of edges) {
-    try {
-      await args.call("kg_add", {
+  const edgeResults = await runKgAddWrites(
+    args.call,
+    edges.map((edge) => ({
+      payload: {
         subject: edge.node_id,
         predicate: OUTCOME_PREDICATE,
         object: outcome,
         valid_from: edge.proposed_edge?.valid_from,
         source_closet: edge.node_id,
         ...(cycleRef ? { source_run_id: cycleRef } : {}),
-      });
+      },
+    })),
+  );
+  for (let i = 0; i < edges.length; i += 1) {
+    const edge = edges[i];
+    const result = edgeResults[i];
+    if (result?.ok) {
       edge.status = "added";
       counts.added += 1;
-    } catch (err) {
+    } else {
       edge.status = "add-failed";
-      edge.error = String(err);
+      edge.error = String(result?.error || "kg_add failed");
       counts.add_failed += 1;
     }
   }
@@ -190,14 +198,17 @@ export async function runOutcomeRecord(args: {
       report.calibration_skipped_reason = calibration.skipped_reason;
     } else {
       try {
-        await args.call("kg_add", {
-          subject: calibration.bucket_id,
-          predicate: CALIBRATION_OUTCOME_PREDICATE,
-          object: outcome,
-          valid_from: validFrom,
-          source_closet: calibration.bucket_id,
-          ...(cycleRef ? { source_run_id: cycleRef } : {}),
-        });
+        const [calibrationWrite] = await runKgAddWrites(args.call, [{
+          payload: {
+            subject: calibration.bucket_id,
+            predicate: CALIBRATION_OUTCOME_PREDICATE,
+            object: outcome,
+            valid_from: validFrom,
+            source_closet: calibration.bucket_id,
+            ...(cycleRef ? { source_run_id: cycleRef } : {}),
+          },
+        }]);
+        if (!calibrationWrite?.ok) throw new Error(calibrationWrite?.error || "kg_add failed");
         report.calibration = { bucket_id: calibration.bucket_id, status: "added", proposed_edge: calibration.proposed_edge };
       } catch (err) {
         report.calibration = { bucket_id: calibration.bucket_id, status: "add-failed", proposed_edge: calibration.proposed_edge, error: String(err) };
