@@ -604,7 +604,7 @@ export async function onSessionStartedWithGating(args: {
   lastCountedMessageIdBySession: Map<string, string>
   loopInterventionsBySession: Map<string, number>
   activeRoutingBySession: Map<string, { agent?: string; model?: { providerID: string; modelID: string } }>
-  maybeInjectMemcore: (opts: { sid: string; event: any; reason: "idle" | "compacted" | "compacting" | "started"; messages?: MessageWithParts[]; anchor?: MessageWithParts | null; force?: boolean }) => Promise<boolean>
+  maybeInjectMemcore: (opts: { sid: string; event: any; reason: "idle" | "compacted" | "compacting" | "started"; messages?: MessageWithParts[]; anchor?: MessageWithParts | null }) => Promise<boolean>
 }): Promise<void> {
   const event = args.event
   const sid = String(event?.properties?.sessionID ?? findSessionID(event))
@@ -620,7 +620,6 @@ export async function onSessionStartedWithGating(args: {
     sid,
     event,
     reason: "started",
-    force: true,
   })
 }
 
@@ -640,7 +639,7 @@ export interface SessionPolicyHandlerDeps {
   unwrapMessageResult: (res: any) => MessageWithParts | null
   pruneToMax: (collection: Map<string, any> | Set<string>, max: number) => void
   maybeCheckpoint: (sid: string, last: MessageWithParts) => Promise<boolean>
-  maybeInjectMemcore: (opts: { sid: string; event: any; reason: "idle" | "compacted" | "compacting" | "started"; messages?: MessageWithParts[]; anchor?: MessageWithParts | null; force?: boolean }) => Promise<boolean>
+  maybeInjectMemcore: (opts: { sid: string; event: any; reason: "idle" | "compacted" | "compacting" | "started"; messages?: MessageWithParts[]; anchor?: MessageWithParts | null }) => Promise<boolean>
   maybeFileWorkedExamplesFromMessage: (sid: string, msg: MessageWithParts) => Promise<void>
   armAutoConsolidationIdleTimer: (sid: string) => void
   sortByCreated: (messages: MessageWithParts[]) => MessageWithParts[]
@@ -823,5 +822,6 @@ export function bindSessionPolicyHandlers(deps: SessionPolicyHandlerDeps) {
         maybeInjectMemcore: deps.maybeInjectMemcore,
       })
     },
+
   }
 }

@@ -631,14 +631,15 @@ The restructure is complete when all of the following hold. Each is intended to 
 | 3 | Exactly one consolidation engine | **Done** | `runSynthesisConsolidation` remains centralized in `adapter/synthesis-consolidation.ts`; callers are wrappers/entrypoints. |
 | 4 | `capability/` imports no substrate internals | **Done (unchanged)** | No new regression found this pass. |
 | 5 | `move_drawers` & `delete_drawers` no direct `MCPHttpClient` | **Done** | No direct client construction/import; only comment mention in `tools/delete_drawers.ts`. |
-| 6 | `bulk_drawer_ops.ts` absorbed into `core/` | **Partial** | `tools/bulk_drawer_ops.ts` still present (13-line stub). |
+| 6 | `bulk_drawer_ops.ts` absorbed into `core/` | **Done** | Shim removed; shared batch/error primitives are centralized in `core/substrate.ts` and importer paths remain on `core/`. |
 | 7 | Zero bare `.catch` in `core/` and `capability/` | **Done** | No `.catch(` hit in `core/` or `capability/` for the criterion’s banned bare-swallow pattern. |
 | 8 | Broken substrate call → distinct named error | **Done** | Error taxonomy path remains intact; no regression observed. |
 | 9 | `-32005` surfaces `restart_mcp_server` verbatim | **Done** | `core/mcp-transport.ts` now includes verbatim `action_required` in detail and unit test asserts no retry (`tests/unit/rung1-bootstrap.test.mjs`). |
 | 10 | Temporal validity uses `mempalace_kg_supersede` | **Done** | Runtime/tool paths and tests remain on supersede semantics. |
 | 11 | Multi-drawer writes use `mempalace_checkpoint` | **Done** | Direct `add_drawer` callsites in `tools/*.ts` are routed through `runCheckpointWrite(...)` (`promote_skill`, `remind`, `file_skill`, `relocate_memory` excerpt path). Direct `check_duplicate`, `kg_add`, `kg_invalidate`, and `kg_supersede` callsites in `tools/*.ts` were also removed and centralized via `core/operation.ts` helpers (`runCheckDuplicate`, `runKgAddWrites`, `runKgInvalidateWrites`, `runKgSupersedeWrites`). |
 | 12 | One `dry_run` implementation (default preview) | **Done** | `normalizeDryRunArg(...)` used consistently in active handlers checked. |
-| 13–15 | Mem-core injection logic (Enabled/Reasons/Because) | **Partial** | Still split across `turn-guard` + `plugin/session-policy/*`; not fully consolidated. |
+| 13 | `memcore.reinject.enabled=false` blocks all routed reinjection events | **Done** | Unit refusal test asserts zero prompt injections while dispatching `session.started`, `session.idle`, `session.compacted`, and `experimental.session.compacting`; only routed reasons (`started`/`idle`/`compacted`) emit refusal rows. |
+| 14–15 | Mem-core per-reason gating + refusal `because` coverage | **Done** | `tests/unit/memcore-reinject-matrix.test.mjs` verifies enabled-path injection, per-reason disable refusals, dedup/cooldown suppression, maxChars clipping, and injection-error refusals; `tests/unit/memcore-reinject-refusal.test.mjs` verifies refusal `because` values land in both memcore context and status event logs. |
 | 16–17 | Capabilities pass write+read+fail / Conformance | **Done** | Added `tests/conformance/capability-conformance.test.mjs` (all six capabilities) and `node --experimental-strip-types --test tests/conformance/capability-conformance.test.mjs` passes. |
 | 18 | `npm test` green with verbatim reporting | **Done** | `npm test` passed: **475 tests**, **465 pass**, **0 fail**, **10 skipped** (integration-gated skips declared by runner). |
 | 19 | Authority gated on node type, not agent identity | **Done** | Identity-based runtime knobs/messages were removed (`ESHEPHERD_ALLOWED_CONSOLIDATION_WRITERS`, `consolidation.allowedWriters`, `consolidation.writeGuardEnabled`, and dreamer-only checkpoint wording). Lineage-bearing synthesis authority is structural at node boundary: `createDerivedDrawer` enforces non-empty lineage and synthesis consolidation enforces distinct-source minimum (`adapter/synthesis-consolidation.ts`). |
@@ -683,9 +684,10 @@ The restructure is complete when all of the following hold. Each is intended to 
 
 **Behavioural**
 
-13. With `memcore.reinject.enabled=false`, no injection occurs on any lifecycle event —
-    `session.started`, `session.idle`, `session.compacted`, or
-    `experimental.session.compacting`. **This is the acceptance test for the reported bug.**
+13. With `memcore.reinject.enabled=false`, no injection occurs on any routed reinjection event —
+    `session.started`, `session.idle`, and `session.compacted`. The pre-compaction
+    hook `experimental.session.compacting` is intentionally not used for reinjection.
+    **This is the acceptance test for the reported bug.**
 14. With `enabled=true`, injection occurs on exactly the reasons whose per-reason flag is
     set, and dedup/cooldown suppress repeats.
 15. Every injection refusal reports a `because` reason, visible in the status file.

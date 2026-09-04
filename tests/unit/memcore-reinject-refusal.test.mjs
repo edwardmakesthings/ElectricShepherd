@@ -108,9 +108,9 @@ async function withPlugin(reinjectFlags, fn) {
   const envSnapshot = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
   process.env.ESHEPHERD_AUTO_CONSOLIDATION_ENABLED = "false";
   try {
-    const { client } = makeClient();
+    const { client, prompts } = makeClient();
     const plugin = await TurnGuard({ client, directory: projectDir });
-    return await fn(plugin, projectDir);
+    return await fn(plugin, projectDir, prompts);
   } finally {
     restoreEnv(envSnapshot);
     rmSync(projectDir, { recursive: true, force: true });
@@ -120,14 +120,17 @@ async function withPlugin(reinjectFlags, fn) {
 test("global disable records an observable refusal (because=reinject-disabled) for every reason", async () => {
   await withPlugin(
     { enabled: false },
-    async (plugin, projectDir) => {
+    async (plugin, projectDir, prompts) => {
       for (const [type, sid] of [
         ["session.started", "sid-g-started"],
         ["session.idle", "sid-g-idle"],
         ["session.compacted", "sid-g-compact"],
+        ["experimental.session.compacting", "sid-g-compacting"],
       ]) {
         await plugin.event({ event: { type, properties: { sessionID: sid } } });
       }
+
+      assert.equal(prompts.length, 0, "reinject disabled must never inject a mem-core prompt");
 
       const refusals = readRefusals(projectDir).filter(
         (row) => row.type === "memcore-reinject" && row.injected === false,
@@ -143,6 +146,11 @@ test("global disable records an observable refusal (because=reinject-disabled) f
         assert.equal(row.sid, sid);
         assert.equal(row.because, "reinject-disabled", `because value for reason=${reason}`);
       }
+      assert.equal(
+        refusals.some((r) => r.reason === "compacting"),
+        false,
+        "pre-compaction event is intentionally not used for mem-core reinjection",
+      );
     },
   );
 });
