@@ -34,6 +34,8 @@ import {
   type DeadEndPolarity,
   type ParsedDeadEndLine,
 } from "./dead-ends.ts";
+import { getRulesOut } from "./rules-out.ts";
+import { fileDeadEnd } from "./dead-end.ts";
 
 export {
   parseDeadEndDrawerContent,
@@ -49,6 +51,9 @@ export {
   type DeadEndPolarity,
   type ParsedDeadEndLine,
 };
+
+export { getRulesOut };
+export { fileDeadEnd };
 
 /**
  * WRITE contract (Rung 3 §6.3 question 1): a dead end is filed via

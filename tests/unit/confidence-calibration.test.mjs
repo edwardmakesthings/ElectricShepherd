@@ -26,7 +26,7 @@ const {
   parseSelfReportedConfidence,
   buildCalibrationBucketId,
   canonicalModelId,
-} = await import("../../src/capability/retrieval/retrieval-expansion.ts");
+} = await import("../../src/policy/retrieval.ts");
 
 // The real CONSUME client.
 const { createMemgraphClient } = await import("../../src/core/memgraph.ts");

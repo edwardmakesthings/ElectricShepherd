@@ -16,18 +16,20 @@
  */
 
 import type { MemgraphClient } from "../../core/memgraph.ts";
+import { expandScopedRetrieval } from "../../policy/retrieval.ts";
 import {
-  expandScopedRetrieval,
   type NodeAuthority,
   type RankedScopedNode,
-  type RetrievalExpansionOptions,
-  type RetrievalExpansionResult,
   type RetrievalIntent,
   type RetrievalWeights,
-} from "../retrieval/retrieval-expansion.ts";
+} from "../../policy/retrieval-scoring.ts";
+import type { RetrievalExpansionOptions, RetrievalExpansionResult } from "../../policy/retrieval-expansion-types.ts";
+import { getClosetSourceType, setClosetSourceType } from "./source-type.ts";
+import { getConcerns } from "./concerns.ts";
+import { getStaleness, getStalenessFlags, setStalenessFlag } from "./staleness.ts";
 
+export { expandScopedRetrieval };
 export {
-  expandScopedRetrieval,
   type NodeAuthority,
   type RankedScopedNode,
   type RetrievalExpansionOptions,
@@ -35,6 +37,10 @@ export {
   type RetrievalIntent,
   type RetrievalWeights,
 };
+
+export { getClosetSourceType, setClosetSourceType };
+export { getConcerns };
+export { getStaleness, getStalenessFlags, setStalenessFlag };
 
 /**
  * WRITE contract (Rung 3 §6.3 question 1): a doc is ingested as a drawer stamped

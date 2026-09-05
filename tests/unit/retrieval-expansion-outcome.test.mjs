@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { expandScopedRetrieval, outcomeScoreTerm, emptyOutcomeCounts } from "../../src/capability/retrieval/retrieval-expansion.ts";
+import { expandScopedRetrieval, outcomeScoreTerm, emptyOutcomeCounts } from "../../src/policy/retrieval.ts";
 
 /**
  * Unit coverage for Phase 7 (unified memory): the es-outcome ranking term.

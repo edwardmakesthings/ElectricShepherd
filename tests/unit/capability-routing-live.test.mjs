@@ -17,7 +17,7 @@ import test from "node:test";
  */
 
 const { CAPABILITY_TIER_BY_SUBAGENT, CAPABILITY_SUBAGENT_BY_TIER, buildFailureBucketId } =
-  await import("../../src/capability/retrieval/retrieval-expansion.ts");
+  await import("../../src/policy/retrieval.ts");
 const { decideCapabilityReroute } = await import("../../src/surface/turn-guard-helpers.ts");
 const { createMemgraphClient } = await import("../../src/core/memgraph.ts");
 

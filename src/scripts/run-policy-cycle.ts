@@ -11,7 +11,7 @@ import {
   expandScopedRetrieval,
   type RetrievalExpansionOptions,
   type RetrievalIntent,
-} from "../capability/retrieval/retrieval-expansion.ts";
+} from "../policy/retrieval.ts";
 import { loadRuntimeEnv } from "./runtime-env.ts";
 
 /**

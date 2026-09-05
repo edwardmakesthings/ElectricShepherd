@@ -24,6 +24,9 @@ import {
   type SynthesisConsolidationResult,
   type TranscriptInsightSummary,
 } from "./synthesis-consolidation.ts";
+import { countDirectSources, getClosetStatus, setClosetStatus } from "./closet-status.ts";
+import { createDerivedDrawer } from "./derived-drawer.ts";
+import { findUnconsolidatedSourceDrawers, listSourceDrawersByScope } from "./source-scope.ts";
 
 export {
   runSynthesisConsolidation,
@@ -33,6 +36,10 @@ export {
   type SynthesisConsolidationResult,
   type TranscriptInsightSummary,
 };
+
+export { countDirectSources, getClosetStatus, setClosetStatus };
+export { createDerivedDrawer };
+export { findUnconsolidatedSourceDrawers, listSourceDrawersByScope };
 
 /**
  * WRITE contract (Rung 3 §6.3 question 1): a consolidation with applyWrites and

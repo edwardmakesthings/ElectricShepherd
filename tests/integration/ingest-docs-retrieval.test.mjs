@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after, before } from "node:test";
 
-import { expandScopedRetrieval } from "../../src/capability/retrieval/retrieval-expansion.ts";
+import { expandScopedRetrieval } from "../../src/policy/retrieval.ts";
 import { runDocIngest } from "../../src/tools/ingest_docs.ts";
 import flockStatusTool from "../../src/tools/palace_flock_status.ts";
 

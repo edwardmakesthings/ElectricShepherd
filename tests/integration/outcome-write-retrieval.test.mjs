@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { expandScopedRetrieval } from "../../src/capability/retrieval/retrieval-expansion.ts";
+import { expandScopedRetrieval } from "../../src/policy/retrieval.ts";
 import { runOutcomeRecord } from "../../src/tools/record_outcome.ts";
 
 /**

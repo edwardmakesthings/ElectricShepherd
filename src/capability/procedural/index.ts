@@ -31,7 +31,10 @@ import {
   type RetrieveWorkedExamplesOptions,
   type WorkedExampleMatch,
   type WorkedExampleShape,
-} from "../retrieval/retrieval-expansion.ts";
+} from "./worked-examples.ts";
+import { getClosetDomain } from "./domain.ts";
+import { getRefinedBy, getRefines } from "./refined-by.ts";
+import { getPromotedFrom } from "./promoted-from.ts";
 
 export {
   buildWorkedExampleEntry,
@@ -48,6 +51,10 @@ export {
   type WorkedExampleMatch,
   type WorkedExampleShape,
 };
+
+export { getClosetDomain };
+export { getRefinedBy, getRefines };
+export { getPromotedFrom };
 
 /**
  * WRITE contract (Rung 3 §6.3 question 1): a worked example is filed to the

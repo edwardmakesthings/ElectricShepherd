@@ -6,7 +6,7 @@ import {
   formatWorkedExampleDemonstration,
   WORKED_EXAMPLE_MAX_INJECT,
   WORKED_EXAMPLE_MAX_CHARS,
-} from "../../src/capability/retrieval/retrieval-expansion.ts";
+} from "../../src/policy/retrieval.ts";
 
 /**
  * Unit coverage for Phase 13 (unified memory): worked-example injection — the

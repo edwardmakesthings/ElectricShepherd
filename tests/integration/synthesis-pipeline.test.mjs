@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test, { after, before } from "node:test";
 
 import { runSynthesisConsolidation } from "../../src/capability/episodic/synthesis-consolidation.ts";
-import { expandScopedRetrieval } from "../../src/capability/retrieval/retrieval-expansion.ts";
+import { expandScopedRetrieval } from "../../src/policy/retrieval.ts";
 import { runValidationMergeReview } from "../../src/policy/validation-merge-review.ts";
 import { createTestRoom, isIntegrationEnabled, reportSkippedIntegrationTests } from "../helpers/mempalace-room-fixture.mjs";
 

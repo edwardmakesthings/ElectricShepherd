@@ -5,11 +5,15 @@
  * consolidation checks, lineage traversal wrappers, merge review helpers, the
  * scoped derived-drawer listing, and hall labels. Each function takes a
  * `MemgraphInternals` context; the MemgraphClient facade delegates to them.
+ *
+ * Stage 2: relocated from src/core/ into the episodic capability — this group
+ * owns the synthesis-DAG predicate semantics (consolidated-into /
+ * synthesized-from) that core must not name directly. Behavior unchanged.
  */
 
-import type { JsonMap } from "./memgraph-structure.ts";
-import { asArray, asBoolean, asNumber, asObject, asString, parseDrawerRows, parseKgFacts, uniq, uniqueFromFactsByDirection } from "./memgraph-transport.ts";
-import type { MemgraphInternals } from "./memgraph-internals.ts";
+import type { JsonMap } from "../../core/memgraph-structure.ts";
+import { asArray, asBoolean, asNumber, asObject, asString, parseDrawerRows, parseKgFacts, uniq, uniqueFromFactsByDirection } from "../../core/memgraph-transport.ts";
+import type { MemgraphInternals } from "../../core/memgraph-internals.ts";
 
 export async function getOutgoingObjects(core: MemgraphInternals, entity: string, predicate: string): Promise<string[]> {
   // Degrade to "no facts" on read failure — the same neutral reading as an empty

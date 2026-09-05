@@ -22,29 +22,32 @@ import type { MemgraphClient } from "../../core/memgraph.ts";
 import {
   buildCalibrationBucketId,
   buildCapabilityBucketId,
-  buildCapabilityCanonicalShape,
-  buildFailureBucketId,
-  buildFailurePatchId,
-  CAPABILITY_OUTCOME_VALUES,
   CAPABILITY_SUBAGENT_BY_TIER,
   CAPABILITY_TIER_BY_SUBAGENT,
   extractWorkedExampleShape,
-  mapTaskStatusToCapabilityOutcome,
   parseSelfReportedConfidence,
-  type CapabilityOutcome,
-  type CapabilityTier,
   type SelfReportedConfidence,
   type WorkedExampleShape,
-} from "../retrieval/retrieval-expansion.ts";
+} from "../procedural/worked-examples.ts";
+import {
+  buildCapabilityCanonicalShape,
+  CAPABILITY_OUTCOME_VALUES,
+  CAPABILITY_TIERS,
+  mapTaskStatusToCapabilityOutcome,
+  type CapabilityOutcome,
+  type CapabilityTier,
+} from "./capability-shape.ts";
+import { buildFailureBucketId } from "./failure-buckets.ts";
+import { getOutcomeCounts, recordOutcome } from "./outcomes.ts";
 
 export {
   buildCalibrationBucketId,
   buildCapabilityBucketId,
   buildCapabilityCanonicalShape,
   buildFailureBucketId,
-  buildFailurePatchId,
   CAPABILITY_OUTCOME_VALUES,
   CAPABILITY_SUBAGENT_BY_TIER,
+  CAPABILITY_TIERS,
   CAPABILITY_TIER_BY_SUBAGENT,
   extractWorkedExampleShape,
   mapTaskStatusToCapabilityOutcome,
@@ -54,6 +57,8 @@ export {
   type SelfReportedConfidence,
   type WorkedExampleShape,
 };
+
+export { getOutcomeCounts, recordOutcome };
 
 /**
  * WRITE contract (Rung 3 §6.3 question 1): an evaluative record is a set of KG

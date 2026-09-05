@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { expandScopedRetrieval } from "../../src/capability/retrieval/retrieval-expansion.ts";
+import { expandScopedRetrieval } from "../../src/policy/retrieval.ts";
 
 /**
  * Unit coverage for Phase 2 (unified memory): authority-aware retrieval.

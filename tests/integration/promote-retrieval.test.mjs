@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { expandScopedRetrieval } from "../../src/capability/retrieval/retrieval-expansion.ts";
+import { expandScopedRetrieval } from "../../src/policy/retrieval.ts";
 import { runSkillPromotion, PROMOTED_FROM_PREDICATE } from "../../src/tools/promote_skill.ts";
 
 /**

@@ -9,8 +9,8 @@
  * a `MemgraphInternals` context.
  */
 
-import { asBoolean, asString, parseKgFacts, uniq } from "./memgraph-transport.ts";
-import type { MemgraphInternals } from "./memgraph-internals.ts";
+import { asBoolean, asString, parseKgFacts, uniq } from "../../core/memgraph-transport.ts";
+import type { MemgraphInternals } from "../../core/memgraph-internals.ts";
 
 export const OUTCOME_VALUES: readonly string[] = ["accept", "revise", "failed", "unused"];
 

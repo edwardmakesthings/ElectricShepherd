@@ -31,6 +31,7 @@ import {
   type ReminderStatus,
   type ScopeDescriptor,
 } from "./prospective.ts";
+import { listReminders } from "./reminders.ts";
 
 export {
   classifyCondition,
@@ -49,6 +50,8 @@ export {
   type ReminderStatus,
   type ScopeDescriptor,
 };
+
+export { listReminders };
 
 /**
  * WRITE contract (Rung 3 §6.3 question 1): a reminder is one drawer in the

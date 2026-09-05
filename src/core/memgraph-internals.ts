@@ -1,6 +1,6 @@
 /**
  * Shared internals contract for the MemgraphClient method-group modules
- * (memgraph-axes / memgraph-lineage / memgraph-drawers / memgraph-capability).
+ * (capability/episodic modules + memgraph-drawers / memgraph-capability).
  *
  * Criterion 2 decomposition: MemgraphClient's method bodies live in those
  * modules as plain functions; each takes a `MemgraphInternals` context built

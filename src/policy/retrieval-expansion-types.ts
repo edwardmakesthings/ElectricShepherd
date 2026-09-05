@@ -1,4 +1,4 @@
-import type { RankedScopedNode, RetrievalIntent, RetrievalWeights } from "../../policy/retrieval-scoring.ts";
+import type { RankedScopedNode, RetrievalIntent, RetrievalWeights } from "./retrieval-scoring.ts";
 
 export type RetrievalExpansionOptions = {
   query: string;

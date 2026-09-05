@@ -1,5 +1,5 @@
-import { mergeWeights, normalizeLabelList, type RetrievalWeights } from "../../policy/retrieval-scoring.ts";
-import type { MemgraphClient } from "../../core/memgraph.ts";
+import { mergeWeights, normalizeLabelList, type RetrievalWeights } from "./retrieval-scoring.ts";
+import type { MemgraphClient } from "../core/memgraph.ts";
 import type { RetrievalExpansionOptions } from "./retrieval-expansion-types.ts";
 
 export type ParsedExpansionInputs = {

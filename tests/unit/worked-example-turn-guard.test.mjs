@@ -44,7 +44,7 @@ const {
   formatWorkedExampleDemonstration,
   WORKED_EXAMPLE_MAX_INJECT,
   WORKED_EXAMPLE_RELEVANCE_FLOOR,
-} = await import("../../src/capability/retrieval/retrieval-expansion.ts");
+} = await import("../../src/policy/retrieval.ts");
 
 const { shouldInjectWorkedExamples } = await import("../../src/surface/turn-guard-helpers.ts");
 

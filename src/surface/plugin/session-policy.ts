@@ -47,7 +47,7 @@ import {
 import type { AutoConsolidationTrigger } from "../turn-guard-helpers.ts"
 import { loadPackagedAssets, mergeWithoutOverride, loadInstructionPaths, dedupeAppendInstructions } from "../asset-loader.ts"
 import { loadRuntimeConfig, getRuntimeConfigEnvMap } from "../../core/runtime-config.ts"
-import { retrieveSimilarWorkedExamples, formatWorkedExampleDemonstration, WORKED_EXAMPLE_MAX_INJECT, WORKED_EXAMPLE_RELEVANCE_FLOOR, CAPABILITY_TIER_BY_SUBAGENT, CAPABILITY_SUBAGENT_BY_TIER, canonicalModelId, extractWorkedExampleShape, buildFailurePatchId, parseSelfReportedConfidence, INTERVENTION_REPLAY_HEADING, formatInterventionBlock } from "../../capability/retrieval/retrieval-expansion.ts"
+import { retrieveSimilarWorkedExamples, formatWorkedExampleDemonstration, WORKED_EXAMPLE_MAX_INJECT, WORKED_EXAMPLE_RELEVANCE_FLOOR, CAPABILITY_TIER_BY_SUBAGENT, CAPABILITY_SUBAGENT_BY_TIER, canonicalModelId, extractWorkedExampleShape, buildFailurePatchId, parseSelfReportedConfidence, INTERVENTION_REPLAY_HEADING, formatInterventionBlock } from "../../policy/retrieval.ts"
 import { loadRuntimeEnv } from "../../scripts/runtime-env.ts"
 
 

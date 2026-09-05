@@ -24,10 +24,18 @@ import {
 
 import type { KGQueryArgs, MemgraphInternals } from "./memgraph-internals.ts";
 
-import * as axes from "./memgraph-axes.ts";
-import * as lineage from "./memgraph-lineage.ts";
+import * as lineage from "../capability/episodic/memgraph-lineage.ts";
 import * as drawers from "./memgraph-drawers.ts";
-import * as capability from "./memgraph-capability.ts";
+import * as capability from "../capability/evaluative/memgraph-capability.ts";
+import { countDirectSources, getClosetStatus, setClosetStatus } from "../capability/episodic/closet-status.ts";
+import { listSourceDrawersByScope, findUnconsolidatedSourceDrawers } from "../capability/episodic/source-scope.ts";
+import { createDerivedDrawer } from "../capability/episodic/derived-drawer.ts";
+import { getClosetSourceType, setClosetSourceType, getConcerns } from "../capability/semantic/index.ts";
+import { getStaleness, getStalenessFlags, setStalenessFlag } from "../capability/semantic/staleness.ts";
+import { getClosetDomain, getRefinedBy, getRefines, getPromotedFrom } from "../capability/procedural/index.ts";
+import { listReminders } from "../capability/prospective/reminders.ts";
+import { getRulesOut, fileDeadEnd } from "../capability/negative/index.ts";
+import { getOutcomeCounts, recordOutcome } from "../capability/evaluative/outcomes.ts";
 
 export {
   SKILL_DOMAINS,
@@ -44,10 +52,10 @@ export {
  * Typed client over the MemPalace substrate.
  *
  * Criterion 2 decomposition: the method bodies live in four domain modules —
- * memgraph-axes (es-* axes + cross-type edge reads), memgraph-lineage (lineage /
- * merge / hall), memgraph-drawers (drawer CRUD + KG writes + source-scope
- * worklists), memgraph-capability (Phases 14/15/16 learned routing, failure-mode
- * memory, calibration). This class is the thin facade: it owns the transport
+ * capability/episodic (es-* axes + cross-type edge reads, lineage / merge / hall,
+ * drawer CRUD + KG writes + source-scope worklists) and capability/evaluative
+ * (memgraph-capability: Phases 14/15/16 learned routing, failure-mode memory,
+ * calibration). This class is the thin facade: it owns the transport
  * helpers and delegates every public method verbatim. The public API — method
  * names, signatures, static members, error messages — is unchanged.
  */
@@ -378,7 +386,7 @@ export class MemgraphClient {
     // P2-3: provenance — the run_id of the consolidation execution
     source_run_id?: string;
   }) {
-    return drawers.createDerivedDrawer(this.core, args);
+    return createDerivedDrawer(this.core, args);
   }
 
   fileDeadEnd(args: {
@@ -392,7 +400,7 @@ export class MemgraphClient {
     added_by?: string;
     source_run_id?: string;
   }) {
-    return drawers.fileDeadEnd(this.core, args);
+    return fileDeadEnd(this.core, args);
   }
 
   search(query: string, limit = 5, wing?: string, room?: string) {
@@ -415,83 +423,83 @@ export class MemgraphClient {
   }
 
   listSourceDrawersByScope(args: ListSourceScopeArgs): Promise<SourceDrawerWorkItem[]> {
-    return drawers.listSourceDrawersByScope(this.core, args);
+    return listSourceDrawersByScope(this.core, args);
   }
 
   findUnconsolidatedSourceDrawers(args: ListSourceScopeArgs): Promise<SourceDrawerWorkItem[]> {
-    return drawers.findUnconsolidatedSourceDrawers(this.core, args);
+    return findUnconsolidatedSourceDrawers(this.core, args);
   }
 
-  // ── es-* axes + cross-type edge reads (memgraph-axes.ts) ───────────────────
+  // ── es-* axes + cross-type edge reads (capability/episodic) ────────────────
 
   countDirectSources(closetId: string): Promise<number> {
-    return axes.countDirectSources(this.core, closetId);
+    return countDirectSources(this.core, closetId);
   }
 
   getClosetStatus(closetId: string): Promise<"provisional" | "active" | "unknown"> {
-    return axes.getClosetStatus(this.core, closetId);
+    return getClosetStatus(this.core, closetId);
   }
 
   setClosetStatus(closetId: string, status: "provisional" | "active", sourceRunId?: string): Promise<void> {
-    return axes.setClosetStatus(this.core, closetId, status, sourceRunId);
+    return setClosetStatus(this.core, closetId, status, sourceRunId);
   }
 
   getClosetSourceType(closetId: string): Promise<ClosetSourceType | null> {
-    return axes.getClosetSourceType(this.core, closetId);
+    return getClosetSourceType(this.core, closetId);
   }
 
   getClosetDomain(closetId: string): Promise<SkillDomain | null> {
-    return axes.getClosetDomain(this.core, closetId);
+    return getClosetDomain(this.core, closetId);
   }
 
   setClosetSourceType(closetId: string, sourceType: ClosetSourceType, sourceRunId?: string): Promise<boolean> {
-    return axes.setClosetSourceType(this.core, closetId, sourceType, sourceRunId);
+    return setClosetSourceType(this.core, closetId, sourceType, sourceRunId);
   }
 
   getStaleness(nodeId: string): Promise<string | null> {
-    return axes.getStaleness(this.core, nodeId);
+    return getStaleness(this.core, nodeId);
   }
 
   getStalenessFlags(
     nodeIds: string[],
     options?: { maxNodes?: number; concurrency?: number },
   ): Promise<Map<string, string | null>> {
-    return axes.getStalenessFlags(this.core, nodeIds, options);
+    return getStalenessFlags(this.core, nodeIds, options);
   }
 
   setStalenessFlag(nodeId: string, value: string, sourceRunId?: string): Promise<boolean> {
-    return axes.setStalenessFlag(this.core, nodeId, value, sourceRunId);
+    return setStalenessFlag(this.core, nodeId, value, sourceRunId);
   }
 
   getOutcomeCounts(
     nodeIds: string[],
     options?: { maxNodes?: number; concurrency?: number },
   ): Promise<Map<string, { accept: number; revise: number; failed: number; unused: number; total: number }>> {
-    return axes.getOutcomeCounts(this.core, nodeIds, options);
+    return getOutcomeCounts(this.core, nodeIds, options);
   }
 
   recordOutcome(nodeId: string, outcome: string, validFrom?: string): Promise<void> {
-    return axes.recordOutcome(this.core, nodeId, outcome, validFrom);
+    return recordOutcome(this.core, nodeId, outcome, validFrom);
   }
 
   getConcerns(nodeId: string): Promise<{ node_ids: string[]; count: number }> {
-    return axes.getConcerns(this.core, nodeId);
+    return getConcerns(this.core, nodeId);
   }
 
   getRefinedBy(nodeId: string): Promise<{ node_ids: string[]; count: number }> {
-    return axes.getRefinedBy(this.core, nodeId);
+    return getRefinedBy(this.core, nodeId);
   }
 
   getRefines(nodeId: string): Promise<{ node_ids: string[]; count: number }> {
-    return axes.getRefines(this.core, nodeId);
+    return getRefines(this.core, nodeId);
   }
 
   getPromotedFrom(nodeId: string): Promise<{ node_ids: string[]; count: number }> {
-    return axes.getPromotedFrom(this.core, nodeId);
+    return getPromotedFrom(this.core, nodeId);
   }
 
   getRulesOut(nodeId: string): Promise<{ statements: string[]; polarities: string[]; count: number }> {
-    return axes.getRulesOut(this.core, nodeId);
+    return getRulesOut(this.core, nodeId);
   }
 
   listReminders(
@@ -506,7 +514,7 @@ export class MemgraphClient {
       satisfied_at?: string;
     }>
   > {
-    return axes.listReminders(this.core, args);
+    return listReminders(this.core, args);
   }
 
   // ── Phase 14/15/16 (memgraph-capability.ts) ────────────────────────────────

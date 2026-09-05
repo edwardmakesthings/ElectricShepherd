@@ -27,8 +27,8 @@
 import type { MemgraphClient } from "../../core/memgraph.ts";
 import { asArray, asNumber, asObject, asString } from "../../policy/retrieval-scoring.ts";
 import type { RankedScopedNode, RetrievalIntent } from "../../policy/retrieval-scoring.ts";
-import type { RetrievalExpansionOptions } from "./retrieval-expansion-types.ts";
-import { safeListDrawers } from "./retrieval-expansion-core.ts";
+import type { RetrievalExpansionOptions } from "../../policy/retrieval-expansion-types.ts";
+import { safeListDrawers } from "../../policy/expansion-inputs.ts";
 
 /**
  * Phase 5: refined-by-neighbor expansion (procedural intent only). Skills are

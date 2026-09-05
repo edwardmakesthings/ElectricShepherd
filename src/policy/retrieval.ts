@@ -8,7 +8,7 @@
  * Phase 14/15/16 bucket helpers live in retrieval-worked-examples.ts — both are
  * re-exported here so existing importers keep their single entry point.
  */
-import type { MemgraphClient } from "../../core/memgraph.ts";
+import type { MemgraphClient } from "../core/memgraph.ts";
 
 export {
   DEFAULT_WEIGHTS,
@@ -36,13 +36,11 @@ export {
   type RankedScopedNode,
   type RetrievalIntent,
   type RetrievalWeights,
-} from "../../policy/retrieval-scoring.ts";
+} from "./retrieval-scoring.ts";
 
 export {
   buildCalibrationBucketId,
   buildCapabilityBucketId,
-  buildCapabilityCanonicalShape,
-  buildFailureBucketId,
   buildFailurePatchId,
   buildWorkedExampleEntry,
   canonicalModelId,
@@ -50,12 +48,9 @@ export {
   extractWorkedExampleShape,
   formatInterventionBlock,
   formatWorkedExampleDemonstration,
-  mapTaskStatusToCapabilityOutcome,
   parseSelfReportedConfidence,
   retrieveSimilarWorkedExamples,
-  CAPABILITY_OUTCOME_VALUES,
   CAPABILITY_SUBAGENT_BY_TIER,
-  CAPABILITY_TIERS,
   CAPABILITY_TIER_BY_SUBAGENT,
   CONFIDENCE_VALUES,
   FAILURE_EVENT_VALUES,
@@ -71,8 +66,6 @@ export {
   WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS,
   WORKED_EXAMPLE_RELEVANCE_FLOOR,
   WORKED_EXAMPLE_WORK_CLASSES,
-  type CapabilityOutcome,
-  type CapabilityTier,
   type FailureEvent,
   type InterventionLabel,
   type RetrieveWorkedExamplesOptions,
@@ -82,7 +75,18 @@ export {
   type WorkedExampleMatch,
   type WorkedExampleShape,
   type WorkedExampleWorkClass,
-} from "./retrieval-worked-examples.ts";
+} from "../capability/procedural/worked-examples.ts";
+
+export {
+  buildCapabilityCanonicalShape,
+  mapTaskStatusToCapabilityOutcome,
+  CAPABILITY_OUTCOME_VALUES,
+  CAPABILITY_TIERS,
+  type CapabilityOutcome,
+  type CapabilityTier,
+} from "../capability/evaluative/capability-shape.ts";
+
+export { buildFailureBucketId } from "../capability/evaluative/failure-buckets.ts";
 
 import {
   INTENT_AUTHORITY_BOOSTS,
@@ -94,13 +98,13 @@ import {
   extractScopedNodes,
   extractSearchSeedIDs,
   normalizeLabelList,
-} from "../../policy/retrieval-scoring.ts";
-import type { NodeAuthority, OutcomeCounts } from "../../policy/retrieval-scoring.ts";
+} from "./retrieval-scoring.ts";
+import type { NodeAuthority, OutcomeCounts } from "./retrieval-scoring.ts";
 import type { RetrievalExpansionOptions, RetrievalExpansionResult } from "./retrieval-expansion-types.ts";
 export type { RetrievalExpansionOptions, RetrievalExpansionResult } from "./retrieval-expansion-types.ts";
-import { parseExpansionInputs } from "./retrieval-expansion-core.ts";
-import { admitDirectDocs, expandConcernNeighbors } from "./retrieval-expansion-docs.ts";
-import { admitSharedSkills, expandRefinedNeighbors } from "./retrieval-expansion-skills.ts";
+import { parseExpansionInputs } from "./expansion-inputs.ts";
+import { admitDirectDocs, expandConcernNeighbors } from "../capability/semantic/doc-expansion.ts";
+import { admitSharedSkills, expandRefinedNeighbors } from "../capability/procedural/skill-expansion.ts";
 
 /**
  * B1: probabilistic entry + deterministic expansion.

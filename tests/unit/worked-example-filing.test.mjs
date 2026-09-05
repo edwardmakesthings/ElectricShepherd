@@ -22,7 +22,7 @@ const {
   WORKED_EXAMPLE_FILE_AGENT_TYPES,
   WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS,
   WORKED_EXAMPLE_ENTRY_MAX_CHARS,
-} = await import("../../src/capability/retrieval/retrieval-expansion.ts");
+} = await import("../../src/policy/retrieval.ts");
 
 // --- (a) Only cloud target subagent types trigger filing ---
 

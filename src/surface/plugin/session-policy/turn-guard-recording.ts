@@ -32,7 +32,7 @@ import {
   FAILURE_PATCH_TEXT_MAX_CHARS,
   parseSelfReportedConfidence,
   buildCalibrationBucketId,
-} from "../../../capability/retrieval/retrieval-expansion.ts"
+} from "../../../policy/retrieval.ts"
 import { maybeFileWorkedExampleWithGating, maybeFileWorkedExamplesFromMessageWithGating } from "./worked-example.ts"
 import { persistWorkedInterventionWithGating, maybeRecordModelFailureWithGating, queuePendingInterventionWithGating, confirmPendingInterventionsWithGating } from "./interventions.ts"
 import { maybeRecordCapabilityTupleWithGating, maybeCaptureCalibrationTupleWithGating } from "./capability.ts"

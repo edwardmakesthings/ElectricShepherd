@@ -30,7 +30,7 @@ import test from "node:test";
 
 const { createMemgraphClient } = await import("../../src/core/memgraph.ts");
 const { buildFailurePatchId, extractWorkedExampleShape, canonicalModelId, INTERVENTION_REPLAY_HEADING, formatInterventionBlock } =
-  await import("../../src/capability/retrieval/retrieval-expansion.ts");
+  await import("../../src/policy/retrieval.ts");
 
 // The same constants the live hook passes (kept in sync with plugin/session-policy.ts).
 const INTERVENTION_REPLAY_MAX_PATCHES = 3;
