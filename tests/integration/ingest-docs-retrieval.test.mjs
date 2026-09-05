@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after, before } from "node:test";
 
-import { expandScopedRetrieval } from "../../adapter/retrieval-expansion.ts";
-import { runDocIngest } from "../../tools/ingest_docs.ts";
-import flockStatusTool from "../../tools/palace_flock_status.ts";
+import { expandScopedRetrieval } from "../../src/capability/retrieval/retrieval-expansion.ts";
+import { runDocIngest } from "../../src/tools/ingest_docs.ts";
+import flockStatusTool from "../../src/tools/palace_flock_status.ts";
 
 /**
  * Phase 3 close-out (unified memory): ingest -> retrieval consumption in ONE scenario.

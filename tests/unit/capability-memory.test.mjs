@@ -27,10 +27,10 @@ const {
   buildCapabilityCanonicalShape,
   buildCapabilityBucketId,
   buildFailureBucketId,
-} = await import("../../adapter/retrieval-expansion.ts");
+} = await import("../../src/capability/retrieval/retrieval-expansion.ts");
 
 // The real CONSUME client.
-const { createMemgraphClient } = await import("../../adapter/memgraph.ts");
+const { createMemgraphClient } = await import("../../src/core/memgraph.ts");
 
 // ── (a) Tier mapping: deterministic subagent_type -> tier ────────────────────
 
@@ -120,7 +120,7 @@ test("buildCapabilityBucketId produces a stable capability::<shapeKey>::<tier> i
 // load-bearing: insufficient/inconclusive evidence must preserve the existing
 // pick, never move a unit.
 
-const { decideCapabilityReroute } = await import("../../adapter/turn-guard-helpers.ts");
+const { decideCapabilityReroute } = await import("../../src/surface/turn-guard-helpers.ts");
 
 test("decideCapabilityReroute returns neutral fallback when evidence is insufficient (fallback=true)", () => {
   const decision = decideCapabilityReroute({ requestedTier: "local", recommendation: "deep", fallback: true });

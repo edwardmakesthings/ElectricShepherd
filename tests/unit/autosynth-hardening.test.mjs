@@ -4,14 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { pruneAutoConsolidationTracking } from "../../adapter/turn-guard-helpers.ts";
+import { pruneAutoConsolidationTracking } from "../../src/surface/turn-guard-helpers.ts";
 import {
   acquireConsolidationLock,
   isConsolidationLockFresh,
   releaseConsolidationLock,
   CONSOLIDATION_LOCK_DIR,
   CONSOLIDATION_LOCK_FILE,
-} from "../../scripts/consolidation-lock.ts";
+} from "../../src/scripts/consolidation-lock.ts";
 
 /**
  * Unit coverage for the orphan/leak-hardening helpers:

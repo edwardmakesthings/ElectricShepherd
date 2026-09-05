@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { expandScopedRetrieval } from "../../adapter/retrieval-expansion.ts";
+import { expandScopedRetrieval } from "../../src/capability/retrieval/retrieval-expansion.ts";
 
 /**
  * Unit coverage for Phase 5 Unit B (unified memory): refined-by neighbor
@@ -252,7 +252,7 @@ test("refined-by candidates that are not skill-stamped or out of scope are NOT a
 });
 
 test("getRefinedBy / getRefines issue one-hop kg_query in the right direction and degrade on failure", async () => {
-  const { createMemgraphClient } = await import("../../adapter/memgraph.ts");
+  const { createMemgraphClient } = await import("../../src/core/memgraph.ts");
 
   // getRefinedBy: incoming refined-by subjects.
   const seenIn = [];

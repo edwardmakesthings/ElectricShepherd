@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test, { after, before } from "node:test";
 
-import { runSynthesisConsolidation } from "../../adapter/synthesis-consolidation.ts";
-import { expandScopedRetrieval } from "../../adapter/retrieval-expansion.ts";
-import { runValidationMergeReview } from "../../adapter/validation-merge-review.ts";
+import { runSynthesisConsolidation } from "../../src/capability/episodic/synthesis-consolidation.ts";
+import { expandScopedRetrieval } from "../../src/capability/retrieval/retrieval-expansion.ts";
+import { runValidationMergeReview } from "../../src/policy/validation-merge-review.ts";
 import { createTestRoom, isIntegrationEnabled, reportSkippedIntegrationTests } from "../helpers/mempalace-room-fixture.mjs";
 
 /**

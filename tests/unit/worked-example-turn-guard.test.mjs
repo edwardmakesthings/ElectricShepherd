@@ -4,11 +4,11 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const { TurnGuard } = await import("../../plugin/session-policy.ts");
+const { TurnGuard } = await import("../../src/surface/plugin/session-policy.ts");
 
 // Import smoke: plugin module must load (P0-6 acceptance).
 test("plugin/session-policy.ts imports successfully", async () => {
-  const mod = await import("../../plugin/session-policy.ts");
+  const mod = await import("../../src/surface/plugin/session-policy.ts");
   assert.ok(mod && typeof mod.TurnGuard === "function");
 });
 
@@ -44,9 +44,9 @@ const {
   formatWorkedExampleDemonstration,
   WORKED_EXAMPLE_MAX_INJECT,
   WORKED_EXAMPLE_RELEVANCE_FLOOR,
-} = await import("../../adapter/retrieval-expansion.ts");
+} = await import("../../src/capability/retrieval/retrieval-expansion.ts");
 
-const { shouldInjectWorkedExamples } = await import("../../adapter/turn-guard-helpers.ts");
+const { shouldInjectWorkedExamples } = await import("../../src/surface/turn-guard-helpers.ts");
 
 const QUERY =
   "fix the retry loop in the gateway adapter where the websocket reconnect handler keeps spawning duplicate connections";

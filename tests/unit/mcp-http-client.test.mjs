@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { MCPHttpClient } from "../../adapter/mcp-http-client.ts";
+import { MCPHttpClient } from "../../src/core/mcp-http-client.ts";
 
 test("mcp client attaches an abort signal to outbound requests", async () => {
   const calls = [];

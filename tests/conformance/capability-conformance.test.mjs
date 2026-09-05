@@ -6,34 +6,34 @@ import {
   writeEpisodicSynthesisStrict,
   readEpisodicLineage,
   EpisodicWriteError,
-} from "../../capability/episodic/index.ts";
+} from "../../src/capability/episodic/index.ts";
 import {
   planDocIngest,
   readAuthorityRanked,
   readAuthorityRankedStrict,
   SemanticReadError,
-} from "../../capability/semantic/index.ts";
+} from "../../src/capability/semantic/index.ts";
 import {
   planWorkedExampleWrite,
   readWorkedExampleDemonstrations,
-} from "../../capability/procedural/index.ts";
+} from "../../src/capability/procedural/index.ts";
 import {
   planReminderWrite,
   readPendingForScope,
   readRemindersSafe,
-} from "../../capability/prospective/index.ts";
+} from "../../src/capability/prospective/index.ts";
 import {
   writeDeadEnds,
   readDeadEndsLabelled,
   describeDeadEndFailure,
   RULED_OUT_MARKER,
-} from "../../capability/negative/index.ts";
+} from "../../src/capability/negative/index.ts";
 import {
   planCapabilityTuple,
   readCapabilityRouting,
   readCapabilityRoutingStrict,
   EvaluativeReadError,
-} from "../../capability/evaluative/index.ts";
+} from "../../src/capability/evaluative/index.ts";
 
 const BASE_OPTIONS = {
   query: "how to fix gateway retries",

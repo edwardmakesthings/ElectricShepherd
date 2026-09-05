@@ -10,7 +10,7 @@ import {
   getRuntimeConfigValueByPath,
   listRuntimeConfigEnvKeys,
   loadRuntimeConfig,
-} from "../../adapter/runtime-config.ts";
+} from "../../src/core/runtime-config.ts";
 
 function makeTempDir(prefix) {
   return mkdtempSync(join(tmpdir(), prefix));

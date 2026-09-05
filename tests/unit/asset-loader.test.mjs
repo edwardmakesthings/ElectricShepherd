@@ -14,7 +14,7 @@ import {
   mergeWithoutOverride,
   parseFrontmatter,
   splitFrontmatter,
-} from "../../adapter/asset-loader.ts";
+} from "../../src/surface/asset-loader.ts";
 
 /**
  * Unit coverage for the packaged-asset loader that powers the plugin's `config`

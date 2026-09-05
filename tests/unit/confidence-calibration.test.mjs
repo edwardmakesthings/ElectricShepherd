@@ -26,13 +26,13 @@ const {
   parseSelfReportedConfidence,
   buildCalibrationBucketId,
   canonicalModelId,
-} = await import("../../adapter/retrieval-expansion.ts");
+} = await import("../../src/capability/retrieval/retrieval-expansion.ts");
 
 // The real CONSUME client.
-const { createMemgraphClient } = await import("../../adapter/memgraph.ts");
+const { createMemgraphClient } = await import("../../src/core/memgraph.ts");
 
 // The real CREATE core (record_outcome).
-const { runOutcomeRecord, CALIBRATION_CONFIDENCE_VALUES } = await import("../../tools/record_outcome.ts");
+const { runOutcomeRecord, CALIBRATION_CONFIDENCE_VALUES } = await import("../../src/tools/record_outcome.ts");
 
 // ── (a) Confidence parse: deterministic extraction from terminal output ──────
 
@@ -367,7 +367,7 @@ test("CONSUME: zero-pair cell falls back to defaultAction (no data at all)", asy
 // The plugin injects this note into the prompt when decideCalibratedEscalation
 // returns 'escalate'; its content is what makes the instruction actionable.
 
-const { buildCalibrationEscalationNote } = await import("../../adapter/turn-guard-helpers.ts");
+const { buildCalibrationEscalationNote } = await import("../../src/surface/turn-guard-helpers.ts");
 
 test("buildCalibrationEscalationNote renders heading, model, confidence, hit rate and total", () => {
   const note = buildCalibrationEscalationNote({

@@ -28,9 +28,9 @@ import test from "node:test";
  * ORIGINAL prompt, same maxPatches argument).
  */
 
-const { createMemgraphClient } = await import("../../adapter/memgraph.ts");
+const { createMemgraphClient } = await import("../../src/core/memgraph.ts");
 const { buildFailurePatchId, extractWorkedExampleShape, canonicalModelId, INTERVENTION_REPLAY_HEADING, formatInterventionBlock } =
-  await import("../../adapter/retrieval-expansion.ts");
+  await import("../../src/capability/retrieval/retrieval-expansion.ts");
 
 // The same constants the live hook passes (kept in sync with plugin/session-policy.ts).
 const INTERVENTION_REPLAY_MAX_PATCHES = 3;

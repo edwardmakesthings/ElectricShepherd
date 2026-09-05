@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { expandScopedRetrieval } from "../../adapter/retrieval-expansion.ts";
-import { runSkillPromotion, PROMOTED_FROM_PREDICATE } from "../../tools/promote_skill.ts";
+import { expandScopedRetrieval } from "../../src/capability/retrieval/retrieval-expansion.ts";
+import { runSkillPromotion, PROMOTED_FROM_PREDICATE } from "../../src/tools/promote_skill.ts";
 
 /**
  * Integration coverage for Phase 10 (unified memory): the full promote -> read loop.

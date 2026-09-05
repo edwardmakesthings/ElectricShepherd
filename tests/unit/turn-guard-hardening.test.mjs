@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildCommandExecutionPlan, normalizeCommandSpec } from "../../adapter/turn-guard-helpers.ts";
+import { buildCommandExecutionPlan, normalizeCommandSpec } from "../../src/surface/turn-guard-helpers.ts";
 
 test("normalizeCommandSpec accepts a simple executable path", () => {
   const spec = normalizeCommandSpec("node scripts/run-policy-cycle.ts");

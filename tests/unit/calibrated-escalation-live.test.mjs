@@ -18,7 +18,7 @@ import test from "node:test";
  * adapter level with a fake kg_query backend.
  */
 
-const { createMemgraphClient } = await import("../../adapter/memgraph.ts");
+const { createMemgraphClient } = await import("../../src/core/memgraph.ts");
 
 // The same constants the live hook passes (kept in sync with plugin/session-policy.ts).
 const CALIBRATION_OVERRIDE_MIN_SAMPLES = 5;

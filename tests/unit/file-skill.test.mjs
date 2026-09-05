@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { runSkillFiling, SKILLS_ROOM, SKILL_LIKE_STEMS } from "../../tools/file_skill.ts";
-import { pickPurposeRoom, pickReferenceRoom } from "../../tools/ingest_docs.ts";
+import { runSkillFiling, SKILLS_ROOM, SKILL_LIKE_STEMS } from "../../src/tools/file_skill.ts";
+import { pickPurposeRoom, pickReferenceRoom } from "../../src/tools/ingest_docs.ts";
 
 /**
  * Phase 5 (unified memory): the `file_skill` core (`runSkillFiling`) against a fake

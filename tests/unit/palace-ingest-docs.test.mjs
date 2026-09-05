@@ -11,7 +11,7 @@ import {
   parseReminedFilesFromMineOutput,
   pickReferenceRoom,
   runDocIngest,
-} from "../../tools/ingest_docs.ts";
+} from "../../src/tools/ingest_docs.ts";
 
 /**
  * Phase 3 (unified memory): the `/ingest-docs` core (`runDocIngest`) against a fake

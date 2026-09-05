@@ -41,10 +41,10 @@
 
 import { readFileSync, readdirSync } from "node:fs";
 
-import { createMemgraphClient } from "../../adapter/memgraph.ts";
-import { MCPHttpClient, resolveMCPHeadersFromEnv } from "../../adapter/mcp-http-client.ts";
-import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../../adapter/runtime-config.ts";
-import { loadRuntimeEnv } from "../../scripts/runtime-env.ts";
+import { createMemgraphClient } from "../../src/core/memgraph.ts";
+import { MCPHttpClient, resolveMCPHeadersFromEnv } from "../../src/core/mcp-http-client.ts";
+import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../../src/core/runtime-config.ts";
+import { loadRuntimeEnv } from "../../src/scripts/runtime-env.ts";
 
 const DEFAULT_WING = "eshepherd-test";
 const DEFAULT_ADDED_BY = "electric-shepherd-test-fixture";

@@ -26,10 +26,10 @@ const {
   FAILURE_EVENT_VALUES,
   INTERVENTION_LABELS,
   FAILURE_PATCH_TEXT_MAX_CHARS,
-} = await import("../../adapter/retrieval-expansion.ts");
+} = await import("../../src/capability/retrieval/retrieval-expansion.ts");
 
 // The real CONSUME/CREATE client.
-const { createMemgraphClient, MemgraphClient } = await import("../../adapter/memgraph.ts");
+const { createMemgraphClient, MemgraphClient } = await import("../../src/core/memgraph.ts");
 
 // ── (a) Phase 15 helpers: model identity + bucket ids ────────────────────────
 

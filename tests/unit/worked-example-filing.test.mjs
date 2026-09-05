@@ -22,7 +22,7 @@ const {
   WORKED_EXAMPLE_FILE_AGENT_TYPES,
   WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS,
   WORKED_EXAMPLE_ENTRY_MAX_CHARS,
-} = await import("../../adapter/retrieval-expansion.ts");
+} = await import("../../src/capability/retrieval/retrieval-expansion.ts");
 
 // --- (a) Only cloud target subagent types trigger filing ---
 
@@ -33,7 +33,7 @@ test("WORKED_EXAMPLE_FILE_AGENT_TYPES contains exactly implement-cloud, build-cl
 });
 
 // The real filing decision helpers (single source of truth for the gates).
-const { shouldFileWorkedExample, shouldSkipWorkedExampleByCooldown } = await import("../../adapter/turn-guard-helpers.ts");
+const { shouldFileWorkedExample, shouldSkipWorkedExampleByCooldown } = await import("../../src/surface/turn-guard-helpers.ts");
 
 test("shouldFileWorkedExample files only for target subagent types with substantive output", () => {
   const substantive = "x".repeat(WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS);

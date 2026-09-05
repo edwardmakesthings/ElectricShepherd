@@ -7,7 +7,7 @@ import {
   matchReminder,
   matchRemindersForScope,
   renderPendingLines,
-} from "../../adapter/prospective.ts";
+} from "../../src/capability/prospective/prospective.ts";
 
 /**
  * Unit coverage for Phase 8 (unified memory): the pure prospective-memory matcher.

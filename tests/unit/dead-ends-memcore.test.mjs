@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildMemcoreMarkdown } from "../../scripts/memory-pipeline/memcore-render.ts";
+import { buildMemcoreMarkdown } from "../../src/scripts/memory-pipeline/memcore-render.ts";
 
 /**
  * Phase 9 (unified memory): the [dead-ends] mem-core render block.

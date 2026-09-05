@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const { TurnGuard } = await import("../../plugin/session-policy.ts");
+const { TurnGuard } = await import("../../src/surface/plugin/session-policy.ts");
 
 /**
  * Rung 2 (R2-01..R2-05) — the positive side of the mem-core reinjection matrix.
@@ -45,9 +45,9 @@ function setConfig(projectDir, config) {
 // Deterministic loader output: the three labeled blocks plus a padding line whose
 // length is controlled by padChars (to exercise memcore.maxChars truncation).
 function installLoader(projectDir, { padChars = 0 } = {}) {
-  const scriptsDir = join(projectDir, "scripts");
+  const scriptsDir = join(projectDir, "src", "scripts");
   mkdirSync(scriptsDir, { recursive: true });
-  const pad = padChars > 0 ? "x".repeat(padChars) : "";
+  const pad = padChars ? "x".repeat(padChars) : "";
   writeFileSync(
     join(scriptsDir, "run-mem-core-loader.ts"),
     `process.stdout.write(\`# Labeled memory blocks (always in context)\\n\\n## [project-state]\\n- fact one\\n\\n## [active-conventions]\\n- decision one\\n\\n## [open-items]\\n- open item one\\n\\n${pad}\\n\`);\n`,

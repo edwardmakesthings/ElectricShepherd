@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildOutcomeProposal } from "../../scripts/run-policy-cycle.ts";
-import { expandScopedRetrieval } from "../../adapter/retrieval-expansion.ts";
+import { buildOutcomeProposal } from "../../src/scripts/run-policy-cycle.ts";
+import { expandScopedRetrieval } from "../../src/capability/retrieval/retrieval-expansion.ts";
 
 /**
  * Unit coverage for the Phase 7 usability bridge in scripts/run-policy-cycle.ts:

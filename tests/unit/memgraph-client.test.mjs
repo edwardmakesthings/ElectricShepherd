@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createMemgraphClient } from "../../adapter/memgraph.ts";
+import { createMemgraphClient } from "../../src/core/memgraph.ts";
 
 test("memgraph client uses default tool prefix", async () => {
   const calls = [];

@@ -14,7 +14,7 @@ import {
   sliceVerbatimBetween,
   summarizeDrawerRows,
   verifyVerbatimExcerpt,
-} from "../../adapter/palace-tools.ts";
+} from "../../src/core/palace-tools.ts";
 
 test("resolvePalaceEndpoint withholds credentials from loopback endpoints", () => {
   const secretEnv = { MEMPALACE_MCP_API_KEY: "sk-test", MEMPALACE_MCP_URL: "http://localhost:8093/mcp" };

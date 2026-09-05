@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createMemgraphClient } from "../../adapter/memgraph.ts";
-import { MCPHttpClient, SubstrateError } from "../../adapter/mcp-http-client.ts";
-import { runConcernProposal } from "../../tools/propose_concerns.ts";
-import { runRefinementProposal } from "../../tools/propose_refinements.ts";
-import { runSkillPromotion } from "../../tools/promote_skill.ts";
-import { runOutcomeRecord } from "../../tools/record_outcome.ts";
-import { runRemind } from "../../tools/remind.ts";
+import { createMemgraphClient } from "../../src/core/memgraph.ts";
+import { MCPHttpClient, SubstrateError } from "../../src/core/mcp-http-client.ts";
+import { runConcernProposal } from "../../src/tools/propose_concerns.ts";
+import { runRefinementProposal } from "../../src/tools/propose_refinements.ts";
+import { runSkillPromotion } from "../../src/tools/promote_skill.ts";
+import { runOutcomeRecord } from "../../src/tools/record_outcome.ts";
+import { runRemind } from "../../src/tools/remind.ts";
 
 /**
  * Rung 1 bootstrap — unit slice (spec §6.1).
@@ -486,9 +486,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import moveDrawersTool from "../../tools/move_drawers.ts";
-import deleteDrawersTool from "../../tools/delete_drawers.ts";
-import relocateMemoryTool from "../../tools/relocate_memory.ts";
+import moveDrawersTool from "../../src/tools/move_drawers.ts";
+import deleteDrawersTool from "../../src/tools/delete_drawers.ts";
+import relocateMemoryTool from "../../src/tools/relocate_memory.ts";
 
 const BULK_WRITE_TOOLS = ["update_drawer", "delete_drawer", "add_drawer", "kg_add"];
 

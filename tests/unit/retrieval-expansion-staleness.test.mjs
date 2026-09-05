@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { expandScopedRetrieval, staleScoreTerm } from "../../adapter/retrieval-expansion.ts";
+import { expandScopedRetrieval, staleScoreTerm } from "../../src/capability/retrieval/retrieval-expansion.ts";
 
 /**
  * Unit coverage for Phase 11 (unified memory): the es-staleness CONSUME path.

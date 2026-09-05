@@ -4,7 +4,7 @@ import test from "node:test";
 import {
   computeMemcoreSignature,
   decideMemcoreInjection,
-} from "../../adapter/turn-guard-helpers.ts";
+} from "../../src/surface/turn-guard-helpers.ts";
 
 /**
  * Unit coverage for the mem-core re-injection decision — the throttling rule

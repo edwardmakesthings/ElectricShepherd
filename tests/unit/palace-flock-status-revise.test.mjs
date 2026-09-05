@@ -8,7 +8,7 @@ import {
   isStaleSummaryNode,
   currentStalenessValueFromFacts,
   stalenessReportBlock,
-} from "../../tools/palace_flock_status.ts";
+} from "../../src/tools/palace_flock_status.ts";
 
 /**
  * Unit coverage for Phase 7 (unified memory): the /memory-status re-synthesis

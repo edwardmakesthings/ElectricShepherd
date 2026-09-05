@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { decideAutoConsolidation } from "../../adapter/turn-guard-helpers.ts";
+import { decideAutoConsolidation } from "../../src/surface/turn-guard-helpers.ts";
 
 /**
  * Unit coverage for the auto-consolidation decision — the opt-in gate that

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { MemgraphClient } from "../../adapter/memgraph.ts";
+import { MemgraphClient } from "../../src/core/memgraph.ts";
 
 /**
  * Phase 9 (unified memory): rules-out read/write contract on the memgraph client.

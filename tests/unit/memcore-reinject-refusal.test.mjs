@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const { TurnGuard } = await import("../../plugin/session-policy.ts");
+const { TurnGuard } = await import("../../src/surface/plugin/session-policy.ts");
 
 /**
  * Rung 2 (R2-05) — Refusal Transparency.
@@ -221,7 +221,7 @@ test("dedup-or-cooldown skip refuses with because=dedup-or-cooldown-skip in cont
       // Give the temp project a loader script and a memory.md so the no-memcore-markdown
       // path is bypassed and injection actually proceeds; then a second idle event with
       // unchanged content hits the dedup-or-cooldown skip gate.
-      const scriptsDir = join(projectDir, "scripts");
+      const scriptsDir = join(projectDir, "src", "scripts");
       mkdirSync(scriptsDir, { recursive: true });
       writeFileSync(
         join(scriptsDir, "run-mem-core-loader.ts"),

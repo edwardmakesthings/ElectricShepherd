@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { expandScopedRetrieval } from "../../adapter/retrieval-expansion.ts";
-import { runOutcomeRecord } from "../../tools/record_outcome.ts";
+import { expandScopedRetrieval } from "../../src/capability/retrieval/retrieval-expansion.ts";
+import { runOutcomeRecord } from "../../src/tools/record_outcome.ts";
 
 /**
  * Integration coverage for Phase 7 (unified memory): the full write -> read loop.

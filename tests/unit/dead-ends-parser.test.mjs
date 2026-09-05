@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { runSynthesisConsolidation } from "../../adapter/synthesis-consolidation.ts";
+import { runSynthesisConsolidation } from "../../src/capability/episodic/synthesis-consolidation.ts";
 import {
   parseDeadEndLine,
   validateDeadEndLines,
   renderDeadEndsBlock,
   renderDeadEndLine,
   RULED_OUT_MARKER,
-} from "../../adapter/dead-ends.ts";
+} from "../../src/capability/negative/dead-ends.ts";
 
 /**
  * Phase 9 (unified memory): negative-knowledge pass-through + label contract.

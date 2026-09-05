@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { runOutcomeRecord, OUTCOME_VALUES } from "../../tools/record_outcome.ts";
+import { runOutcomeRecord, OUTCOME_VALUES } from "../../src/tools/record_outcome.ts";
 
 /**
  * Unit coverage for Phase 7 (unified memory): the human-authoritative es-outcome write

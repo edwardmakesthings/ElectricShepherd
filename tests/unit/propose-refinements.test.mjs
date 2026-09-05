@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { runRefinementProposal, REFINED_BY_PREDICATE } from "../../tools/propose_refinements.ts";
+import { runRefinementProposal, REFINED_BY_PREDICATE } from "../../src/tools/propose_refinements.ts";
 
 /**
  * Phase 5 (unified memory): the `propose_refinements` core (`runRefinementProposal`)

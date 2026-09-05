@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { inferSourceType, runSourceTypeBackfill } from "../../tools/palace_stamp_source_type.ts";
+import { inferSourceType, runSourceTypeBackfill } from "../../src/tools/palace_stamp_source_type.ts";
 
 /**
  * Phase 1 (unified memory): the bounded, dry-run-first `es-source-type` backfill.

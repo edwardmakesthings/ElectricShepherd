@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 
-import { loadRuntimeEnv } from "../../scripts/runtime-env.ts";
+import { loadRuntimeEnv } from "../../src/scripts/runtime-env.ts";
 
 function makeTempDir(prefix) {
   return mkdtempSync(join(tmpdir(), prefix));

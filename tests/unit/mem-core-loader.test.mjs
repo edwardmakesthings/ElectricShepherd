@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { loadMemcoreForDirectory } from "../../adapter/mem-core-loader.ts";
+import { loadMemcoreForDirectory } from "../../src/capability/memcore/mem-core-loader.ts";
 
 /**
  * Unit coverage for the mem_synth -> mem_core render/compose contract.

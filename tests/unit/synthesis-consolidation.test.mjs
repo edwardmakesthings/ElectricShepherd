@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { runSynthesisConsolidation } from "../../adapter/synthesis-consolidation.ts";
+import { runSynthesisConsolidation } from "../../src/capability/episodic/synthesis-consolidation.ts";
 
 /**
  * Unit coverage for the synthesis consolidation contract — the deterministic

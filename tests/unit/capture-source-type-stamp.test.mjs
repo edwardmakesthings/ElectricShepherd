@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const scriptPath = join(here, "..", "..", "scripts", "capture-source-transcripts.sh");
+const scriptPath = join(here, "..", "..", "src", "scripts", "capture-source-transcripts.sh");
 
 /**
  * Phase 1 (unified memory): the source-capture pipeline must stamp every newly

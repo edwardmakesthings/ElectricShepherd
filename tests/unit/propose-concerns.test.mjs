@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { runConcernProposal } from "../../tools/propose_concerns.ts";
+import { runConcernProposal } from "../../src/tools/propose_concerns.ts";
 
 /**
  * Phase 4 (unified memory): the `propose_concerns` core (`runConcernProposal`) against a

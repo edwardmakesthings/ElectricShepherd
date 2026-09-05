@@ -9,7 +9,7 @@ import {
   PROMOTED_FROM_PREDICATE,
   PROMOTION_CANDIDATE_MIN_WINGS,
   SHARED_SKILLS_ROOM,
-} from "../../tools/promote_skill.ts";
+} from "../../src/tools/promote_skill.ts";
 
 /**
  * Phase 10 (unified memory): the `promote_skill` core (`runSkillPromotion`) and the
