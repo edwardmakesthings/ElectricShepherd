@@ -1,25 +1,42 @@
 /**
- * Rung 0a structural architecture checks (docs/2026-08_architecture-rebuild-spec.md §6.6).
+ * Structural architecture checks (docs/2026-08_architecture-rebuild-spec.md §6.6,
+ * extended by docs/2026-09_structure-and-comment-audit-spec.md Stage 0).
  *
- * One deterministic, dependency-free check command enforcing three rules:
+ * One deterministic, dependency-free check command enforcing six rules:
  *
  *   A — substrate boundary: no runtime code outside core/ invokes a substrate tool.
- *       Scope: adapter/, capability/, policy/, surface/, tools/, scripts/, plugin/.
- *       Excluded: docs/, instructions/, skills/, agents/, command/, tests, and anything
- *       else outside the runtime dirs. Implemented as an import/call-site check over
- *       runtime source — never a repo-wide string grep (comments/strings are ignored).
+ *       Scope: src/. Excluded: docs/, instructions/, skills/, agents/, command/,
+ *       tests, and anything else outside the runtime dirs. Implemented as an
+ *       import/call-site check over runtime source — never a repo-wide string grep
+ *       (comments/strings are ignored).
  *   B — silent swallow ban: no bare `catch {}` or empty `.catch(() => ...)` handler in
  *       core/ or capability/. An ignored error must name a reason.
  *   C — layer direction: no import from capability/ into core/. Dependencies point
  *       downward only.
+ *   D — construction scaffolding ban: no comment line under src/ may cite a phase,
+ *       rung, or Pn-n marker number. Comment lines only (a line whose first
+ *       non-whitespace characters are //, *, or /*); code and string literals are
+ *       out of scope. tests/ is excluded deliberately — test names legitimately
+ *       reference the construction step that introduced the behaviour under test.
+ *   E — doc references resolve: every path-like *.md reference in a comment under
+ *       src/ must resolve to an existing file relative to the repo root. This is a
+ *       link check, not a ban on .md in comments.
+ *   F — file length ceiling: no maintained TypeScript file under src/ exceeds 800
+ *       lines. A ratchet, not a cleanup.
  *
- * Diagnostics are `file:line [rule-id] message`. Exit code 1 when any violation exists.
+ * Severity: A, B, C, and F are always strict. D and E warn by default (they report
+ * violations without failing the build) and become strict with --strict, once the
+ * codebase is brought into compliance.
+ *
+ * Diagnostics are `file:line [rule-id] message`. Exit code 1 when any strict
+ * violation exists; zero otherwise (warn-only findings do not fail the run).
  * Cross-platform: uses node:fs / node:path only; no bash-specific assumptions.
  */
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import process from "node:process";
+
 
 const ROOT = process.cwd();
 
@@ -394,11 +411,147 @@ function checkLayerDirection(files: string[], violations: Violation[]): void {
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// Comment-line scanning (shared by Checks D and E)
+// ---------------------------------------------------------------------------
+
+/**
+ * A comment line is one whose first non-whitespace characters are `//`, `*`, or
+ * `/*` — i.e. a line comment or a block-comment line (opening or continuation).
+ * Code lines and string literals are out of scope for Checks D and E: the spec's
+ * rule targets prose, not code, so no stripping machinery is needed here.
+ */
+function isCommentLine(line: string): boolean {
+  const t = line.trimStart();
+  return t.startsWith("//") || t.startsWith("*") || t.startsWith("/*");
+}
+
+// ---------------------------------------------------------------------------
+// Check D — no construction scaffolding markers in comment lines under src/
+// ---------------------------------------------------------------------------
+
+/**
+ * Construction scaffolding: a comment citing the phase, rung, or Pn-n marker of
+ * the build that produced the code. These citations are true only until the next
+ * edit and say nothing about why the code is the way it is — they belong nowhere.
+ * One finding per offending line (the spec counts comment lines, not patterns).
+ */
+const SCAFFOLDING_PATTERNS: { id: string; re: RegExp; label: string }[] = [
+  { id: "D1", re: /Phase \d+/, label: "phase marker" },
+  { id: "D2", re: /Rung \d+/, label: "rung marker" },
+  { id: "D3", re: /P\d+-\d+/, label: "Pn-n marker" },
+];
+
+function checkScaffoldingComments(files: string[], violations: Violation[]): void {
+  for (const file of files) {
+    const rel = relPath(file);
+    let text: string;
+    try {
+      text = readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    const lines = text.split(/\r?\n/);
+    for (let idx = 0; idx < lines.length; idx++) {
+      if (!isCommentLine(lines[idx])) continue;
+      for (const p of SCAFFOLDING_PATTERNS) {
+        if (p.re.test(lines[idx])) {
+          violations.push({
+            file: rel,
+            line: idx + 1,
+            rule: p.id,
+            message: `comment cites a ${p.label} — drop the citation, keep the constraint`,
+          });
+          break; // one finding per line
+        }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Check E — path-like *.md references in comment lines must resolve
+// ---------------------------------------------------------------------------
+
+/**
+ * Path-like markdown reference: starts with an alphanumeric segment, may contain
+ * further `/`-separated segments, and ends in `.md`. Requiring a leading
+ * alphanumeric (and at least one `/`) keeps this a LINK check rather than a ban:
+ * bare file names (`memory.md`) and placeholder paths (`<scope>/memory.md`,
+ * `*.md`) are not repo-relative references and are deliberately not flagged.
+ */
+const MD_REF_RE = /\b([A-Za-z0-9][A-Za-z0-9_-]*(?:\/[A-Za-z0-9_-]+)+\.md)\b/g;
+
+function checkDocRefsResolve(files: string[], violations: Violation[]): void {
+  for (const file of files) {
+    const rel = relPath(file);
+    let text: string;
+    try {
+      text = readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    const lines = text.split(/\r?\n/);
+    for (let idx = 0; idx < lines.length; idx++) {
+      if (!isCommentLine(lines[idx])) continue;
+      MD_REF_RE.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = MD_REF_RE.exec(lines[idx])) !== null) {
+        const ref = m[1];
+        if (!existsSync(join(ROOT, ref))) {
+          violations.push({
+            file: rel,
+            line: idx + 1,
+            rule: "E1",
+            message: `comment references "${ref}" which does not exist relative to the repo root`,
+          });
+        }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Check F — no maintained TypeScript file under src/ exceeds 800 lines
+// ---------------------------------------------------------------------------
+
+const MAX_FILE_LINES = 800;
+
+/** Line count matching `wc -l` semantics: newline-terminated lines, plus a final unterminated line if any. */
+function countLines(text: string): number {
+  const n = text.split(/\r?\n/).length;
+  return text.endsWith("\n") ? n - 1 : n;
+}
+
+function checkFileLength(files: string[], violations: Violation[]): void {
+  for (const file of files) {
+    const rel = relPath(file);
+    let text: string;
+    try {
+      text = readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    const n = countLines(text);
+    if (n > MAX_FILE_LINES) {
+      violations.push({
+        file: rel,
+        line: 1,
+        rule: "F1",
+        message: `file is ${n} lines — exceeds the ${MAX_FILE_LINES}-line ceiling`,
+      });
+    }
+  }
+}
+
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 function main(): void {
+  const strict = process.argv.includes("--strict");
   const violations: Violation[] = [];
   const runtimeFiles = runtimeSourceFiles();
 
@@ -415,11 +568,27 @@ function main(): void {
   checkSilentCatches(coreCapabilityFiles, violations);
   checkLayerDirection(coreCapabilityFiles, violations);
 
+  // Checks D and E scan comment lines across the whole runtime scope; tests/ is
+  // outside src/ and therefore excluded by construction. Check F applies to every
+  // maintained runtime source file in the same scope.
+  checkScaffoldingComments(runtimeFiles, violations);
+  checkDocRefsResolve(runtimeFiles, violations);
+  checkFileLength(runtimeFiles, violations);
+
+  // Severity: A/B/C/F are always strict; D/E warn by default and fail with --strict.
+  const WARN_RULES = new Set(["D1", "D2", "D3", "E1"]);
+  const isWarn = (rule: string): boolean => !strict && WARN_RULES.has(rule);
+
   // Report
   const byRule = new Map<string, number>();
   for (const v of violations) byRule.set(v.rule, (byRule.get(v.rule) ?? 0) + 1);
+  const failCount = violations.filter((v) => !isWarn(v.rule)).length;
+  const warnCount = violations.length - failCount;
 
-  console.log("Architecture Check: " + (violations.length === 0 ? "PASS" : "FAIL"));
+  console.log(
+    "Architecture Check: " +
+      (failCount === 0 ? (warnCount > 0 ? "PASS (with warnings)" : "PASS") : "FAIL"),
+  );
   console.log("");
   const ruleNames: Record<string, string> = {
     A2: "Check A: Raw MCP transport constructed outside core/",
@@ -427,22 +596,38 @@ function main(): void {
     B1: "Check B: Bare catch block in core/capability",
     B2: "Check B: Empty .catch handler in core/capability",
     C1: "Check C: Upward dependency (core/ imports capability/)",
+    D1: "Check D: Phase marker cited in a comment line",
+    D2: "Check D: Rung marker cited in a comment line",
+    D3: "Check D: Pn-n marker cited in a comment line",
+    E1: "Check E: Comment references a .md file that does not exist",
+    F1: "Check F: Runtime source file exceeds the 800-line ceiling",
   };
   for (const [rule, count] of [...byRule.entries()].sort()) {
-    console.log(`[FAIL] ${ruleNames[rule] ?? rule} — ${count} violation(s)`);
+    const tag = isWarn(rule) ? "WARN" : "FAIL";
+    console.log(`[${tag}] ${ruleNames[rule] ?? rule} — ${count} violation(s)`);
     for (const v of violations.filter((x) => x.rule === rule)) {
       console.log(`  ${v.file}:${v.line} [${v.rule}] ${v.message}`);
     }
   }
-  if (violations.length === 0) {
-    console.log("[PASS] Check A: No raw transport construction or mempalace_ tool names outside core/");
-    console.log("[PASS] Check B: No silent catches in core/capability");
-    console.log("[PASS] Check C: No capability/ imports into core/");
+  const passLines: Record<string, string> = {
+    A: "[PASS] Check A: No raw transport construction or mempalace_ tool names outside core/",
+    B: "[PASS] Check B: No silent catches in core/capability",
+    C: "[PASS] Check C: No capability/ imports into core/",
+    D: "[PASS] Check D: No construction scaffolding markers in comment lines",
+    E: "[PASS] Check E: All .md references in comments resolve",
+    F: "[PASS] Check F: No runtime source file exceeds the 800-line ceiling",
+  };
+  for (const check of ["A", "B", "C", "D", "E", "F"]) {
+    if ([...byRule.keys()].some((r) => r.startsWith(check))) continue;
+    console.log(passLines[check]);
   }
   console.log("");
-  console.log(`Summary: ${violations.length} violation(s) found.`);
+  console.log(
+    `Summary: ${failCount} violation(s), ${warnCount} warning(s) found.` +
+      (strict ? " [strict]" : " [default: D/E warn-only]"),
+  );
 
-  process.exit(violations.length === 0 ? 0 : 1);
+  process.exit(failCount === 0 ? 0 : 1);
 }
 
 main();
