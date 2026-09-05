@@ -1,8 +1,8 @@
 /**
  * MemgraphClient capability / failure-mode / calibration method group (Criterion 2 split).
  *
- * Moved verbatim from adapter/memgraph.ts: Phase 14 learned-routing evidence,
- * Phase 15 per-model failure-mode memory + intervention patches, and Phase 16
+ * Moved verbatim from adapter/memgraph.ts: learned-routing evidence,
+ * per-model failure-mode memory + intervention patches, and
  * confidence calibration. The closed vocabulary constants live here; the
  * MemgraphClient facade re-exports them as static members so external references
  * (MemgraphClient.OUTCOME_VALUES etc.) keep working unchanged. Each function takes
@@ -14,7 +14,7 @@ import type { MemgraphInternals } from "../../core/memgraph-internals.ts";
 
 export const OUTCOME_VALUES: readonly string[] = ["accept", "revise", "failed", "unused"];
 
-// ── Phase 14: capability memory (learned routing) axes ───────────────────────
+// ── Capability memory (learned routing) axes ───────────────────────
 // `es-capability-outcome` edges record the outcome of one unit of work run at a
 // given tier for a given task shape. The subject is the deterministic capability
 // bucket id (`capability::<shapeKey>::<tier>`); the object is one of accept |
@@ -105,7 +105,7 @@ export async function setCapabilityTier(core: MemgraphInternals, bucketId: strin
 }
 
 /**
- * Phase 14 CONSUME: aggregate capability evidence per tier for a shape bucket.
+ * CONSUME: aggregate capability evidence per tier for a shape bucket.
  * One one-hop outgoing kg_query per tier bucket (local, cloud, deep), run with
  * bounded concurrency (8 — the only validated level in this repo). Read failures
  * degrade to zero counts (neutral) per tier, matching getOutcomeCounts' discipline.
@@ -208,11 +208,11 @@ export async function getCapabilityRoutingEvidence(
   return { tiers: tierCounts, recommendation, fallback, threshold: minSample };
 }
 
-// ── Phase 15: per-model failure-mode memory axes ────────────────────────────
+// ── Per-model failure-mode memory axes ────────────────────────────
 // `es-failure-event` edges record one turn-guard intervention (spiral / loop)
 // attributed to a (model, task-shape) bucket. The subject is the deterministic
 // failure bucket id (`failure::<provider/model>::<shapeKey>`, shapeKey from the
-// SAME Phase 14/13 shape function — no second shape system); the object is one
+// SAME capability shape function — no second shape system); the object is one
 // of spiral | loop. Edges ACCUMULATE like es-capability-outcome: multiple edges
 // per bucket are expected and meaningful, nothing here invalidates them.
 //
@@ -225,7 +225,7 @@ export async function getCapabilityRoutingEvidence(
 // NOTE: `es-failure-*` / `es-intervention-*` predicates are NEW and deliberately
 // distinct from the reserved set (synthesized-from, consolidated-into, merged-into,
 // in-hall, es-status, es-source-type, es-outcome, concerns, triggers-on, rules-out,
-// es-staleness) and from Phase 14's `es-capability-*`. They must never count toward
+// es-staleness) and from the `es-capability-*` predicates. They must never count toward
 // height or feed lineage traversal.
 
 export const FAILURE_EVENT_PREDICATE = "es-failure-event";
@@ -305,7 +305,7 @@ export async function recordIntervention(core: MemgraphInternals, patchId: strin
 }
 
 /**
- * Phase 15 CONSUME (routing signal): aggregate failure events for a
+ * CONSUME (routing signal): aggregate failure events for a
  * (model, shape) bucket. One one-hop outgoing kg_query on es-failure-event.
  * Read failures degrade to zero counts (neutral) — a failed read must never look
  * like "this model is bad" or "this model is fine"; it looks like "no data".
@@ -338,7 +338,7 @@ export async function getFailureCounts(
 }
 
 /**
- * Phase 15 CONSUME (prompt patches): fetch known successful intervention texts
+ * CONSUME (prompt patches): fetch known successful intervention texts
  * for every patch node of a (model, shape). Bounded by maxPatches (default 4) —
  * one one-hop kg_query per candidate label. Read failures degrade to no patches;
  * absent data yields an empty list (no injection, no prompt bloat).
@@ -377,8 +377,8 @@ export async function getFailureInterventions(
 }
 
 /**
- * Phase 15 CONSUME (routing signal): combine Phase 14 capability evidence with
- * Phase 15 per-model failure counts into an ADJUSTED tier recommendation.
+ * CONSUME (routing signal): combine capability evidence with
+ * per-model failure counts into an ADJUSTED tier recommendation.
  *
  * This repo has no in-repo tier SELECTOR — the orchestrator that delegates units
  * to tiers lives outside this codebase (the task tool is invoked by the agent, not
@@ -388,11 +388,11 @@ export async function getFailureInterventions(
  * TODO(external-consumer): wire this into orchestrate-cloud's tier selection.
  *
  * Deterministic scoring (no LLM, no embeddings):
- *   base(tier)      = accept / total            (Phase 14 evidence; undefined if total < minSample)
+ *   base(tier)      = accept / total            (capability evidence; undefined if total < minSample)
  *   failureRate(m,s)= failures / max(failures, MIN_FAILURE_SAMPLE)
  *                    where failures = es-failure-event count for `failure::<model>::<shapeKey>`;
  *                    the denominator is clamped at MIN_FAILURE_SAMPLE so a single nudge
- *                    cannot dominate (mirrors Phase 14's min-sample discipline).
+ *                    cannot dominate (mirrors the capability min-sample discipline).
  *   score(tier)     = base(tier) - failureRate(modelOf(tier), shape)
  *   pick            = highest score among tiers with base defined; deterministic
  *                     tie-break order: local, cloud, deep. No eligible tier => "no-data".
@@ -464,13 +464,13 @@ export async function getFailureAdjustedRouting(
 
 
 
-// ── Phase 16: confidence calibration axes ─────────────────────────────────
+// ── Confidence calibration axes ─────────────────────────────────
 // `es-calibration-outcome` edges record one completed unit's tuple: the
 // self-reported confidence level (high | medium | low) paired with the ACTUAL
-// outcome — Phase 7's es-outcome value (accept | revise | failed | unused),
+// outcome — the es-outcome value (accept | revise | failed | unused),
 // written ONLY by the human-authoritative record_outcome path. The subject is
 // the deterministic calibration bucket id (`calibration::<model>::<shapeKey>::<confidence>`,
-// model from Phase 15's canonicalModelId, shapeKey from the SAME Phase 14/13 shape
+// model from canonicalModelId, shapeKey from the SAME capability shape
 // function — no second shape system). Edges ACCUMULATE like es-capability-outcome:
 // multiple edges per bucket are expected and meaningful; nothing here ever
 // invalidates or collapses them.
@@ -483,7 +483,7 @@ export async function getFailureAdjustedRouting(
 // NOTE: `es-calibration-outcome` is NEW and deliberately distinct from the reserved
 // set (synthesized-from, consolidated-into, merged-into, in-hall, es-status,
 // es-source-type, es-outcome, concerns, triggers-on, rules-out, es-staleness) and
-// from Phase 14's `es-capability-*` / Phase 15's `es-failure-*` /
+// from `es-capability-*` / `es-failure-*` /
 // `es-intervention-*`. It must never count toward height or feed lineage traversal.
 
 export const CALIBRATION_OUTCOME_PREDICATE = "es-calibration-outcome";
@@ -493,13 +493,13 @@ export const MIN_CALIBRATION_SAMPLE = 20;
 export const CALIBRATION_CONFIDENCE_VALUES: readonly string[] = ["high", "medium", "low"];
 
 /**
- * Phase 16 CONSUME: read one calibration cell — the (model, shapeKey, confidence)
+ * CONSUME: read one calibration cell — the (model, shapeKey, confidence)
  * bucket's outcome counts plus hit rate. One one-hop outgoing kg_query on
  * es-calibration-outcome. Read failures degrade to zero counts (neutral): a failed
  * read must look like "no data", never like "this model is miscalibrated".
  *
  * Hit rate = accept / total over the cell's tuples (the only positive outcome in
- * Phase 7's closed set). `sufficient` enforces the 20-pair minimum: below it,
+ * the closed set). `sufficient` enforces the 20-pair minimum: below it,
  * `hitRate` is still computed for reporting transparency but consumers MUST treat
  * the cell as unusable and fall back to default behaviour.
  */
@@ -566,7 +566,7 @@ export async function getCalibrationCell(
 }
 
 /**
- * Phase 16 CONSUME (reporting): the calibration table for one model across a
+ * CONSUME (reporting): the calibration table for one model across a
  * BOUNDED set of shape keys — rows of (shapeKey x confidence-level) with counts,
  * hit rate, and the 20-pair sufficiency flag. maxShapes caps the query fan-out
  * (default 8); concurrency is capped at 8 (the only validated level in this repo).
@@ -653,7 +653,7 @@ export async function getCalibrationTable(
 }
 
 /**
- * Phase 16 CONSUME (escalation triggers): the composed API for orchestrate-cloud.
+ * CONSUME (escalation triggers): the composed API for orchestrate-cloud.
  * This repo has no in-repo tier SELECTOR — the orchestrator that delegates units
  * lives outside this codebase — so the calibration decision is exposed as a
  * deterministic composed call: an external consumer invokes it once with the

@@ -1,5 +1,5 @@
 /**
- * Phase 5 (unified memory): `refined-by` edges — skill → evidence links from a
+ * `refined-by` edges — skill → evidence links from a
  * skill drawer to the session/synthesis/apprenticeship drawers that changed how
  * the skill should work.
  *
@@ -12,10 +12,10 @@
  *
  * This is a KG edge, NOT lineage: it never counts toward height and is never
  * consumed by getLineageSources/getLineageDerivatives (those hardcode
- * `synthesized-from`). Retrieval expansion (Phase 5 Unit B) pulls one-hop
+ * `synthesized-from`). Retrieval expansion pulls one-hop
  * `refined-by` neighbors into the ranked pool on procedural intent.
  *
- * Approval-gated by design (same rule as Phase 4 concerns): a wrong `refined-by`
+ * Approval-gated by design (same rule as concerns): a wrong `refined-by`
  * edge silently pollutes procedural retrieval — every future "how do I do X"
  * query would surface the wrong session as evidence for the skill. The dreamer
  * proposes candidates as a numbered list at the end of a consolidation pass and
@@ -243,7 +243,7 @@ export async function runRefinementProposal(args: {
 
 export default tool({
   description:
-    "Phase 5 procedural memory: validate and (when approved) add `refined-by` edges from a skill drawer to the session/synthesis/apprenticeship drawers that changed how the skill should work. Edge shape: {subject: <skill id>, predicate: 'refined-by', object: <evidence id>}. Validates both endpoints before preview or apply: subject must exist and carry es-source-type: skill, each evidence drawer must exist (any source type — transcript, synthesis, or unstamped session note); rejects self-links and duplicates (idempotent). NOT lineage — never counts toward height. Dry-run by default — the first call makes no kg_add; pass dry_run:false to apply only after user approval of the numbered proposal list.",
+    "Procedural memory: validate and (when approved) add `refined-by` edges from a skill drawer to the session/synthesis/apprenticeship drawers that changed how the skill should work. Edge shape: {subject: <skill id>, predicate: 'refined-by', object: <evidence id>}. Validates both endpoints before preview or apply: subject must exist and carry es-source-type: skill, each evidence drawer must exist (any source type — transcript, synthesis, or unstamped session note); rejects self-links and duplicates (idempotent). NOT lineage — never counts toward height. Dry-run by default — the first call makes no kg_add; pass dry_run:false to apply only after user approval of the numbered proposal list.",
   args: {
     skill_id: tool.schema.string().describe("Skill drawer ID (subject of the refined-by edges) — must carry es-source-type: skill."),
     evidence_ids: tool.schema.array(tool.schema.string()).describe("Evidence drawer IDs (objects): session transcripts, synthesis closets, or apprenticeship worked examples that changed how the skill works. One apply call per approved item keeps approval atomic per edge."),

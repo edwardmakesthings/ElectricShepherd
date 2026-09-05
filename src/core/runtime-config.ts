@@ -76,15 +76,15 @@ export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
   { envKey: "NTFY_URL", path: "notifications.ntfyUrl", kind: "string", defaultValue: "" },
 
   { envKey: "ESHEPHERD_PROJECT_WING", path: "memory.projectWing", kind: "string", defaultValue: "opencode" },
-  // Phase 10 (unified memory): the shared skills wing — where promoted skills
+  // The shared skills wing — where promoted skills
   // live so procedural-intent retrieval from ANY project wing can reach them.
   // A location, not a kind: promoted drawers keep es-source-type: skill.
   { envKey: "ESHEPHERD_SHARED_SKILLS_WING", path: "memory.sharedSkillsWing", kind: "string", defaultValue: "shared-skills" },
-  // Phase 12 (unified memory): the requesting project's es-domain — used by
+  // The requesting project's es-domain — used by
   // procedural-intent retrieval to hard-filter shared-skill admission (a `code`
   // skill is never surfaced to a `writing` project). Empty default = unclassified
   // requester, which admits only null/`general` skills; omitted configs keep the
-  // pre-Phase-12 behavior. Closed vocabulary — out-of-vocabulary values are
+  // pre-domain-filter behavior. Closed vocabulary — out-of-vocabulary values are
   // dropped (read as unclassified), matching the read side's tolerance.
   { envKey: "ESHEPHERD_PROJECT_DOMAIN", path: "memory.projectDomain", kind: "enum", defaultValue: "", allowedValues: ["code", "writing", "infra", "research", "general"] },
   { envKey: "ESHEPHERD_SOURCE_CAPTURE_WING", path: "sourceCapture.wing", kind: "string", defaultValue: "opencode" },
@@ -114,12 +114,12 @@ export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
   { envKey: "ESHEPHERD_MEMCORE_RENDER_INCLUDE_FACTS", path: "memcore.render.includeFacts", kind: "boolean", defaultValue: true },
   { envKey: "ESHEPHERD_MEMCORE_RENDER_INCLUDE_POINTERS", path: "memcore.render.includePointers", kind: "boolean", defaultValue: true },
   { envKey: "ESHEPHERD_MEMCORE_RENDER_MAX_FACTS", path: "memcore.render.maxFactsPerSection", kind: "number", defaultValue: 8, min: 1 },
-  // Phase 8 (prospective memory): the [pending] reminders block in the mem-core
+  // The [pending] reminders block in the mem-core
   // render. Enabled by default but hard-capped — a handful of reminders, not a
   // task list; set includePending false to disable the section entirely.
   { envKey: "ESHEPHERD_MEMCORE_RENDER_INCLUDE_PENDING", path: "memcore.render.includePending", kind: "boolean", defaultValue: true },
   { envKey: "ESHEPHERD_MEMCORE_RENDER_MAX_PENDING", path: "memcore.render.maxPendingReminders", kind: "number", defaultValue: 3, min: 0 },
-  // Phase 9 (negative knowledge): the [dead-ends] block in the mem-core render.
+  // The [dead-ends] block in the mem-core render.
   // Enabled by default but hard-capped — a handful of ruled-out approaches, not a
   // full history; set includeDeadEnds false to disable the section entirely.
   { envKey: "ESHEPHERD_MEMCORE_RENDER_INCLUDE_DEAD_ENDS", path: "memcore.render.includeDeadEnds", kind: "boolean", defaultValue: true },
@@ -450,7 +450,7 @@ export function loadRuntimeConfig(args: {
     }
   }
 
-  // Phase 10: the shared skills wing is a FIXED name (not directory-derived), so an
+  // The shared skills wing is a FIXED name (not directory-derived), so an
   // explicit "" in config means "unset" -> fall back to the spec default, not "route
   // promotions to a blank wing". Distinct from project/source wings above, which are
   // computed from the project directory.

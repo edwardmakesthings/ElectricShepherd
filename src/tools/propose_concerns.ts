@@ -1,10 +1,10 @@
 /**
- * Phase 4 (unified memory): `concerns` edges — cross-type authority links from a
+ * `concerns` edges — cross-type authority links from a
  * synthesis closet to the ingested docs it relies on.
  *
  * Predicate shape: `{subject: <synthesis id>, predicate: "concerns", object: <doc id>}`.
  * This is a KG edge, NOT lineage: it never counts toward height and is never consumed
- * by getLineageSources/getLineageDerivatives. Retrieval expansion (Phase 4) pulls one-hop
+ * by getLineageSources/getLineageDerivatives. Retrieval expansion pulls one-hop
  * `concerns` targets into the ranked pool so a hit on a synthesis surfaces its authority.
  *
  * Approval-gated by design (spec: "Do not auto-link — a wrong link silently corrupts
@@ -220,7 +220,7 @@ export async function runConcernProposal(args: {
 
 export default tool({
   description:
-    "Phase 4 cross-type linking: validate and (when approved) add `concerns` edges from a synthesis closet to its authority docs. Edge shape: {subject: <synthesis id>, predicate: 'concerns', object: <doc id>}. Validates both endpoints before preview or apply: subject must have synthesized-from lineage, each target must carry es-source-type: doc; rejects self-links and duplicates (idempotent). Dry-run by default — the first call makes no kg_add; pass dry_run:false to apply only after user approval of the numbered proposal list.",
+    "Cross-type linking: validate and (when approved) add `concerns` edges from a synthesis closet to its authority docs. Edge shape: {subject: <synthesis id>, predicate: 'concerns', object: <doc id>}. Validates both endpoints before preview or apply: subject must have synthesized-from lineage, each target must carry es-source-type: doc; rejects self-links and duplicates (idempotent). Dry-run by default — the first call makes no kg_add; pass dry_run:false to apply only after user approval of the numbered proposal list.",
   args: {
     synthesis_id: tool.schema.string().describe("Synthesis closet ID (subject of the concerns edges)."),
     doc_ids: tool.schema.array(tool.schema.string()).describe("Doc drawer IDs (objects of the concerns edges) — one apply call per approved item keeps approval atomic per edge."),

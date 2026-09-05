@@ -1,5 +1,5 @@
 /**
- * The substrate client seam (spec §4.1, Rung 3).
+ * The substrate client seam (spec §4.1).
  *
  * `createSubstrateClient` is the ONLY place outside core/mcp-transport.ts that
  * may construct an MCPHttpClient and run its initialize handshake. Every

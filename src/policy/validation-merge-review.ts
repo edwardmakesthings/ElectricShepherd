@@ -276,7 +276,7 @@ export async function runValidationMergeReview(
       ancestorCount: reportedSourceCount,
     });
 
-    // P2-2: promote provisional -> active on sufficient DIRECT source support.
+// Promote provisional -> active on sufficient DIRECT source support.
     // Deliberately decoupled from the lineage-issue veto and merge machinery (both
     // PR-only) so promotion is identical on vanilla and PR-enabled MemPalace. A
     // closet that never reaches 2 direct sources stays provisional and is filtered

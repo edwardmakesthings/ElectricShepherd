@@ -140,7 +140,7 @@ export async function onMessageUpdatedWithGating(args: {
   } catch (err) {
     console.error("[turn-guard] message.updated failed:", err)
   }
-  // P3-1: bound all session-keyed state to prevent memory leaks in long-lived processes
+  // Bound all session-keyed state to prevent memory leaks in long-lived processes
   pruneAllSessionState(args)
 }
 
@@ -222,7 +222,7 @@ export async function onSessionIdleWithGating(args: {
       anchor: last,
     })
 
-    // Phase 13 CREATE: file worked examples for successful implementation subagents.
+    // File worked examples for successful implementation subagents.
     // Scans the last message for task tool parts with completed status and a target
     // subagent_type, then files a compact example if the output is substantive.
     await args.maybeFileWorkedExamplesFromMessage(sid, last)
@@ -233,7 +233,7 @@ export async function onSessionIdleWithGating(args: {
   } catch (err) {
     console.error("[turn-guard] failed:", err)
   }
-  // P3-1: bound all session-keyed state (same as onMessageUpdated)
+  // Bound all session-keyed state (same as onMessageUpdated)
   pruneAllSessionState(args)
 }
 
@@ -301,7 +301,7 @@ export async function onSessionCompactedWithGating(args: {
   if (args.autoConsolidationOnCompact) {
     args.evaluateAutoConsolidation(sid, "compacted")
   }
-  // P3-1: bound all session-keyed state (same as onMessageUpdated)
+  // Bound all session-keyed state (same as onMessageUpdated)
   pruneAllSessionState(args)
 }
 

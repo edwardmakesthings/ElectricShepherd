@@ -4,7 +4,7 @@
  * Turn-guard recording + palace-client cluster.
  *
  * Extracted verbatim from turn-guard.ts (AC #2 line-count reduction). Owns the
- * two lazy MCP client factories and every Phase 13/14/15/16 CREATE helper that
+ * two lazy MCP client factories and every CREATE helper that
  * records worked examples, capability tuples, calibration captures, failure
  * events, and pending/confirmed intervention patches. Behavior and signatures
  * are unchanged: callers still receive the same closures as before; this module
@@ -61,7 +61,7 @@ export interface RecordingDeps {
  */
 export function createRecordingHelpers(deps: RecordingDeps) {
   let workedExampleClientPromise: Promise<any> | null = null
-  // Phase 14/15 CONSUME (live routing): a full MemgraphClient used ONLY to read
+  // Live routing: a full MemgraphClient used ONLY to read
   // capability + failure evidence before choosing a delegation tier. Kept separate
   // from the thin worked-example wrapper above because it needs the composed
   // getFailureAdjustedRouting method, not just raw kgQuery. Lazy + cached exactly
@@ -126,12 +126,12 @@ export function createRecordingHelpers(deps: RecordingDeps) {
             callRaw(`${toolPrefix}search`, { query: q, limit, wing, room }),
           getDrawer: (args: { drawer_id: string }) =>
             callRaw(`${toolPrefix}get_drawer`, args),
-          // Phase 13 CREATE: write path for filing worked examples + stamping.
+          // Write path for filing worked examples + stamping.
           diaryWrite: (args: Record<string, unknown>) =>
             mcp.callToolResult(`${toolPrefix}diary_write`, args),
           kgAdd: (args: Record<string, unknown>) =>
             mcp.callToolResult(`${toolPrefix}kg_add`, args),
-          // Phase 15 CONSUME: bounded one-hop KG read for failure-mode patches.
+          // Bounded one-hop KG read for failure-mode patches.
           kgQuery: (args: Record<string, unknown>) =>
             mcp.callToolResult(`${toolPrefix}kg_query`, args),
         }
@@ -142,7 +142,7 @@ export function createRecordingHelpers(deps: RecordingDeps) {
     }
     return workedExampleClientPromise
   }
-  // Phase 13 CREATE: file a compact worked example to the apprenticeship room when a
+  // File a compact worked example to the apprenticeship room when a
   // cloud implementation subagent (implement-cloud, build-cloud) completes
   // successfully with substantive output. Best-effort: any failure (MCP down, stamp
   // rejected, dedup hit) degrades to a log line and NEVER throws into the turn. The
@@ -176,13 +176,13 @@ export function createRecordingHelpers(deps: RecordingDeps) {
     })
   }
 
-  // Phase 14 CREATE: record a capability tuple (task shape, tier, outcome) when a
+  // Record a capability tuple (task shape, tier, outcome) when a
   // routing-tier subagent completes. Best-effort: any failure (MCP down, stamp
   // rejected, dedup hit) degrades to a log line and NEVER throws into the turn.
-  // The outcome is derived from the task tool part status — NOT from Phase 7's
+  // The outcome is derived from the task tool part status — NOT from the
   // es-outcome axis (which is human-authoritative and attached to consulted memory
-  // nodes, not to units/tiers). This keeps Phase 7's policy intact while giving
-  // Phase 14 the unit-level evidence it needs for learned routing.
+  // nodes, not to units/tiers). This keeps the es-outcome policy intact while giving
+  // capability recording the unit-level evidence it needs for learned routing.
   async function maybeRecordCapabilityTuple(args: {
     sid: string
     subagentType: string
@@ -207,7 +207,7 @@ export function createRecordingHelpers(deps: RecordingDeps) {
     })
   }
 
-  // Phase 16 CREATE: capture the self-reported confidence label from a completed
+  // Capture the self-reported confidence label from a completed
   // subagent's terminal output and queue it as a PENDING calibration tuple for this
   // session. The tuple (modelId, shapeKey, confidence) is stored session-locally;
   // it becomes a durable es-calibration-outcome edge ONLY when the operator later
@@ -235,7 +235,7 @@ export function createRecordingHelpers(deps: RecordingDeps) {
     })
   }
 
-  // Phase 15 CREATE (worked-intervention persistence): stamp the prompt patch that
+  // Worked-intervention persistence: stamp the prompt patch that
   // BROKE a loop/spiral for this (model, shape) — durable procedural knowledge.
   // Called ONLY from confirmPendingInterventions with evidence of success; never
   // called at nudge time (an attempted nudge is not proof it worked). Best-effort:
@@ -261,11 +261,11 @@ export function createRecordingHelpers(deps: RecordingDeps) {
       buildFailurePatchId,
     })
   }
-  // Phase 15 CREATE (failure-event recording): record a per-model failure event
+  // Failure-event recording: record a per-model failure event
   // when a loop/spiral intervention FIRES, attributed to (model, task shape). The
   // model is the deterministic `provider/model` from routing context; if unknown,
   // skip — an unattributable event is worse than no event. The shape reuses
-  // Phase 14's extractWorkedExampleShape / buildCapabilityCanonicalShape (the SAME
+  // extractWorkedExampleShape / buildCapabilityCanonicalShape (the SAME
   // shape function, per spec). Failure events are recorded at event time: the
   // nudge/spiral WAS attempted, and that attempt is a real data point for routing
   // penalties. The intervention TEXT, by contrast, is only durable once proven to
@@ -296,7 +296,7 @@ export function createRecordingHelpers(deps: RecordingDeps) {
     })
   }
 
-  // Phase 15 CREATE: queue an attempted intervention patch for later success
+  // Queue an attempted intervention patch for later success
   // confirmation. Deduped by key (message id); a new nudge on the same message
   // replaces the pending entry so only the latest wording is confirmable.
   function queuePendingIntervention(sid: string, key: string, label: string, text: string): void {
@@ -311,7 +311,7 @@ export function createRecordingHelpers(deps: RecordingDeps) {
     })
   }
 
-  // Phase 15 CREATE (success signal): confirm or expire the pending intervention
+  // Success signal: confirm or expire the pending intervention
   // patches for this session and persist the ones with evidence of success.
   // `confirmedKey` is the key whose nudge demonstrably broke the loop/spiral:
   //   - retry / spiral nudges — called from onMessageUpdated when the next
@@ -348,7 +348,7 @@ export function createRecordingHelpers(deps: RecordingDeps) {
     })
   }
 
-  // Phase 13 CREATE: scan a message for successful task tool completions and file
+  // Scan a message for successful task tool completions and file
   // worked examples. The task tool part carries the subagent_type in its input args
   // and the output (the subagent's final text) in its state/output field. We only
   // file when the part indicates success (no error status) and the output is

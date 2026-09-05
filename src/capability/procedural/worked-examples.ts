@@ -1,13 +1,13 @@
 /**
- * Phase 13-16: worked-example retrieval, formatting, and deterministic problem-shape
- * extraction (shared with phases 14/15/16). Extracted from retrieval-expansion.ts
- * (criterion 2 decomposition) — behavior and all public exports are unchanged.
+ * Worked-example retrieval, formatting, and deterministic problem-shape
+ * extraction (shared with capability routing and calibration). Extracted from
+ * retrieval-expansion.ts — behavior and all public exports are unchanged.
  */
 import type { MemgraphClient } from "../../core/memgraph.ts";
 import type { CapabilityTier } from "../evaluative/capability-shape.ts";
 import { asArray, asNumber, asObject, asString } from "../../policy/retrieval-scoring.ts";
 // ---------------------------------------------------------------------------
-// Phase 13 (unified memory): worked-example injection.
+// Worked-example injection.
 //
 // The `apprenticeship` room holds worked examples filed after hard problems were
 // solved. This is the CONSUME side: given a delegation prompt, find the most
@@ -19,23 +19,23 @@ import { asArray, asNumber, asObject, asString } from "../../policy/retrieval-sc
 // padding the delegation prompt.
 // ---------------------------------------------------------------------------
 
-/** Phase 13: hard cap on worked examples injected into a delegation prompt. */
+/** Hard cap on worked examples injected into a delegation prompt. */
 export const WORKED_EXAMPLE_MAX_INJECT = 2;
 
 /**
- * Phase 13: minimum relevance score for a worked example to be injected.
+ * Minimum relevance score for a worked example to be injected.
  * Score is in [0, 1] (token-overlap / query-token-count). A floor of 0.25 means
  * at least a quarter of the prompt's informative tokens must appear in the
  * example — below that, the match is too weak to be useful as a demonstration.
  */
 export const WORKED_EXAMPLE_RELEVANCE_FLOOR = 0.25;
 
-/** Phase 13: max chars per injected example (bounds prompt growth). */
+/** Max chars per injected example (bounds prompt growth). */
 export const WORKED_EXAMPLE_MAX_CHARS = 800;
 
 /**
- * Phase 13 CONSUME: source types admitted as worked examples by retrieval.
- * `worked-example` is the stamp this phase writes (a distinct knowledge class —
+ * CONSUME: source types admitted as worked examples by retrieval.
+ * `worked-example` is the stamp this pass writes (a distinct knowledge class —
  * solved task demonstrations, not procedural skills). `skill` stays admitted for
  * backward compatibility with any pre-existing apprenticeship drawers that were
  * stamped `skill`; new filings must never use `skill`.
@@ -96,7 +96,7 @@ function computeWorkedExampleRelevance(queryTokens: Set<string>, exampleTokens: 
 }
 
 /**
- * Phase 13 CONSUME: retrieve the most relevant worked examples from the
+ * CONSUME: retrieve the most relevant worked examples from the
  * `apprenticeship` room for a given delegation prompt.
  *
  * Returns at most `limit` (default WORKED_EXAMPLE_MAX_INJECT = 2) examples,
@@ -215,7 +215,7 @@ export async function retrieveSimilarWorkedExamples(
 }
 
 /**
- * Phase 13: format retrieved worked examples as a delimited demonstration section
+ * Format retrieved worked examples as a delimited demonstration section
  * for injection into a delegation prompt. Returns "" when no examples are provided.
  */
 export function formatWorkedExampleDemonstration(examples: WorkedExampleMatch[]): string {
@@ -237,16 +237,16 @@ export function formatWorkedExampleDemonstration(examples: WorkedExampleMatch[])
 }
 
 // ---------------------------------------------------------------------------
-// Phase 13 CREATE: deterministic problem-shape extraction (shared with phases 14/15/16).
+// CREATE: deterministic problem-shape extraction (shared with capability routing and calibration).
 //
 // The shape is WHAT MADE THE TASK HARD / what class of task it was — not the
-// answer. Retrieval matches on the problem, not the solution. Phases 14/15/16
-// will reuse this exact helper for capability-memory tuples (task shape → tier
-// → outcome), so it must stay cheap and deterministic: no embeddings, no LLM
-// calls, stable across phrasings of the same task class.
+// answer. Retrieval matches on the problem, not the solution. Capability routing
+// and calibration reuse this exact helper for capability-memory tuples (task
+// shape → tier → outcome), so it must stay cheap and deterministic: no embeddings,
+// no LLM calls, stable across phrasings of the same task class.
 // ---------------------------------------------------------------------------
 
-/** Phase 13: work-class vocabulary — deliberately small and closed. */
+/** Work-class vocabulary — deliberately small and closed. */
 export const WORKED_EXAMPLE_WORK_CLASSES = [
   "bug-fix",
   "new-feature",
@@ -260,7 +260,7 @@ export const WORKED_EXAMPLE_WORK_CLASSES = [
 
 export type WorkedExampleWorkClass = (typeof WORKED_EXAMPLE_WORK_CLASSES)[number];
 
-/** Phase 13: known-hard area vocabulary — deliberately small and closed. */
+/** Known-hard area vocabulary — deliberately small and closed. */
 export const WORKED_EXAMPLE_HARD_AREAS = [
   "concurrency",
   "async",
@@ -273,7 +273,7 @@ export const WORKED_EXAMPLE_HARD_AREAS = [
 
 export type WorkedExampleHardArea = (typeof WORKED_EXAMPLE_HARD_AREAS)[number];
 
-/** Phase 13: deterministic problem shape for a task description/prompt. */
+/** Deterministic problem shape for a task description/prompt. */
 export type WorkedExampleShape = {
   /** Coarse work class inferred from the prompt text. */
   workClass: WorkedExampleWorkClass;
@@ -283,20 +283,20 @@ export type WorkedExampleShape = {
   hardAreas: WorkedExampleHardArea[];
   /** Top informative tokens from the prompt (stopwords removed, capped). */
   keyTokens: string[];
-  /** Phase 14: unit-size bucket (single-file / few-file / cross-cutting). */
+  /** Unit-size bucket (single-file / few-file / cross-cutting). */
   sizeBucket: UnitSizeBucket;
   /** Stable hash of the shape fields — used for near-duplicate suppression. */
   shapeKey: string;
 };
 
-/** Phase 13: max chars for a compact worked-example entry filed to the palace. */
+/** Max chars for a compact worked-example entry filed to the palace. */
 export const WORKED_EXAMPLE_ENTRY_MAX_CHARS = 800;
 
-/** Phase 13: minimum chars of substantive output before filing is worthwhile. */
+/** Minimum chars of substantive output before filing is worthwhile. */
 export const WORKED_EXAMPLE_MIN_SUBSTANTIVE_CHARS = 200;
 
 /**
- * Phase 13 CREATE: subagent types whose successful completion warrants a worked
+ * CREATE: subagent types whose successful completion warrants a worked
  * example. Cloud flows only (implement-cloud, build-cloud): the examples are filed
  * so that later cloud delegations can be injected with them as demonstrations.
  * The apprentice/local flows (implement-local, build) deliberately do NOT file —
@@ -346,7 +346,7 @@ const HARD_AREA_PATTERNS: Array<[WorkedExampleHardArea, RegExp]> = [
 ];
 
 /**
- * Phase 13: extract a deterministic problem shape from a task description/prompt.
+ * Extract a deterministic problem shape from a task description/prompt.
  *
  * Cheap and stable — no embeddings, no LLM. Returns a compact object whose
  * `shapeKey` is a stable hash usable for near-duplicate suppression in-session.
@@ -390,7 +390,7 @@ export function extractWorkedExampleShape(promptOrDescription: string): WorkedEx
     if (keyTokens.length >= 12) break;
   }
 
-  // Phase 14: unit-size bucket — a required shape component for capability routing.
+  // Unit-size bucket — a required shape component for capability routing.
   const sizeBucket = classifyUnitSize(text, fileTypes.size);
 
   // Shape key: stable hash of the shape fields (not the raw text).
@@ -399,7 +399,7 @@ export function extractWorkedExampleShape(promptOrDescription: string): WorkedEx
   return { workClass, fileTypes: [...fileTypes].sort(), hardAreas, keyTokens, sizeBucket, shapeKey };
 }
 
-/** Phase 13: deterministic hash of shape fields (simple FNV-1a over a canonical string). */
+/** Deterministic hash of shape fields (simple FNV-1a over a canonical string). */
 function computeShapeKey(shape: { workClass: string; fileTypes: string[]; hardAreas: string[]; keyTokens: string[]; sizeBucket?: string }): string {
   const canonical = [shape.workClass, shape.fileTypes.join(","), shape.hardAreas.join(","), shape.keyTokens.slice(0, 6).join(","), shape.sizeBucket || ""].join("|");
   let hash = 0x811c9dc5; // FNV offset basis
@@ -410,13 +410,13 @@ function computeShapeKey(shape: { workClass: string; fileTypes: string[]; hardAr
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
-/** Phase 14: unit-size bucket vocabulary — deliberately small and closed. */
+/** Unit-size bucket vocabulary — deliberately small and closed. */
 export const UNIT_SIZE_BUCKETS = ["single-file", "few-file", "cross-cutting"] as const;
 
 export type UnitSizeBucket = (typeof UNIT_SIZE_BUCKETS)[number];
 
 /**
- * Phase 14: classify a task prompt into a unit-size bucket (single-file / few-file /
+ * Classify a task prompt into a unit-size bucket (single-file / few-file /
  * cross-cutting). Cheap and deterministic — no embeddings, no LLM. Used by the
  * capability-memory CREATE path so routing evidence can be keyed on scope as well
  * as work class; the bucket is part of the canonical shape string.
@@ -444,7 +444,7 @@ export function classifyUnitSize(promptOrDescription: string, fileTypeCount = 0)
   return "few-file";
 }
 
-/** Phase 14 CREATE: subagent types that map to a routing tier. Only the three
+/** Subagent types that map to a routing tier. Only the three
  * implementation tiers are recorded — utility/analysis subagents (explore,
  * review-diff, run-tests, build, etc.) do not run units of work and are skipped.
  */
@@ -456,7 +456,7 @@ export const CAPABILITY_TIER_BY_SUBAGENT: Readonly<Record<string, CapabilityTier
 };
 
 /**
- * Phase 14 CONSUME (live routing): the canonical subagent for each routing tier.
+ * CONSUME (live routing): the canonical subagent for each routing tier.
  * The inverse of CAPABILITY_TIER_BY_SUBAGENT, used by the turn-guard delegation
  * hook to re-route a unit to a different tier when capability/failure evidence
  * recommends it. `deep` maps to implement-deep-cloud (the canonical deep-tier
@@ -469,22 +469,22 @@ export const CAPABILITY_SUBAGENT_BY_TIER: Readonly<Record<CapabilityTier, string
 };
 
 
-/** Phase 14: deterministic capability bucket id for a (shape, tier) pair. */
+/** Deterministic capability bucket id for a (shape, tier) pair. */
 export function buildCapabilityBucketId(shapeKey: string, tier: CapabilityTier): string {
   return `capability::${shapeKey}::${tier}`;
 }
-/** Phase 15: closed failure-event vocabulary for per-model failure-mode memory. */
+/** Closed failure-event vocabulary for per-model failure-mode memory. */
 export const FAILURE_EVENT_VALUES = ["spiral", "loop"] as const;
 
 export type FailureEvent = (typeof FAILURE_EVENT_VALUES)[number];
 
-/** Phase 15: closed intervention-label vocabulary (the guard that issued the nudge). */
+/** Closed intervention-label vocabulary (the guard that issued the nudge). */
 export const INTERVENTION_LABELS = ["spiral-nudge", "retry-nudge", "loop-block"] as const;
 
 export type InterventionLabel = (typeof INTERVENTION_LABELS)[number];
 
 /**
- * Phase 15: canonical model identity for failure attribution. Deterministic and
+ * Canonical model identity for failure attribution. Deterministic and
  * cheap — `provider/model` lowercased, exactly the pair used by turn-guard routing
  * pins (getPromptRouting / resolveLoopGuardRouting), so failure events key to the
  * same model id that capability routing looks up. Returns null when either half is
@@ -498,7 +498,7 @@ export function canonicalModelId(providerID?: string, modelID?: string): string 
 }
 
 /**
- * Phase 15: deterministic intervention-patch id for a (model, shapeKey, label)
+ * Deterministic intervention-patch id for a (model, shapeKey, label)
  * triple. One node per (model, shape, guard) so repeated identical interventions
  * accumulate on the same node instead of minting new ones.
  */
@@ -506,11 +506,11 @@ export function buildFailurePatchId(modelId: string, shapeKey: string, label: In
   return `failure-patch::${modelId}::${shapeKey}::${label}`;
 }
 
-/** Phase 15: bound intervention text stored as a KG fact (kg object field). */
+/** Bound intervention text stored as a KG fact (kg object field). */
 export const FAILURE_PATCH_TEXT_MAX_CHARS = 500;
 
 /**
- * Phase 15 CONSUME (intervention replay): the prompt block appended to an outgoing
+ * CONSUME (intervention replay): the prompt block appended to an outgoing
  * delegation when getFailureInterventions returns patches for this (model, shape).
  * The HEADING is load-bearing: the live hook checks args.prompt against it before
  * appending (idempotency guard — a re-fired hook must not double the block), and
@@ -520,7 +520,7 @@ export const FAILURE_PATCH_TEXT_MAX_CHARS = 500;
 export const INTERVENTION_REPLAY_HEADING = "## Known interventions for this model on this class of task";
 
 /**
- * Phase 15 CONSUME (intervention replay): format the recorded intervention texts
+ * CONSUME (intervention replay): format the recorded intervention texts
  * as the prompt block appended to an outgoing delegation. Returns "" when there is
  * nothing to inject (empty list) — the caller leaves the prompt EXACTLY as-is.
  */
@@ -537,15 +537,15 @@ export function formatInterventionBlock(interventions: string[]): string {
   );
 }
 
-/** Phase 16: closed self-reported-confidence vocabulary (dream-mapper, drawer-digest, build end-of-loop line). */
+/** Closed self-reported-confidence vocabulary (dream-mapper, drawer-digest, build end-of-loop line). */
 export const CONFIDENCE_VALUES = ["high", "medium", "low"] as const;
 
 export type SelfReportedConfidence = (typeof CONFIDENCE_VALUES)[number];
 
 /**
- * Phase 16 CREATE: parse a self-reported confidence label out of an agent's final
+ * CREATE: parse a self-reported confidence label out of an agent's final
  * output text. Agents are instructed to end with `CONFIDENCE: high|medium|low`
- * (agents/dream-mapper.md, agents/drawer-digest.md, build's end-of-loop line).
+ * (agents/dream-mapper.md and the build end-of-loop line).
  * Returns null when no such line is present — the caller then skips calibration
  * recording rather than guessing a level. Only the LAST occurrence counts (the
  * terminal self-report), matching how the label is produced.
@@ -559,10 +559,10 @@ export function parseSelfReportedConfidence(outputText: string): SelfReportedCon
 }
 
 /**
- * Phase 16: deterministic calibration bucket id for a (model, shapeKey, confidence)
+ * Deterministic calibration bucket id for a (model, shapeKey, confidence)
  * triple. Mirrors buildCapabilityBucketId / buildFailureBucketId naming under a
  * distinct `calibration::` namespace — never colliding with capability buckets,
- * failure buckets, or reserved predicates. The per-model node from Phase 15 is the
+ * failure buckets, or reserved predicates. The per-model node is the
  * `<model>` segment: tuples accumulate on it across sessions so the curve builds up.
  */
 export function buildCalibrationBucketId(modelId: string, shapeKey: string, confidence: SelfReportedConfidence): string {
@@ -573,7 +573,7 @@ export function buildCalibrationBucketId(modelId: string, shapeKey: string, conf
 
 
 /**
- * Phase 13: build a compact worked-example entry for filing to the palace.
+ * Build a compact worked-example entry for filing to the palace.
  *
  * The entry is bounded to WORKED_EXAMPLE_ENTRY_MAX_CHARS and leads with a DESC
  * line (repo convention) so it's discoverable without loading the body. The

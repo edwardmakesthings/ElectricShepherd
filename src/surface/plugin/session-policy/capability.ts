@@ -1,6 +1,6 @@
 // @ts-nocheck
 
-// Domain category: capability tuple recording (Phase 14 CREATE).
+// Domain category: capability tuple recording.
 // Moved verbatim from pure-helpers.ts — see the compatibility re-export there.
 
 import type { MessageWithParts } from "./constants.ts"
@@ -220,7 +220,7 @@ export async function maybeCaptureCalibrationTupleWithGating(args: {
   if (!modelId) return
 
 
-  // Gate 2: shape from the SAME Phase 14/13 shape function.
+  // Gate 2: shape from the SAME capability shape function.
   const shape = args.extractWorkedExampleShape(`${description}\n${prompt}`)
 
 

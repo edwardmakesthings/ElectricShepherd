@@ -46,7 +46,7 @@ export type CadenceOrchestratorOptions = {
   applyMerges?: boolean;
   consolidationDefaults?: Partial<Omit<SynthesisConsolidationOptions, "query" | "targetWing" | "targetRoom">>;
   validationDefaults?: Partial<Omit<ValidationMergeReviewOptions, "scopeRoom">>;
-  /** Phase 16: optional calibration summary request — per-model tables computed via
+  /** Optional calibration summary request — per-model tables computed via
    *  MemgraphClient.getCalibrationTable. Bounded by maxModels (default 4). */
   calibration?: {
     models: string[];
@@ -76,7 +76,7 @@ export type CadenceExecutionResult = {
   validation: ValidationMergeReviewResult;
 };
 
-/** Phase 16: per-model calibration summary row (from MemgraphClient.getCalibrationTable). */
+/** Per-model calibration summary row (from MemgraphClient.getCalibrationTable). */
 export type CalibrationSummaryModel = {
   model: string;
   threshold: number;
@@ -98,7 +98,7 @@ export type CadenceOrchestratorResult = {
   executionMode: CadenceExecutionMode;
   plan: AreaCadencePlan[];
   executed: CadenceExecutionResult[];
-  /** Phase 16: confidence-calibration tables per requested model. Present only when
+  /** Confidence-calibration tables per requested model. Present only when
    *  `calibration` options were supplied; absent (undefined) otherwise — the cadence
    *  envelope is backward-compatible for consumers that don't ask. */
   calibration?: {
@@ -222,7 +222,7 @@ export async function runCadenceOrchestrator(
     });
   }
 
-  // Phase 16: calibration summary — per-model tables with the 20-pair sufficiency gate.
+// Calibration summary — per-model tables with the 20-pair sufficiency gate.
   // Computed best-effort: a failure here degrades to `note`, never aborts cadence.
   let calibration: CadenceOrchestratorResult["calibration"];
   if (options.calibration && options.calibration.models.length > 0) {

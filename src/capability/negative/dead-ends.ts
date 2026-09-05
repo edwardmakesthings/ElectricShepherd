@@ -1,5 +1,5 @@
 /**
- * Phase 9 (unified memory): negative knowledge — what was ruled out.
+ * Negative knowledge — what was ruled out.
  *
  * Dead ends are "tried and failed" or "considered and rejected" approaches. The
  * spec's main risk: an UNLABELLED dead end reads as a suggestion ("we tried X"
@@ -8,7 +8,7 @@
  * outcome clause is incomplete and must not be filed) and render-time markers
  * (the hard `[RULED OUT ...]` prefix, never optional).
  *
- * Storage contract (approved Phase 9 design): a dead end is a SYNTHESIS with
+ * Storage contract (approved design): a dead end is a SYNTHESIS with
  * negative polarity — `es-source-type: synthesis`, never a fourth source type.
  * The negative axis is the `rules-out` KG edge:
  *   - subject = the dead-end drawer id

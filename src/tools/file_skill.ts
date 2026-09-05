@@ -1,5 +1,5 @@
 /**
- * Phase 5 (unified memory): file a skill definition as a drawer in the project
+ * File a skill definition as a drawer in the project
  * wing's `skills` room and stamp it `es-source-type: skill`.
  *
  * The point is not storage — skills IMPROVE FROM USE. The procedure text goes in
@@ -8,7 +8,7 @@
  * if the procedure itself changes, by filing a NEW drawer + `merged-into` edge —
  * never by rewriting this one. The raw-drawer verbatim invariant is preserved.
  *
- * Room selection reuses the Phase 3 picker (`pickPurposeRoom` in ingest_docs.ts):
+ * Room selection reuses the shared picker (`pickPurposeRoom` in ingest_docs.ts):
  * `get_taxonomy`, reuse an existing skill-like room under the kebab-case/purpose
  * contract before minting `skills`. No second taxonomy walk exists in the codebase.
  *
@@ -55,7 +55,7 @@ export type SkillFilingReport = {
   error?: string;
   duplicate_drawer_id?: string;
   pre_snapshot?: { total: number; covered: number };
-  /** Phase 12: the resolved es-domain (explicit arg, or the `general` default). */
+  /** The resolved es-domain (explicit arg, or the `general` default). */
   domain?: SkillDomain;
   drawer_id?: string;
   stamp_failed?: number;
@@ -73,7 +73,7 @@ export async function runSkillFiling(args: {
   content: string;
   desc?: string;
   room?: string;
-  /** Phase 12: es-domain axis. Closed vocabulary — unknown values are rejected at write time. */
+  /** es-domain axis. Closed vocabulary — unknown values are rejected at write time. */
   domain?: SkillDomain | string;
   dry_run?: boolean;
   dryRun?: boolean;
@@ -82,7 +82,7 @@ export async function runSkillFiling(args: {
   if (!wing) throw new Error("file_skill: wing is required (no project wing resolved)");
   const content = String(args.content || "").trim();
   if (!content) throw new Error("file_skill: content is required — the full procedure text, not a summary");
-  // Phase 12: validate against the closed vocabulary at write time so drift can never
+  // Validate against the closed vocabulary at write time so drift can never
   // land in the KG (the read side treats unknown values as unstamped, i.e. general).
   const rawDomain = String(args.domain ?? "").trim();
   if (rawDomain && !(SKILL_DOMAINS as readonly string[]).includes(rawDomain)) {
@@ -200,7 +200,7 @@ export async function runSkillFiling(args: {
     };
   }
 
-  // Stamp the source-type axis, then the Phase 12 domain axis. `es-status` is
+  // Stamp the source-type axis, then the es-domain axis. `es-status` is
   // intentionally NOT touched — orthogonal axes; a skill is authoritative on arrival.
   const stampResults = await runKgAddWrites(args.call, [
     { payload: { subject: drawerId, predicate: "es-source-type", object: "skill", source_closet: drawerId } },
@@ -218,13 +218,13 @@ export async function runSkillFiling(args: {
 
 export default tool({
   description:
-    "Phase 5 procedural memory: file a skill definition as a drawer in the project wing's `skills` room (reusing an existing skill-like room via get_taxonomy before minting one) and stamp it es-source-type: skill. Stores the full procedure verbatim; refinement happens later via refined-by edges, never by rewriting. Exact-duplicate guard prevents sprawl. Dry-run by default — the first call makes no mutating MCP call (read-only duplicate check + bounded one-page room listing); pass dry_run:false to apply. Never touches es-status.",
+    "Procedural memory: file a skill definition as a drawer in the project wing's `skills` room (reusing an existing skill-like room via get_taxonomy before minting one) and stamp it es-source-type: skill. Stores the full procedure verbatim; refinement happens later via refined-by edges, never by rewriting. Exact-duplicate guard prevents sprawl. Dry-run by default — the first call makes no mutating MCP call (read-only duplicate check + bounded one-page room listing); pass dry_run:false to apply. Never touches es-status.",
   args: {
     content: tool.schema.string().describe("The skill procedure, verbatim and complete (goal, preconditions, steps, failure modes, verification)."),
     desc: tool.schema.string().optional().describe("One-line description for discoverability."),
     wing: tool.schema.string().optional().describe("Wing to file into. Defaults to this project's wing."),
     room: tool.schema.string().optional().describe("Explicit destination room. Default: reuse an existing skill-like room, else `skills`."),
-    domain: tool.schema.string().optional().describe("Phase 12 es-domain axis: code | writing | infra | research | general. Defaults to 'general' (temporary conservative default until project-domain inference is added)."),
+    domain: tool.schema.string().optional().describe("es-domain axis: code | writing | infra | research | general. Defaults to 'general' (temporary conservative default until project-domain inference is added)."),
     dry_run: tool.schema.boolean().optional().describe("Preview without writing (default true)."),
     tool_prefix: tool.schema.string().optional().describe("MCP tool prefix override."),
   },

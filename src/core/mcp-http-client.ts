@@ -1,5 +1,5 @@
 /**
- * Compatibility shim — the transport moved to core/mcp-transport.ts (Rung 3).
+ * Compatibility shim — the transport moved to core/mcp-transport.ts.
  *
  * The Streamable-HTTP MCP transport for MemPalace now lives in core/ so that
  * transport construction sits inside the substrate boundary (spec §4.1 /

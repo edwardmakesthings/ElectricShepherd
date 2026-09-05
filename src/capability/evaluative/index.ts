@@ -1,5 +1,5 @@
 /**
- * Evaluative memory capability (spec §3.2, Rung 3).
+ * Evaluative memory capability (spec §3.2).
  *
  * Owns: outcomes, capability routing, calibration — `es-outcome`,
  * `es-calibration-outcome`, plus the unit-level capability tuples
@@ -61,7 +61,7 @@ export {
 export { getOutcomeCounts, recordOutcome };
 
 /**
- * WRITE contract (Rung 3 §6.3 question 1): an evaluative record is a set of KG
+ * WRITE contract: an evaluative record is a set of KG
  * edges on a deterministic bucket id — never a drawer. A capability tuple is
  * (task shape, tier, outcome) on `capability::<shapeKey>::<tier>`; a calibration
  * pair is (model, shape, confidence) on `calibration::<model>::<shape>::<conf>`.
@@ -106,7 +106,7 @@ export function planCapabilityTuple(args: {
 }
 
 /**
- * READ contract (Rung 3 §6.3 question 2): evaluative memory is consumed when it
+ * READ contract: evaluative memory is consumed when it
  * changes a routing decision — getCapabilityRoutingEvidence aggregates outcomes
  * per (shape, tier) and produces a recommendation with a min-sample gate (default
  * 5), and getFailureAdjustedRouting composes capability + failure evidence into the
@@ -157,7 +157,7 @@ export async function readCalibrationDecision(
 }
 
 /**
- * FAIL contract (Rung 3 §6.3 question 3): a substrate error while recording or
+ * FAIL contract: a substrate error while recording or
  * reading evaluative evidence degrades to baseline routing / no escalation — the
  * turn continues — but the degradation is NAMED (the evidence read failed), never
  * mistaken for "no history, stay on baseline". A capability tuple that fails to

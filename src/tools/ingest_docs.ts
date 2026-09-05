@@ -1,5 +1,5 @@
 /**
- * Phase 3 (unified memory): `/ingest-docs <path>` — mine a docs directory into the
+ * `/ingest-docs <path>` — mine a docs directory into the
  * project wing's `reference` room and stamp every ingested drawer
  * `es-source-type: doc`.
  *
@@ -13,7 +13,7 @@
  *      the changed set by construction; every OPEN outgoing KG fact on a changed drawer
  *      is invalidated (the miner purges drawers but never touches the separate KG store),
  *      then the owned axis is re-stamped `es-source-type: doc`;
- *   2b. Phase 11 synthesis staleness — for each changed doc, incoming `concerns` edges
+ *   2b. Synthesis staleness — for each changed doc, incoming `concerns` edges
  *       identify syntheses that reference it; those syntheses are SOFT-flagged
  *       `es-staleness: source-changed`. Flag only: the pass NEVER invalidates or deletes
  *       a synthesis node or any of its lineage (the synthesis may still be correct).
@@ -111,8 +111,8 @@ export type IngestReport = {
  * Room selection under the naming contract: reuse an existing purpose-named room
  * whose name matches one of `likeStems` (checked via roomNameIssue first), else
  * mint `canonicalName`. Taxonomy rooms arrive sorted by drawer count desc — the
- * first match wins. Shared by `pickReferenceRoom` (Phase 3) and `file_skill.ts`
- * (Phase 5, the `skills` room) so there is exactly one picker in the codebase.
+ * first match wins. Shared by `pickReferenceRoom` (the `reference` room) and `file_skill.ts`
+ * (the `skills` room) so there is exactly one picker in the codebase.
  */
 export function pickPurposeRoom(
   rooms: { room: string; drawers: number }[],
@@ -242,7 +242,7 @@ export async function invalidateAndRestamp(
   return { invalidated, invalidateFailed, factCheckFailed: false, restamped, stampFailed };
 }
 
-// ── Phase 11: es-staleness axis (soft flagging of concerned syntheses) ────────
+// ── es-staleness axis (soft flagging of concerned syntheses) ───────────────
 // `es-staleness` is a cross-type KG edge, NOT lineage: it must never count toward
 // height or feed any lineage traversal. One-hop by design — a staleness flag is a
 // single marker on the node whose basis moved. The subject is the flagged synthesis;
@@ -312,7 +312,7 @@ export async function openIncomingConcerns(call: CallTool, docDrawerId: string):
 }
 
 /**
- * Phase 11 synthesis staleness pass for ONE changed doc drawer: find incoming
+ * Synthesis staleness pass for ONE changed doc drawer: find incoming
  * `concerns` edges (syntheses referencing this doc) and soft-flag each one
  * `es-staleness: source-changed`.
  *
@@ -611,7 +611,7 @@ function clampNumber(value: unknown, fallback: number, min: number, max: number)
 
 export default tool({
   description:
-    "Phase 3 doc ingestion: mine a docs directory into the project wing's `reference` room via the substrate mine tool (projects mode), stamp every ingested drawer es-source-type: doc, and on re-ingest invalidate stale KG facts on changed drawers (bounded pre/post ID snapshot + id-diff) and soft-flag syntheses that concern a changed doc with es-staleness: source-changed (flag only — never invalidates a synthesis). Reuses an existing reference-like room via get_taxonomy before minting one. Dry-run by default — the first call makes no mutating MCP call; pass dry_run:false to apply.",
+    "Doc ingestion: mine a docs directory into the project wing's `reference` room via the substrate mine tool (projects mode), stamp every ingested drawer es-source-type: doc, and on re-ingest invalidate stale KG facts on changed drawers (bounded pre/post ID snapshot + id-diff) and soft-flag syntheses that concern a changed doc with es-staleness: source-changed (flag only — never invalidates a synthesis). Reuses an existing reference-like room via get_taxonomy before minting one. Dry-run by default — the first call makes no mutating MCP call; pass dry_run:false to apply.",
   args: {
     path: tool.schema.string().describe("Directory of docs to mine (required)."),
     wing: tool.schema.string().optional().describe("Wing to mine into. Defaults to this project's wing."),

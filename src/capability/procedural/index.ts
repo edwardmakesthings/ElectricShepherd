@@ -1,5 +1,5 @@
 /**
- * Procedural memory capability (spec §3.2, Rung 3).
+ * Procedural memory capability (spec §3.2).
  *
  * Owns: skills, promotion, refinement, worked examples — `refined-by`,
  * `promoted-from`, `es-domain`. Skills are "how to do X" knowledge; worked
@@ -57,7 +57,7 @@ export { getRefinedBy, getRefines };
 export { getPromotedFrom };
 
 /**
- * WRITE contract (Rung 3 §6.3 question 1): a worked example is filed to the
+ * WRITE contract: a worked example is filed to the
  * `apprenticeship` room as a drawer stamped `es-source-type: worked-example`,
  * carrying its problem shape (work-class, file-types, hard-areas, size-bucket) so
  * retrieval matches on the PROBLEM, not the solution. A skill is filed to the
@@ -109,7 +109,7 @@ export function planWorkedExampleWrite(args: {
 }
 
 /**
- * READ contract (Rung 3 §6.3 question 2): a worked example is consumed when it is
+ * READ contract: a worked example is consumed when it is
  * injected as a demonstration into a delegation prompt — retrieveSimilarWorkedExamples
  * searches the apprenticeship room, scores by token-overlap relevance, and returns
  * at most WORKED_EXAMPLE_MAX_INJECT (2) examples above the relevance floor;
@@ -127,7 +127,7 @@ export async function readWorkedExampleDemonstrations(
 }
 
 /**
- * FAIL contract (Rung 3 §6.3 question 3): a substrate error during worked-example
+ * FAIL contract: a substrate error during worked-example
  * retrieval degrades to "no examples" — the caller injects nothing and the turn
  * continues — but the degradation is NAMED (the search call failed), not mistaken
  * for "examples exist but none relevant". A filing failure is recorded as a named

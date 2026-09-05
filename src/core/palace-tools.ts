@@ -1,7 +1,7 @@
 /**
  * Shared helpers for the MemPalace inspection / relocation tools.
  *
- * The substrate client factory moved to core/substrate-client.ts (Rung 3, spec
+ * The substrate client factory moved to core/substrate-client.ts (spec
  * §4.1) so that transport construction sits inside the substrate boundary
  * (Check A: no `new MCPHttpClient` or client factory outside core/). This file
  * keeps the pure parsing/aggregation helpers — they contain no substrate calls

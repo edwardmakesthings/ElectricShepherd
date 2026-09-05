@@ -135,7 +135,7 @@ async function main(): Promise<void> {
   configuredPythonBin = pythonBin;
   configuredNativeCoordinatorPath = nativeCoordinatorPath;
 
-  // P2-1 + P2-3: generate run_id at startup
+  // Generate run_id at startup
   const runId = "eshepherd-" + new Date().toISOString().replace(/[:.]/g, "-").slice(0, 17) + "-" + Math.random().toString(36).slice(2, 6);
 
   const argv = process.argv.slice(2);
@@ -585,7 +585,7 @@ async function main(): Promise<void> {
       limit: Number(runtimeConfig.valuesByPath.memcore?.render?.maxFactsPerSection) || 8,
     });
 
-    // Phase 8 (prospective memory): pending reminder lines.
+  // Pending reminder lines for the [pending] block.
     const maxPending = Math.max(0, Number(runtimeConfig.valuesByPath.memcore?.render?.maxPendingReminders) || 3);
     const pendingReminderLines = !isFalsyFlag(String(runtimeConfig.valuesByPath.memcore?.render?.includePending))
       ? await fetchPendingReminderLines({
@@ -598,7 +598,7 @@ async function main(): Promise<void> {
         })
       : [];
 
-    // Phase 9 (negative knowledge): dead-end lines for the [dead-ends] block.
+  // Dead-end lines for the [dead-ends] block.
     const maxDeadEnds = Math.max(0, Number(runtimeConfig.valuesByPath.memcore?.render?.maxDeadEnds) || 3);
     const deadEndLines = !isFalsyFlag(String(runtimeConfig.valuesByPath.memcore?.render?.includeDeadEnds))
       ? await fetchDeadEndLines({
@@ -683,12 +683,12 @@ async function main(): Promise<void> {
     cadenceStateOut = next;
   }
 
-  // P2-1: trace envelope — wrap output with run metadata
+  // Trace envelope — wrap output with run metadata
   const durationMs = Date.now() - startTime;
   const examinedCount = worklist.length;
   const createdNodes = consolidationBatches.map((c) => c.createdNodeId).filter(Boolean) as string[];
 
-  // P3-4: collect warnings for mapper/auditor fallbacks
+  // Collect warnings for mapper/auditor fallbacks
   const traceWarnings: string[] = [];
   if (mapper && mapper.via === "none") traceWarnings.push("mapper-unavailable");
   if (auditor && auditor.via === "none") traceWarnings.push("auditor-unavailable");
@@ -719,7 +719,7 @@ async function main(): Promise<void> {
     ...(cadence?.calibration ? { calibration: cadence.calibration } : {}),
   };
 
-  // P2-1: write trace envelope to stdout
+  // Write trace envelope to stdout
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
   const moveSummary = asObject((worklistOutput as Record<string, unknown>).moves);
   flushRunProgress(
@@ -746,7 +746,7 @@ async function main(): Promise<void> {
     createdNodeCount: createdNodes.length,
   });
 
-  // P1-2: append run journal entry for crash-safe resume
+  // Append run journal entry for crash-safe resume
   try {
     appendRunJournalEntry({
       env: process.env,

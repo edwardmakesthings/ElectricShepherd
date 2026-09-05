@@ -76,14 +76,14 @@ export const DEFAULT_TASK_SWAP_QWEN_MATCH = "qwen"
 export const DEFAULT_TASK_SWAP_QWEN_TO_MODEL = "litellm/implementer-gemma4-31b"
 export const DEFAULT_TASK_SWAP_GEMMA_MATCH = "gemma"
 export const DEFAULT_TASK_SWAP_GEMMA_TO_MODEL = "litellm/implementer-qwen3.8-27b"
-// Phase 13 (worked-example injection): when delegating to @implement-local via the
+// Worked-example injection: when delegating to @implement-local via the
 // task tool, append up to WORKED_EXAMPLE_MAX_INJECT relevant apprenticeship worked
 // examples as demonstrations. Below WORKED_EXAMPLE_RELEVANCE_FLOOR, inject nothing.
 // The cap and floor are defined in adapter/retrieval-expansion.ts (single source of
 // truth); they are re-exported here for the config echo and testability.
 export const DEFAULT_WORKED_EXAMPLE_INJECTION_ENABLED = true
 export const DEFAULT_WORKED_EXAMPLE_SEARCH_TIMEOUT_MS = 4000
-// Phase 13 CREATE: when a cloud implementation subagent (implement-cloud,
+// Worked-example filing: when a cloud implementation subagent (implement-cloud,
 // build-cloud) completes successfully with substantive output, file a compact
 // worked example to the apprenticeship room and stamp it es-source-type:
 // worked-example. Worked examples are a distinct knowledge class from procedural
@@ -93,34 +93,34 @@ export const DEFAULT_WORKED_EXAMPLE_SEARCH_TIMEOUT_MS = 4000
 // flows (implement-local, build) deliberately do NOT file — see
 // WORKED_EXAMPLE_FILE_AGENT_TYPES for the rationale.
 export const DEFAULT_WORKED_EXAMPLE_FILING_ENABLED = true
-// Phase 14 CREATE: when a routing-tier subagent (implement-local, implement-cloud,
+// Capability recording: when a routing-tier subagent (implement-local, implement-cloud,
 // implement-deep-cloud, solve-deep-cloud) completes, record a capability tuple
 // (task shape, tier, outcome) to the palace so the CONSUME side can aggregate
 // evidence per (shape, tier) and recommend a tier with a min-sample gate. The
 // outcome is derived from the task tool part status (success/failed/aborted), NOT
-// from Phase 7's es-outcome axis (human-authoritative). Best-effort: any failure
+// from the es-outcome axis (human-authoritative). Best-effort: any failure
 // degrades to a log line and never throws into the turn.
   export const DEFAULT_CAPABILITY_RECORDING_ENABLED = true
-// Phase 15 CREATE: when a turn-guard intervention fires (loop nudge, spiral
+// Failure recording: when a turn-guard intervention fires (loop nudge, spiral
 // detection), record a failure event attributed to (model, task shape) plus the
-// successful intervention text. Shape reuses Phase 14's extractWorkedExampleShape /
+// successful intervention text. Shape reuses extractWorkedExampleShape /
 // buildCapabilityCanonicalShape — no second shape system. Model identity is
 // deterministic from routing context (provider/model); unknown => skip. The
 // failure axis uses NEW es-failure-* / es-intervention-* predicates, never
-// es-outcome (Phase 7 is human-authoritative). Best-effort: any failure degrades
+// es-outcome (human-authoritative). Best-effort: any failure degrades
 // to a log line and never throws into the turn.
 export const DEFAULT_FAILURE_RECORDING_ENABLED = true
-// Phase 15 CONSUME: when delegating via the task tool, inject known successful
+// Failure patch injection: when delegating via the task tool, inject known successful
 // intervention patches for (model, shape) — only on an exact (model, shapeKey)
 // match, so absent data yields no injection and no prompt bloat.
 export const DEFAULT_FAILURE_PATCH_INJECTION_ENABLED = true
-// Phase 16 CREATE: capture the self-reported confidence label from a subagent's
+// Calibration capture: capture the self-reported confidence label from a subagent's
 // terminal output at completion time. The PENDING tuple (model, shape, confidence)
 // is stored session-locally; it becomes a durable calibration edge ONLY when the
 // operator later records an es-outcome for that unit via record_outcome (the
 // human-authoritative path). No proxy outcome labels are ever written here.
 export const DEFAULT_CALIBRATION_CAPTURE_ENABLED = true
-// Phase 16 CONSUME (calibrated escalation): when delegating via the task tool,
+// Calibrated escalation: when delegating via the task tool,
 // consult the (model, shape, confidence) calibration cell BEFORE trusting the
 // subagent's self-reported confidence at face value. ACTIVE BY DEFAULT — no
 // feature flag. NEUTRAL FALLBACK (operator decision): a trust override requires
@@ -134,7 +134,7 @@ export const DEFAULT_CALIBRATION_CAPTURE_ENABLED = true
 // full 20-pair curve to humans; only the decision gate uses the 5-sample floor.
 export const CALIBRATION_OVERRIDE_MIN_SAMPLES = 5
 export const CALIBRATION_MIN_HIT_RATE = 0.6
-// Phase 15 CONSUME (intervention replay): when delegating via the task tool,
+// Intervention replay: when delegating via the task tool,
 // consult getFailureInterventions for (model, shape) — the intervention texts
 // that previously BROKE a loop on this exact model + task class — and inject
 // them into the outgoing prompt ("last time this shape failed, here is what

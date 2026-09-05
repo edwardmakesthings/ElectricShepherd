@@ -1,5 +1,5 @@
 /**
- * Phase 8 (unified memory): prospective memory — the reminder lifecycle tool.
+ * Prospective memory — the reminder lifecycle tool.
  *
  * One drawer per reminder in the project wing's `reminders` room, with edges:
  *   - `triggers-on`            object = condition value (path/glob, topic keyword, or wing/room)
@@ -449,7 +449,7 @@ export async function runRemindList(args: {
 
 export default tool({
   description:
-    "Phase 8 prospective memory: create/update/close/list reminders (one drawer per reminder in the project wing's `reminders` room, with triggers-on + es-reminder-status/expires-at edges). Reminders render into mem-core under a [pending] block when their trigger matches the current scope. Dry-run by default; pass dry_run:false to apply. No expiry, no reminder: create requires a valid ISO expires_at.",
+    "Prospective memory: create/update/close/list reminders (one drawer per reminder in the project wing's `reminders` room, with triggers-on + es-reminder-status/expires-at edges). Reminders render into mem-core under a [pending] block when their trigger matches the current scope. Dry-run by default; pass dry_run:false to apply. No expiry, no reminder: create requires a valid ISO expires_at.",
   args: {
     action: tool.schema.enum(["create", "update", "close", "list"]).describe("Lifecycle action."),
     wing: tool.schema.string().describe("Project wing the reminder belongs to (required)."),

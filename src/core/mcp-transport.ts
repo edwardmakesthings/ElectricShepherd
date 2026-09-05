@@ -2,9 +2,9 @@
  * Streamable-HTTP MCP transport for the MemPalace substrate (spec §4.1).
  *
  * This is the ONLY file in the runtime that speaks raw JSON-RPC to a MemPalace
- * MCP endpoint over HTTP. It moved here from adapter/mcp-http-client.ts as part
- * of Rung 3 so that the transport construction lives inside core/ — every
- * non-core caller (tools/, scripts/, plugin/) reaches the substrate exclusively
+ * MCP endpoint over HTTP. It moved here from adapter/mcp-http-client.ts so that
+ * the transport construction lives inside core/ — every non-core caller
+ * (tools/, scripts/, plugin/) reaches the substrate exclusively
  * through `createSubstrateClient` in core/substrate-client.ts, which is the only
  * place outside this file that may construct an MCPHttpClient.
  *

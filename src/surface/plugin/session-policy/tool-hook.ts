@@ -136,7 +136,7 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
         }
       }
 
-      // Phase 13 (worked-example injection): for @implement-local delegations,
+      // Worked-example injection: for @implement-local delegations,
       // append up to WORKED_EXAMPLE_MAX_INJECT relevant apprenticeship worked
       // examples as demonstrations. Runs AFTER the watchdog signature is computed
       // from the ORIGINAL prompt (the loop guard must see the pre-injection call),
@@ -189,10 +189,10 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
         }
       }
 
-      // Phase 15 CONSUME (prompt patches): inject known successful intervention
+      // Prompt patches: inject known successful intervention
       // patches for the EXACT (model, shapeKey) pair. The model is resolved from
-      // delegation context (hook args or session cache); the shape reuses Phase
-      // 14's extractWorkedExampleShape on the ORIGINAL prompt (same text as the
+      // delegation context (hook args or session cache); the shape reuses
+      // extractWorkedExampleShape on the ORIGINAL prompt (same text as the
       // CREATE side). Absent data => no injection, no prompt bloat. Any failure
       // degrades to no injection — a read hiccup must never block a delegation.
       if (context.failurePatchInjectionEnabled && hasPrompt) {
@@ -253,7 +253,7 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
         }
       }
 
-      // Phase 14/15 CONSUME (live routing): consult capability + failure evidence
+      // Live routing: consult capability + failure evidence
       // BEFORE the tier is chosen, and re-route the delegation to a different tier
       // when the evidence recommends it. ALWAYS ACTIVE — no feature flag. Neutral
       // fallback: if the palace is unavailable, the read throws, or the sample is
@@ -314,7 +314,7 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
         }
       }
 
-      // Phase 16 CONSUME (calibrated escalation): consult the calibration cell
+      // Calibrated escalation: consult the calibration cell
       // for this (model, shape, confidence) BEFORE a subagent's self-reported
       // confidence is trusted at face value. ACTIVE BY DEFAULT — no feature
       // flag. The trust override requires >= CALIBRATION_OVERRIDE_MIN_SAMPLES
@@ -384,7 +384,7 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
         }
       }
 
-      // Phase 15 CONSUME (intervention replay): consult getFailureInterventions
+      // Intervention replay: consult getFailureInterventions
       // for this (model, shape) — the intervention texts that previously BROKE a
       // loop on this exact model + task class — and inject them into the outgoing
       // delegation prompt: "last time this shape failed, here is what fixed it."
@@ -486,7 +486,7 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
         while (window.length > context.loopWindowSize) window.shift()
         context.toolWindowBySession.set(sid, window)
       }
-      // Phase 15 CREATE (success signal): the model's next tool call after a
+      // Success signal: the model's next tool call after a
       // blocked loop is a DIFFERENT signature than the one that was blocked —
       // deterministic evidence the nudge broke the loop. Persist the pending
       // loop-block patch; expire any other pending patches for this session.
@@ -568,7 +568,7 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
       console.error(`[turn-guard] loop guard: nudge prompt failed sid=${sid}:`, promptErr)
     }
 
-    // Phase 15 CREATE: attribute the repeated-tool loop to (model, shape) at
+    // Attribute the repeated-tool loop to (model, shape) at
     // nudge time. Task text = tool name + args (the shape function tolerates any
     // text; for non-task tools this is a coarse but deterministic shape). The
     // intervention text is only QUEUED — it becomes durable knowledge only if

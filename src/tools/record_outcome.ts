@@ -1,5 +1,5 @@
 /**
- * Phase 7 (unified memory): `es-outcome` edges — human-authoritative outcome feedback
+ * `es-outcome` edges — human-authoritative outcome feedback
  * on the memories that were actually consulted for a unit of work.
  *
  * Predicate shape: `{subject: <node id>, predicate: "es-outcome", object: accept|revise|failed|unused}`.
@@ -7,7 +7,7 @@
  * with 6 accepts + 1 revise is different from one with 1 accept). Nothing here ever
  * invalidates or collapses an existing edge — accumulation, no overwrite.
  *
- * HUMAN-AUTHORITATIVE by design (approved Phase 7 policy): terminal es-outcome writes
+ * HUMAN-AUTHORITATIVE by design (approved policy): terminal es-outcome writes
  * come ONLY from this explicit tool path, driven by an operator's judgment at cycle
  * close. There is deliberately NO input for test results, reviewer verdicts, or
  * loop/spiral intervention logs — automation is evidence only, never a writer. A
@@ -44,11 +44,11 @@ const OUTCOME_PREDICATE = "es-outcome";
 export const OUTCOME_VALUES = ["accept", "revise", "failed", "unused"] as const;
 export type OutcomeValue = (typeof OUTCOME_VALUES)[number];
 
-// Phase 16 (unified memory): confidence-calibration tuple. When the operator records an
+// Confidence-calibration tuple. When the operator records an
 // es-outcome for a unit that carried a self-reported confidence, the SAME judgment is
 // paired with (model, task shape, reported level) and persisted as an
 // `es-calibration-outcome` edge on the per-model calibration bucket — so the curve
-// accumulates against Phase 7's ground truth. No proxy outcome labels: the object of
+// accumulates against this tool's ground truth. No proxy outcome labels: the object of
 // the calibration edge is always this tool's validated es-outcome value.
 const CALIBRATION_OUTCOME_PREDICATE = "es-calibration-outcome";
 export const CALIBRATION_CONFIDENCE_VALUES = ["high", "medium", "low"] as const;
@@ -64,7 +64,7 @@ export type OutcomeRecordItem = {
   error?: string;
 };
 
-/** Phase 16: optional calibration tuple attached to an outcome recording. */
+/** Optional calibration tuple attached to an outcome recording. */
 export type CalibrationCapture = {
   model_id: string;
   task_shape: string;
@@ -78,14 +78,14 @@ export type OutcomeRecordReport = {
   cycle_ref?: string;
   edges: OutcomeRecordItem[];
   counts: { proposed: number; added: number; add_failed: number };
-  /** Phase 16: the calibration tuple edge (present only when a valid capture was supplied). */
+  /** The calibration tuple edge (present only when a valid capture was supplied). */
   calibration?: {
     bucket_id: string;
     status: OutcomeEdgeStatus;
     proposed_edge?: { subject: string; predicate: string; object: string; valid_from: string };
     error?: string;
   };
-  /** Phase 16: set when a capture was supplied but rejected (invalid level / missing fields). */
+  /** Set when a capture was supplied but rejected (invalid level / missing fields). */
   calibration_skipped_reason?: string;
   error?: string;
   next_step?: string;
@@ -104,7 +104,7 @@ export async function runOutcomeRecord(args: {
   dry_run?: boolean;
   dryRun?: boolean;
   now?: () => Date;
-  /** Phase 16: optional calibration tuple for the unit this outcome closes. When all
+  /** Optional calibration tuple for the unit this outcome closes. When all
    *  three fields are present and valid, the SAME es-outcome value is also persisted as
    *  an `es-calibration-outcome` edge on the (model, shape, confidence) bucket — the
    *  only path that creates calibration tuples. */
@@ -140,7 +140,7 @@ export async function runOutcomeRecord(args: {
 
   const counts = { proposed: edges.length, added: 0, add_failed: 0 };
 
-  // Phase 16: validate the optional calibration tuple. Rejected captures are reported
+  // Validate the optional calibration tuple. Rejected captures are reported
   // (calibration_skipped_reason) but NEVER abort the es-outcome write — the outcome is
   // the primary record; calibration is an attached signal, not a precondition.
   const calibration = resolveCalibrationCapture(args.calibration);
@@ -190,7 +190,7 @@ export async function runOutcomeRecord(args: {
 
   const report: OutcomeRecordReport = { ok: true, dry_run: false, outcome: outcome as OutcomeValue, cycle_ref: cycleRef, edges, counts };
 
-  // Phase 16 APPLY: persist the calibration tuple edge (same validated es-outcome value)
+  // APPLY: persist the calibration tuple edge (same validated es-outcome value)
   // on the per-model bucket. Independent of the es-outcome writes above — a failure here
   // is reported but never reverts or blocks the outcome record.
   if (calibration) {
@@ -222,7 +222,7 @@ export async function runOutcomeRecord(args: {
   return report;
 }
 
-/** Phase 16: validate and normalize an optional calibration capture. Returns the bucket
+/** Validate and normalize an optional calibration capture. Returns the bucket
  *  id + proposed edge when valid, or a skipped_reason when any field is missing/invalid. */
 function resolveCalibrationCapture(capture?: CalibrationCapture): {
   bucket_id: string;
@@ -258,7 +258,7 @@ function resolveCalibrationCapture(capture?: CalibrationCapture): {
 
 export default tool({
   description:
-    "Phase 7 outcome feedback (HUMAN-AUTHORITATIVE): record an es-outcome judgment (accept | revise | failed | unused) for an EXPLICIT set of node ids — the selected_nodes actually consulted for a unit of work. Outcomes accumulate (never overwrite). Dry-run by default; pass dry_run:false only after explicit operator confirmation. There is no scope/wing/room write mode and no automatic path: test failures, reviewer verdicts, and loop/spiral logs are evidence for the operator's judgment, never writers.",
+    "Outcome feedback (HUMAN-AUTHORITATIVE): record an es-outcome judgment (accept | revise | failed | unused) for an EXPLICIT set of node ids — the selected_nodes actually consulted for a unit of work. Outcomes accumulate (never overwrite). Dry-run by default; pass dry_run:false only after explicit operator confirmation. There is no scope/wing/room write mode and no automatic path: test failures, reviewer verdicts, and loop/spiral logs are evidence for the operator's judgment, never writers.",
   args: {
     node_ids: tool.schema
       .array(tool.schema.string())
@@ -275,19 +275,19 @@ export default tool({
       .string()
       .optional()
       .describe(
-        "Phase 16 calibration: canonical model id of the unit this outcome closes (e.g. from Phase 15's canonicalModelId). Required WITH task_shape + confidence to record a calibration tuple.",
+        "Calibration: canonical model id of the unit this outcome closes (e.g. from the capability layer's canonicalModelId). Required WITH task_shape + confidence to record a calibration tuple.",
       ),
     task_shape: tool.schema
       .string()
       .optional()
       .describe(
-        "Phase 16 calibration: the unit's canonical task shape key (from extractWorkedExampleShape/buildCapabilityCanonicalShape — the SAME Phase 14/13 shape system). Required WITH model_id + confidence.",
+        "Calibration: the unit's canonical task shape key (from extractWorkedExampleShape/buildCapabilityCanonicalShape — the SAME shape system). Required WITH model_id + confidence.",
       ),
     confidence: tool.schema
       .string()
       .optional()
       .describe(
-        "Phase 16 calibration: the unit's self-reported confidence level (high | medium | low), parsed from its terminal CONFIDENCE line. Required WITH model_id + task_shape. When all three are present, this es-outcome value is ALSO persisted as an es-calibration-outcome edge on the (model, shape, confidence) bucket.",
+        "Calibration: the unit's self-reported confidence level (high | medium | low), parsed from its terminal CONFIDENCE line. Required WITH model_id + task_shape. When all three are present, this es-outcome value is ALSO persisted as an es-calibration-outcome edge on the (model, shape, confidence) bucket.",
       ),
     tool_prefix: tool.schema.string().optional().describe("MCP tool prefix override."),
   },
@@ -314,7 +314,7 @@ export default tool({
       outcome: String(args.outcome || ""),
       cycleRef: args.cycle_ref,
       dryRun: args.dry_run,
-      // Phase 16: only attach a calibration capture when ALL THREE fields are present —
+      // Only attach a calibration capture when ALL THREE fields are present —
       // a partial capture is rejected (reported), never guessed.
       ...(args.model_id && args.task_shape && args.confidence
         ? { calibration: { model_id: String(args.model_id), task_shape: String(args.task_shape), confidence: String(args.confidence) } }

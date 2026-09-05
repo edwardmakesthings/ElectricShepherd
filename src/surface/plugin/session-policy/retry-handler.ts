@@ -100,7 +100,7 @@ export async function issueRetryWithGating(args: {
     )
     // Turn is genuinely complete — reset the retry chain counter for this session.
     args.retryChainBySession.delete(sid)
-    // Phase 15 CREATE (success signal): a clean completion right after an
+    // Success signal: a clean completion right after an
     // attempted nudge is deterministic evidence the intervention worked —
     // persist the pending patch(es); expire any that were not confirmed here.
     const routing = args.getPromptRouting(last, prev)
@@ -202,7 +202,7 @@ export async function issueRetryWithGating(args: {
     body,
   })
 
-  // Phase 15 CREATE: attribute the stalled stop to (model, shape) at nudge time.
+  // Attribute the stalled stop to (model, shape) at nudge time.
   // Task text = the real user prompt when prev is a user turn, else this turn's
   // own text. The intervention text is only QUEUED here — it becomes durable
   // knowledge only if confirmPendingInterventions later proves it worked (the

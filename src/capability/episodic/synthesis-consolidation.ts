@@ -17,7 +17,7 @@ export type TranscriptInsightSummary = {
   rootCausesAndWorkedExamples: string[];
   subsystemsAndFiles: string[];
   openItems: string[];
-  // Phase 9 (negative knowledge): approaches tried-and-failed or considered-and-rejected,
+  // Negative knowledge: approaches tried-and-failed or considered-and-rejected,
   // one line each with the outcome clause attached. Empty when nothing qualifies —
   // mappers must not manufacture dead ends.
   deadEnds?: string[];
@@ -42,7 +42,7 @@ export type SynthesisConsolidationOptions = {
   applyWrites?: boolean;
   mapperSummaries?: TranscriptInsightSummary[];
   rawEntries?: Array<{ id: string; text: string }>;
-  // P2-3: provenance — the run_id of the consolidation execution that produced this result
+  // Provenance — the run_id of the consolidation execution that produced this result
   runId?: string;
 };
 
@@ -71,7 +71,7 @@ export type SynthesisConsolidationResult = {
     durableFacts: string[];
     decisions: string[];
     openItems: string[];
-    // Phase 9 (negative knowledge): dead-end lines from the included summaries, verbatim.
+    // Negative knowledge: dead-end lines from the included summaries, verbatim.
     // Empty when nothing was ruled out — the render drops the section in that case.
     deadEnds?: string[];
     contentCharacters: number;
@@ -88,9 +88,9 @@ export type SynthesisConsolidationResult = {
   };
   createdNodeId?: string;
   createResult?: Record<string, unknown>;
-  // P2-3: provenance — the run_id propagated from the calling script
+  // Provenance — the run_id propagated from the calling script
   runId?: string;
-  // Phase 9 (negative knowledge): dead-end filing outcomes. Present only when
+  // Negative knowledge: dead-end filing outcomes. Present only when
   // applyWrites ran and dead ends were attempted. Filing is best-effort and
   // fault-tolerant — failures here never abort the core consolidation.
   deadEndFiling?: {
@@ -231,7 +231,7 @@ function mapEntryToSummary(entry: { id: string; text: string }): TranscriptInsig
   const durableFacts = keywordMatch(lines, /\b(is|are|was|were|has|have|always|never|uses|supports|requires)\b/i).slice(0, 8);
   const decisions = keywordMatch(lines, /\b(decid|choose|chose|prefer|plan|policy|will|should|must)\b/i).slice(0, 8);
   const rootCauses = keywordMatch(lines, /\b(root cause|because|due to|caused by|failed|failure|bug|regression|fixed by)\b/i).slice(0, 8);
-  // Phase 9: the keyword fallback is deliberately conservative about negative knowledge —
+  // The keyword fallback is deliberately conservative about negative knowledge —
   // a line that merely mentions "failed" is not a ruled-out approach. Only lines that
   // explicitly record an abandoned attempt qualify, and only when they carry an outcome
   // clause (an em-dash or "does not work"/"did not work" phrasing). A false negative label
@@ -281,7 +281,7 @@ function parseProvidedMapperSummaries(value: unknown): TranscriptInsightSummary[
       rootCausesAndWorkedExamples: pickStringList("rootCausesAndWorkedExamples", "root_causes_and_worked_examples"),
       subsystemsAndFiles: pickStringList("subsystemsAndFiles", "subsystems_and_files"),
       openItems: pickStringList("openItems", "open_items"),
-      // Phase 9: dead-end lines pass through as-is (order preserved, no re-sort — the
+      // Dead-end lines pass through as-is (order preserved, no re-sort — the
       // mapper's line order is meaningful and uniqSorted would scramble it).
       deadEnds: asArray(obj.deadEnds ?? obj.dead_ends).map((v) => asString(v).trim()).filter(Boolean),
       rawExcerpt: asString(obj.rawExcerpt || obj.raw_excerpt).trim() || undefined,
@@ -411,7 +411,7 @@ function buildConsolidationDraft(args: {
   const rootCauses = uniqSorted(args.summaries.flatMap((s) => s.rootCausesAndWorkedExamples));
   const subsystems = uniqSorted(args.summaries.flatMap((s) => s.subsystemsAndFiles));
   const openItems = uniqSorted(args.summaries.flatMap((s) => s.openItems));
-  // Phase 9: dead ends are deduped by exact line (no re-sort — the mapper's order is
+  // Dead ends are deduped by exact line (no re-sort — the mapper's order is
   // meaningful and the lines already carry their outcome clauses).
   const deadEnds = [...new Set(args.summaries.flatMap((s) => (s.deadEnds || []).map((line) => line.trim()).filter(Boolean)))];
 
@@ -438,7 +438,7 @@ function buildConsolidationDraft(args: {
     "## Open Items",
     toBullets(openItems),
   ];
-  // Phase 9: the negative-knowledge section is appended only when non-empty — a dead end
+  // The negative-knowledge section is appended only when non-empty — a dead end
   // stored without its outcome clause would read as advice, and an empty section is pure
   // per-closet tax. The lines arrive verbatim from the mapper (outcome clause included).
   if (deadEnds.length > 0) {
@@ -625,7 +625,7 @@ export async function runSynthesisConsolidation(
     }
   }
 
-  // Phase 9 (negative knowledge): file each dead-end line as a real negative-polarity
+  // File each dead-end line as a real negative-polarity
   // synthesis with its rules-out edges. This runs after the main drawer is created and
   // only when writes are applied — dead ends ride the same applyWrites gate so a dry run
   // never persists them. Filing is fault-tolerant: a failed line is recorded in

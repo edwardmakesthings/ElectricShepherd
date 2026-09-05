@@ -1,5 +1,5 @@
 /**
- * Phase 4 + Phase 3 close-out (unified memory): DOC admission for scoped retrieval.
+ * DOC admission for scoped retrieval.
  *
  * Two blocks, extracted verbatim from expandScopedRetrieval (retrieval-expansion.ts)
  * so the orchestrator stays a thin pipeline:
@@ -25,11 +25,11 @@ import { safeListDrawers } from "../../policy/expansion-inputs.ts";
 export type DocScanReport = { rooms_scanned: string[]; drawers_scanned: number; truncated: boolean };
 
 /**
- * Phase 4: concerns-neighbor expansion. A hit on a synthesis should surface its
+ * Concerns-neighbor expansion. A hit on a synthesis should surface its
  * authority docs, so one-hop `concerns` targets of synthesis-typed pool nodes are
  * admitted into the ranked pool (via: "concern") and get the neighborhood boost.
  * Bounded by construction: one one-hop kg_query per synthesis node in the already-
- * bounded pool (≤ limit, default 50) — same cost profile as the P2-2 fan-out.
+ * bounded pool (≤ limit, default 50) — same cost profile as the fan-out.
  * Scope guard mirrors listScopedDerivedDrawers (memgraph.ts): a concern target in
  * another wing/room must not leak into this scope's results. The `listScopedDerivedDrawers`
  * gate itself is untouched — docs never enter the pool by loosening it.
@@ -104,8 +104,7 @@ export async function expandConcernNeighbors(
 }
 
 /**
- * Phase 3 close-out: direct doc admission. Standalone docs have no lineage edge, so
- * listScopedDerivedDrawers never admits them; before a concerns edge exists they are
+ * Direct doc admission. Standalone docs have no lineage edge, so they are
  * invisible to scoped retrieval. On factual intent (or explicit include_docs), scan
  * the scope room(s) for doc-stamped drawers and admit those not already in the pool
  * (via: "doc"). Bounded by construction: at most max_pages pages of page_size per
@@ -200,8 +199,8 @@ export async function admitDirectDocs(
           via: "doc",
         });
         // Deliberately NOT added to neighborhoodSet: no seed/lineage relationship
-        // exists. Doc authority comes from the Phase 2 boost table + factual floor,
-        // not a free neighborhoodBoost that edge-based paths earn.
+// exists. Doc authority comes from the boost table + factual floor,
+// not from a dedicated doc predicate.
       });
     }
   }

@@ -347,7 +347,7 @@ export class MemgraphClient {
     object: string;
     valid_from?: string;
     source_closet?: string;
-    // P2-3: provenance — the run_id of the consolidation execution
+    // Provenance — the run_id of the consolidation execution
     source_run_id?: string;
   }) {
     return drawers.kgAdd(this.core, args);
@@ -383,7 +383,7 @@ export class MemgraphClient {
     source_file?: string;
     added_by?: string;
     labels?: string[];
-    // P2-3: provenance — the run_id of the consolidation execution
+    // Provenance — the run_id of the consolidation execution
     source_run_id?: string;
   }) {
     return createDerivedDrawer(this.core, args);
@@ -517,7 +517,7 @@ export class MemgraphClient {
     return listReminders(this.core, args);
   }
 
-  // ── Phase 14/15/16 (memgraph-capability.ts) ────────────────────────────────
+  // ── Capability methods (memgraph-capability.ts) ────────────────────────────────
 
   recordCapabilityOutcome(bucketId: string, outcome: string, validFrom?: string): Promise<void> {
     return capability.recordCapabilityOutcome(this.core, bucketId, outcome, validFrom);

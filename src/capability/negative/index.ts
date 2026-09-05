@@ -1,5 +1,5 @@
 /**
- * Negative memory capability (spec §3.2, Rung 3).
+ * Negative memory capability (spec §3.2).
  *
  * Owns: dead ends and ruled-out approaches — the `rules-out` edge with its
  * two-valued polarity ("tried-failed" strong vs "considered-rejected" weaker).
@@ -56,7 +56,7 @@ export { getRulesOut };
 export { fileDeadEnd };
 
 /**
- * WRITE contract (Rung 3 §6.3 question 1): a dead end is filed via
+ * WRITE contract: a dead end is filed via
  * MemgraphClient.fileDeadEnd — one negative-polarity synthesis drawer whose body
  * is the FULL verbatim line (tried + outcome clause + reason) plus its `rules-out`
  * edges (object = the tried statement, and a second edge carrying the polarity
@@ -123,10 +123,10 @@ export async function writeDeadEnds(
 }
 
 /**
- * READ contract (Rung 3 §6.3 question 2): a dead end is consumed when it reaches
+ * READ contract: a dead end is consumed when it reaches
  * scoped retrieval and is returned EXPLICITLY LABELLED as ruled out — the
- * `ruled_out` marker on the ranked node (set by expandScopedRetrieval's Phase 9
- * block) or the hard `[RULED OUT ...]` bullet in the mem-core `[dead-ends]`
+ * `ruled_out` marker on the ranked node (set by expandScopedRetrieval's negative-knowledge
+ * block) or the hard "[RULED OUT ...]" bullet in the mem-core "[dead-ends]"
  * render. The label survives both paths; an unlabelled dead end is a contract
  * violation, not a rendering choice.
  */
@@ -138,7 +138,7 @@ export function readDeadEndsLabelled(lines: string[], cap?: number): string[] {
 }
 
 /**
- * FAIL contract (Rung 3 §6.3 question 3): a substrate error while filing or
+ * FAIL contract: a substrate error while filing or
  * reading dead ends surfaces as a named, counted failure in the write report /
  * read result — never a silent "nothing ruled out". A failed fileDeadEnd is
  * recorded with its exact error and the remaining lines continue; a read failure

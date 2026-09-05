@@ -1,5 +1,5 @@
 /**
- * Episodic memory capability (spec §3.2, Rung 3).
+ * Episodic memory capability (spec §3.2).
  *
  * Owns: transcript capture, consolidation, the synthesis DAG
  * (`synthesized-from`, `consolidated-into`, `merged-into`).
@@ -42,7 +42,7 @@ export { createDerivedDrawer };
 export { findUnconsolidatedSourceDrawers, listSourceDrawersByScope };
 
 /**
- * WRITE contract (Rung 3 §6.3 question 1): a consolidation with applyWrites and
+ * WRITE contract: a consolidation with applyWrites and
  * a passing inflation guard produces one synthesis drawer plus its lineage —
  * `synthesized-from` edges from the new node to every distinct source transcript
  * (≥2 by construction of the guard) and the in-hall/durable-fact KG writes.
@@ -58,7 +58,7 @@ export async function writeEpisodicSynthesis(
 }
 
 /**
- * READ contract (Rung 3 §6.3 question 2): an episodic node is consumed when it
+ * READ contract: an episodic node is consumed when it
  * reaches scoped retrieval (expandScopedRetrieval admits nodes with a
  * synthesized-from lineage into the pool) or appears in the mem-core render.
  * This helper asks the substrate directly for the node's lineage so the read
@@ -92,7 +92,7 @@ export async function readEpisodicLineage(
 }
 
 /**
- * FAIL contract (Rung 3 §6.3 question 3): a substrate error mid-consolidation
+ * FAIL contract: a substrate error mid-consolidation
  * must surface as a named, operator-visible failure — not an empty result. The
  * MemgraphClient boundary normalizes throwing callers into SubstrateResult, so
  * this wrapper detects the failed create (no node id + a recorded failure) and

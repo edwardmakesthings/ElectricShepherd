@@ -1,5 +1,5 @@
 /**
- * Prospective memory capability (spec §3.2, Rung 3).
+ * Prospective memory capability (spec §3.2).
  *
  * Owns: reminders and their triggers — `triggers-on`, `es-reminder-status`,
  * `expires-at`. Reminders are PUSHED by circumstance, not pulled by query: the
@@ -54,7 +54,7 @@ export {
 export { listReminders };
 
 /**
- * WRITE contract (Rung 3 §6.3 question 1): a reminder is one drawer in the
+ * WRITE contract: a reminder is one drawer in the
  * project wing's `reminders` room plus its trigger edges — every condition as a
  * `triggers-on` object, the status as `es-reminder-status`, and the expiry as
  * `es-reminder-expires-at`. HARD RULE ("no expiry, no reminder"): expires_at is
@@ -95,9 +95,9 @@ export function planReminderWrite(args: {
 }
 
 /**
- * READ contract (Rung 3 §6.3 question 2): a reminder is consumed when it fires
+ * READ contract: a reminder is consumed when it fires
  * for the current scope — matchRemindersForScope returns it and renderPendingLines
- * puts it in the mem-core `[pending]` block. Expired and non-active reminders are
+ * puts it in the mem-core "[pending]" block. Expired and non-active reminders are
  * dropped at match time, so "present in this render, absent from that one" is a
  * property of (conditions, scope descriptor), assertable without a substrate.
  */
@@ -111,7 +111,7 @@ export function readPendingForScope(
 }
 
 /**
- * FAIL contract (Rung 3 §6.3 question 3): a substrate error while reading the
+ * FAIL contract: a substrate error while reading the
  * reminders room must degrade to "no pending section" — never throw into the
  * render, and never be silently mistaken for "reminders exist but none fire".
  * The MemgraphClient boundary normalizes failures; this wrapper catches them at

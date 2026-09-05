@@ -30,12 +30,12 @@ export type MemgraphToolMap = {
   getDrawer: string;
 };
 
-// Phase 1 (unified memory): the `es-source-type` axis — orthogonal to `es-status`.
+// The `es-source-type` axis — orthogonal to `es-status`.
 export type ClosetSourceType = "transcript" | "doc" | "synthesis" | "skill";
 
 export const CLOSET_SOURCE_TYPES: readonly string[] = ["transcript", "doc", "synthesis", "skill"];
 
-// Phase 12 (unified memory): the `es-domain` axis on skill drawers — a CLOSED
+// The `es-domain` axis on skill drawers — a CLOSED
 // vocabulary so domain drift cannot become room-sprawl wearing different clothes.
 export type SkillDomain = "code" | "writing" | "infra" | "research" | "general";
 

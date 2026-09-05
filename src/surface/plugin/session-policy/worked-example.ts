@@ -1,6 +1,6 @@
 // @ts-nocheck
 
-// Domain category: worked-example filing (Phase 13 CREATE).
+// Domain category: worked-example filing.
 // Moved verbatim from pure-helpers.ts — see the compatibility re-export there.
 
 import type { MessageWithParts } from "./constants.ts"
@@ -247,7 +247,7 @@ export async function maybeFileWorkedExamplesFromMessageWithGating(args: {
     const description = String(inputArgs?.description ?? "").trim()
     const prompt = String(inputArgs?.prompt ?? "").trim()
 
-    // Phase 13 CREATE: file worked examples for cloud target subagent types with
+    // File worked examples for cloud target subagent types with
     // substantive successful output. Success-only: skip if the task errored or was aborted.
     if (args.workedExampleFilingEnabled && args.workedExampleFileAgentTypes.has(subagentType)) {
       if (status === "error" || status === "aborted" || status === "failed") continue
@@ -260,12 +260,12 @@ export async function maybeFileWorkedExamplesFromMessageWithGating(args: {
       await args.maybeFileWorkedExampleWithGating({ sid: args.sid, subagentType, description, prompt, output: outputText })
     }
 
-    // Phase 14 CREATE: record a capability tuple for routing-tier subagents.
+    // Record a capability tuple for routing-tier subagents.
     // Runs regardless of the worked-example filing gate — capability recording
     // is its own concern (it covers local/cloud/deep tiers, not just cloud).
     await args.maybeRecordCapabilityTupleWithGating({ sid: args.sid, subagentType, description, prompt, status })
 
-    // Phase 16 CREATE: capture the self-reported confidence label from the
+    // Capture the self-reported confidence label from the
     // subagent's terminal output. Runs for ANY task tool part with substantive
     // output (not gated on routing tier — calibration covers all delegated units).
     // The tuple is PENDING; it becomes durable only via record_outcome.

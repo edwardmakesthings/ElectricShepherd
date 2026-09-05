@@ -15,15 +15,15 @@ export type RetrievalWeights = {
   neighborhoodBoost: number;
   alwaysLabeledBoost: number;
   authority: number;
-  // Phase 7 (unified memory): outcome-feedback term. Weighted BELOW authority by
+  // Outcome-feedback term. Weighted BELOW authority by
   // construction — see the clamp in computeNodeScore and DEFAULT_WEIGHTS below.
   outcome: number;
-  // Phase 9 (unified memory): negative-knowledge presentation term. ZERO by default
-  // and NOT a ranking weight in this phase — dead ends are surfaced alongside positive
+  // Negative-knowledge presentation term. ZERO by default
+  // and NOT a ranking weight — dead ends are surfaced alongside positive
   // knowledge with an explicit label, not re-ranked. The field exists so the envelope
-  // can report the (zero) contribution honestly; a future phase may give it magnitude.
+  // can report the (zero) contribution honestly; a future change may give it magnitude.
   ruledOut: number;
-  // Phase 11 (unified memory): temporal-validity deprioritisation term. Weighted
+  // Temporal-validity deprioritisation term. Weighted
   // BELOW authority by construction — the flag is binary, so its maximum magnitude
   // is exactly weights.staleness (0.5 at defaults), strictly under one full authority
   // boost (±2 * weights.authority). A stale doc therefore still outranks an unflagged
@@ -31,7 +31,7 @@ export type RetrievalWeights = {
   staleness: number;
 };
 
-// Phase 2 (unified memory): optional retrieval intent. Omitted = no preference.
+// Optional retrieval intent. Omitted = no preference.
 export type RetrievalIntent = "factual" | "historical" | "procedural";
 
 // Authority dimension: the es-source-type axis, with "unknown" for unstamped nodes
@@ -51,16 +51,16 @@ export type RankedScopedNode = {
   source_type: NodeAuthority;
   score: number;
   selected: boolean;
-  // Phase 4: how this node entered the ranked pool. "scoped" = admitted by the
+  // How this node entered the ranked pool. "scoped" = admitted by the
   // derived-drawer scope query; "concern" = admitted as a one-hop `concerns`
   // target of a synthesis already in the pool (its authority doc); "refined" =
   // admitted as a one-hop `refined-by` neighbor of a pool node on procedural
   // intent (the skill that points at it, or its evidence); "doc" = admitted directly
-  // by the Phase 3 close-out bounded room scan (standalone doc-stamped drawer with no
-  // lineage edge yet); "shared" = admitted by the Phase 10 bounded scan of the shared
+  // by the bounded room scan (standalone doc-stamped drawer with no
+  // lineage edge yet); "shared" = admitted by the bounded scan of the shared
   // skills wing (promoted skill, procedural intent only).
   via?: "scoped" | "concern" | "refined" | "doc" | "shared";
-  // Phase 9 (unified memory): negative-knowledge marker. Present ONLY when this node
+  // Negative-knowledge marker. Present ONLY when this node
   // carries an outgoing `rules-out` edge — a dead end, i.e. an approach that was tried
   // and failed or considered and rejected. Downstream renderers MUST attach the hard
   // "[RULED OUT ...]" label to any node with this field; an unlabelled dead end reads
@@ -71,19 +71,19 @@ export type RankedScopedNode = {
     /** The ruled-out statement(s) this node points at (its topic/approach). */
     statements: string[];
   };
-  // Phase 11 (unified memory): temporal-validity marker. Present ONLY when this node
+  // Temporal-validity marker. Present ONLY when this node
   // carries an open es-staleness fact — its basis moved (the doc it was synthesised
   // from changed since). Downstream renderers MUST surface the value so the reader
   // knows the basis moved; unlike ruled_out this field ALSO affects score (the
   // deprioritisation term in computeNodeScore), so a flagged node is both labelled
   // and lowered — penalised, never filtered out.
   stale?: { value: string };
-  // Phase 10 (unified memory): provenance marker for shared-wing skills that carry an
+  // Provenance marker for shared-wing skills that carry an
   // outgoing `promoted-from` edge (written by tools/promote_skill.ts at promotion).
   // Present ONLY when the reader is available AND the read returns at least one origin
   // — unstamped/unpromoted skills and clients without getPromotedFrom keep their nodes
-  // byte-identical to pre-P2-1 output. Metadata only: it never feeds computeNodeScore,
-  // admission, or ranking in any way.
+  // byte-identical to pre-provenance output. Metadata only: it never feeds
+  // computeNodeScore, admission, or ranking in any way.
   promoted_from?: string[];
 };
 
@@ -97,17 +97,17 @@ export const DEFAULT_WEIGHTS: RetrievalWeights = {
   neighborhoodBoost: 1,
   alwaysLabeledBoost: 2,
   authority: 1,
-  // Phase 7: outcome term. The raw net (accepts − revises − failures) is clamped to
+  // Outcome term. The raw net (accepts − revises − failures) is clamped to
   // ±2 before weighting, so the maximum outcome contribution is 2 * 0.5 = 1 — strictly
   // below the authority boost range (±2 * 1). A node with zero outcome history gets
   // exactly 0 from this term (neutral), and a doc with no history still outranks a
   // synthesis with two accepts on a factual query (the spec's worked example).
   outcome: 0.5,
-  // Phase 9: negative-knowledge presentation. ZERO by construction — dead ends are
-  // surfaced with an explicit label, not re-ranked. A future phase may change this;
-  // until then the score formula is byte-identical to pre-Phase-9 for every node.
+  // Negative-knowledge presentation. ZERO by construction — dead ends are
+  // surfaced with an explicit label, not re-ranked. A future change may alter this;
+  // until then the score formula is byte-identical to pre-negative-knowledge for every node.
   ruledOut: 0,
-  // Phase 11: temporal-validity deprioritisation. The flag is binary (no accumulation),
+  // Temporal-validity deprioritisation. The flag is binary (no accumulation),
   // so the maximum contribution is exactly this weight — strictly below one full
   // authority boost (±2 * weights.authority). A stale doc therefore still outranks an
   // unflagged provisional synthesis on a factual query; unflagged nodes get exactly 0
@@ -115,7 +115,7 @@ export const DEFAULT_WEIGHTS: RetrievalWeights = {
   staleness: 0.5,
 };
 
-// Phase 7 (unified memory): es-outcome axis. Values are written ONLY by the
+// es-outcome axis. Values are written ONLY by the
 // human-authoritative record_outcome path (no automatic failed/accept writes from
 // test or reviewer signals). Ranking semantics: accept is positive; revise and
 // failed are negative (repeated revise penalises); unused is neutral — a loop/spiral
@@ -137,7 +137,7 @@ export function emptyOutcomeCounts(): OutcomeCounts {
 }
 
 /**
- * Phase 7 ranking term. Net = accepts − (revises + failures); `unused` is neutral by
+ * Ranking term for outcomes. Net = accepts − (revises + failures); `unused` is neutral by
  * policy (evidence only, no signal of its own). The net is clamped to ±2 so outcome
  * ACCUMULATION can never overwhelm authority: max contribution is 2 * weights.outcome
  * (= 1 at defaults), strictly below the authority boost range (±2 * weights.authority).
@@ -150,7 +150,7 @@ export function outcomeScoreTerm(counts: OutcomeCounts, weight: number): number 
 }
 
 /**
- * Phase 11 ranking term. The es-staleness flag is BINARY — a node either carries an
+ * Ranking term for staleness. The es-staleness flag is BINARY — a node either carries an
  * open `es-staleness` fact (its basis moved) or not — so there is no accumulation and
  * no clamp: flagged returns exactly −weight, unflagged returns exactly 0 (neutral by
  * construction). Weighted below authority by DEFAULT_WEIGHTS (max magnitude 0.5 < one
@@ -163,7 +163,7 @@ export function staleScoreTerm(flagged: boolean, weight: number): number {
   return flagged ? -weight : 0;
 }
 
-// Phase 2 (unified memory): intent -> per-authority-type boost table.
+// Intent -> per-authority-type boost table.
 // Magnitudes are secondary to the factual floor below; they only shape ordering
 // within what the floor permits. Spec: factual boosts doc then synthesis with
 // transcript weakest; historical boosts synthesis and transcript; procedural
@@ -175,7 +175,7 @@ export const INTENT_AUTHORITY_BOOSTS: Record<RetrievalIntent, Record<NodeAuthori
 };
 
 /**
- * Phase 2 hard rule (spec): on a factual query a provisional synthesis must never
+ * Hard rule (spec): on a factual query a provisional synthesis must never
  * outrank a doc. Encoded as a floor, not a weight — weights can be overwhelmed by a
  * high-height node, so this clamps AFTER all score terms are summed.
  *
@@ -359,11 +359,11 @@ export function computeNodeScore(args: {
     score += weights.alwaysLabeledBoost;
   }
 
-  // Phase 2: intent-based authority term. Zero when no intent is set, so the
-  // default path stays byte-identical to the pre-Phase-2 formula.
+  // Intent-based authority term. Zero when no intent is set, so the
+  // default path stays byte-identical to the pre-intent formula.
   score += authorityBoost * weights.authority;
 
-  // Phase 7: outcome-feedback term. Weighted below authority (clamped net * weight,
+  // Outcome-feedback term. Weighted below authority (clamped net * weight,
   // max magnitude strictly under one full authority boost) and added BEFORE the
   // factual floor clamp, so the doc-over-provisional-synthesis invariant is intact.
   // Zero-history nodes get exactly 0 here — neutral by construction.
@@ -371,7 +371,7 @@ export function computeNodeScore(args: {
     score += outcomeScoreTerm(outcomeCounts, weights.outcome);
   }
 
-  // Phase 11: temporal-validity deprioritisation. Binary flag, no accumulation — a
+  // Temporal-validity deprioritisation. Binary flag, no accumulation — a
   // node either carries an open es-staleness fact (its basis moved) or not. Weighted
   // below authority by construction (max magnitude = weights.staleness = 0.5 < one
   // full authority boost of ±2), and added BEFORE the factual floor clamp, exactly

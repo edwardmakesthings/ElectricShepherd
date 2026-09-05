@@ -1,5 +1,5 @@
 /**
- * Semantic memory capability (spec §3.2, Rung 3).
+ * Semantic memory capability (spec §3.2).
  *
  * Owns: doc ingestion, authority ranking, cross-type linking — `concerns`,
  * `es-source-type`. Docs are the authority axis of retrieval: on factual intent
@@ -43,7 +43,7 @@ export { getConcerns };
 export { getStaleness, getStalenessFlags, setStalenessFlag };
 
 /**
- * WRITE contract (Rung 3 §6.3 question 1): a doc is ingested as a drawer stamped
+ * WRITE contract: a doc is ingested as a drawer stamped
  * `es-source-type: doc` in the scope room, optionally linked to the syntheses it
  * supports via `concerns` edges (synthesis → doc). The stamp is what makes the
  * doc visible to retrieval at all — expandScopedRetrieval's direct-doc-scan and
@@ -80,7 +80,7 @@ export function planDocIngest(args: {
 }
 
 /**
- * READ contract (Rung 3 §6.3 question 2): a doc is consumed when authority weight
+ * READ contract: a doc is consumed when authority weight
  * boosts its ranking above outcome history in expandScopedRetrieval — on factual
  * intent the INTENT_AUTHORITY_BOOSTS table gives docs a boost strictly above any
  * unstamped synthesis, and the factual floor clamps a provisional synthesis so it
@@ -98,7 +98,7 @@ export async function readAuthorityRanked(
 }
 
 /**
- * FAIL contract (Rung 3 §6.3 question 3): a substrate error during doc ingestion
+ * FAIL contract: a substrate error during doc ingestion
  * or retrieval surfaces as a named failure, not an empty ranked pool. The
  * MemgraphClient boundary normalizes throwing callers into SubstrateResult; this
  * wrapper distinguishes "engine ran, zero docs in scope" (a legitimate empty)

@@ -1,5 +1,5 @@
 /**
- * Phase 5 + Phase 10/12/P2-1 (unified memory): SKILL admission for scoped retrieval.
+ * SKILL admission for scoped retrieval.
  *
  * Two blocks, extracted verbatim from expandScopedRetrieval (retrieval-expansion.ts)
  * so the orchestrator stays a thin pipeline:
@@ -13,7 +13,7 @@
  *   - shared-skills-wing admission (procedural intent only): promoted skills cross
  *     projects and have no edges into the querying project, so a bounded scan of the
  *     shared wing's `skills` room is the primary admission path (via: "shared").
- *     Phase 12 domain filter + P2-1 promoted-from provenance ride in here too, with
+ *     Domain filter + promoted-from provenance ride in here too, with
  *     their reporting counters.
  *
  * Both blocks are retrieve-then-filter (one get_drawer + getClosetSourceType per
@@ -31,7 +31,7 @@ import type { RetrievalExpansionOptions } from "../../policy/retrieval-expansion
 import { safeListDrawers } from "../../policy/expansion-inputs.ts";
 
 /**
- * Phase 5: refined-by-neighbor expansion (procedural intent only). Skills are
+ * Refined-by-neighbor expansion (procedural intent only). Skills are
  * leaves with no synthesized-from lineage, so they never enter the scoped pool;
  * the one-hop `refined-by` edge is the bridge. Two directions, both bounded by
  * construction (one one-hop kg_query per pool node, ≤ limit):
@@ -44,7 +44,7 @@ import { safeListDrawers } from "../../policy/expansion-inputs.ts";
  * scope-guarded exactly like the concerns block. The synthesized-from gate in
  * listScopedDerivedDrawers is untouched — skills enter by expansion, not by
  * loosening it. Gated on intent + client capability so non-procedural paths
- * and older clients degrade to pre-Phase-5 behavior with zero extra calls.
+ * and older clients degrade to pre-expansion behavior with zero extra calls.
  */
 export async function expandRefinedNeighbors(
   client: MemgraphClient,
@@ -112,7 +112,7 @@ export async function expandRefinedNeighbors(
 
 export type SharedSkillsReport = { wing: string; room: string; drawers_scanned: number; truncated: boolean };
 
-/** Reporting counters for the shared-skills-wing scan (Phase 12 + P2-1). */
+/** Reporting counters for the shared-skills-wing scan (domain filter + provenance). */
 export type SharedSkillsCounters = {
   checked: number; // admitted shared skills the promoted-from reader was called for
   withOrigin: number; // of those, how many returned at least one origin
@@ -120,7 +120,7 @@ export type SharedSkillsCounters = {
 };
 
 /**
- * Phase 10 (unified memory): shared-skills-wing admission (procedural intent ONLY).
+ * Shared-skills-wing admission (procedural intent ONLY).
  * Skills that cross projects are promoted into a shared skills wing; a "how do I do
  * X" query from ANY project wing must reach them. A freshly promoted skill has no
  * edges into the querying project, so edge-based expansion (refined-by) cannot see it
@@ -134,7 +134,7 @@ export type SharedSkillsCounters = {
  * hard es-source-type: skill check is the safety net even on procedural intent: an
  * unstamped or transcript-stamped drawer in the shared room is never admitted.
  * Capability-gated like every expansion (listDrawers/getDrawer/getClosetSourceType);
- * read failures degrade to pre-Phase-10 behavior with zero extra calls. Never pages
+ * read failures degrade to pre-scan behavior with zero extra calls. Never pages
  * past one bounded page (spec guardrail: no room exhaustion).
  */
 export async function admitSharedSkills(
@@ -144,11 +144,11 @@ export async function admitSharedSkills(
   scopedNodes: RankedScopedNode[],
 ): Promise<{ ids: string[]; report: SharedSkillsReport | undefined; counters: SharedSkillsCounters }> {
   const sharedWing = intent === "procedural" ? String(options.shared_wing || "").trim() : "";
-  // Phase 12: domain filter. Capability-gated like every expansion — clients without
-  // getClosetDomain degrade to pre-Phase-12 behavior (no filtering, zero extra calls).
+  // Domain filter. Capability-gated like every expansion — clients without
+  // getClosetDomain degrade to pre-domain-filter behavior (no filtering, zero extra calls).
   const sharedDomainFilterEnabled = typeof client.getClosetDomain === "function";
-  // P2-1: promoted-from provenance reader. Capability-gated like every expansion —
-  // clients without getPromotedFrom degrade to pre-P2-1 behavior with zero extra calls.
+  // Promoted-from provenance reader. Capability-gated like every expansion —
+  // clients without getPromotedFrom degrade to pre-provenance behavior with zero extra calls.
   const promotedFromEnabled = typeof client.getPromotedFrom === "function";
   const requestingDomain: string = String(options.domain || "").trim();
   let sharedSkillIds: string[] = [];
@@ -157,8 +157,8 @@ export async function admitSharedSkills(
   let sharedScanReport: SharedSkillsReport | undefined;
   let sharedDomainFiltered = 0; // skill-eligible candidates dropped by the domain filter
   if (sharedWing && typeof client.listDrawers === "function" && typeof client.getClosetSourceType === "function") {
-    const sharedRoom = "skills"; // canonical skills room in the shared wing (Phase 5 convention)
-    const pageSize = 50; // same bounded-page shape as the Phase 3 doc scan
+    const sharedRoom = "skills"; // canonical skills room in the shared wing
+    const pageSize = 50; // same bounded-page shape as the doc scan
     const probe = asObject(await safeListDrawers(client, { wing: sharedWing, room: sharedRoom, limit: 1, offset: 0 }));
     const total = Math.max(0, Number(probe.total) || 0);
     const pageRows = await safeListDrawers(client, { wing: sharedWing, room: sharedRoom, limit: pageSize, offset: 0 });
@@ -191,10 +191,10 @@ export async function admitSharedSkills(
         fresh.map((c) => {
           const drawerP = typeof client.getDrawer === "function" ? client.getDrawer({ drawer_id: c.id }).catch(() => ({})) : Promise.resolve({});
           const typeP = client.getClosetSourceType(c.id).then((t) => t ?? "unknown");
-          // Phase 12: one extra one-hop read per candidate, same cost profile as the
+          // One extra one-hop read per candidate, same cost profile as the
           // source-type read above. Read failures degrade to null (unstamped → admitted).
           const domainP = sharedDomainFilterEnabled ? client.getClosetDomain(c.id).catch(() => null) : Promise.resolve(null);
-          // P2-1: promoted-from provenance for a (shared) skill candidate. Same cost
+          // Promoted-from provenance for a (shared) skill candidate. Same cost
           // profile as the source-type read above; read failures degrade to "no origin"
           // (empty list), matching getConcerns' discipline. Metadata only — never feeds
           // admission, scoring, or ranking.
@@ -209,7 +209,7 @@ export async function admitSharedSkills(
         const row = c.row;
         const wing = asString(drawer.wing || asObject(drawer.metadata).wing || row.wing || row.closet || row.namespace);
         if (wing && wing !== sharedWing) return; // must be the shared wing — never another project
-        // Phase 12: admit iff unstamped (null), `general`, or matching the requesting
+        // Admit iff unstamped (null), `general`, or matching the requesting
         // domain. An unknown/absent requesting domain admits ONLY null/general — a
         // specific-domain skill is never surfaced to an unclassified project.
         if (sharedDomainFilterEnabled && skillDomain !== null && skillDomain !== "general" && skillDomain !== requestingDomain) {
@@ -231,9 +231,9 @@ export async function admitSharedSkills(
           score: 0,
           selected: false,
           via: "shared",
-          // P2-1: provenance metadata — the originating project skill drawer(s) this
+          // Provenance metadata — the originating project skill drawer(s) this
           // shared copy was promoted from. Absent when the reader is unavailable or
-          // returned nothing (byte-identical to pre-P2-1 nodes).
+          // returned nothing (byte-identical to pre-provenance nodes).
           ...(promotedFromEnabled && promotedRes.node_ids.length > 0 ? { promoted_from: [...promotedRes.node_ids] } : {}),
         });
         sharedSkillIds.push(c.id);

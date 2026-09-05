@@ -1,5 +1,5 @@
 /**
- * Phase 8 (unified memory): prospective memory — "remember to do X when Y".
+ * Prospective memory — "remember to do X when Y".
  *
  * Reminders are PUSHED by circumstance, not pulled by query: the only consumer is
  * the mem-core render, which is already directory-scoped. This module is the pure
@@ -13,7 +13,7 @@
  * test instead of an integration ritual, and keeps the render path from ever
  * throwing on a KG read failure — the caller degrades to "no pending section".
  *
- * Storage contract (approved Phase 8 design): one drawer per reminder in the
+ * Storage contract (approved design): one drawer per reminder in the
  * project wing's `reminders` room. Edges on the drawer id:
  *   - `triggers-on`            object = condition value (path/glob, topic keyword, or wing/room)
  *   - `es-reminder-status`     object = active | satisfied | expired

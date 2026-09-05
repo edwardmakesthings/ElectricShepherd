@@ -15,7 +15,7 @@ import {
 import { loadRuntimeEnv } from "./runtime-env.ts";
 
 /**
- * Phase 7 usability bridge: build an operator-ready `record_outcome` proposal
+ * Usability bridge: build an operator-ready `record_outcome` proposal
  * payload from a policy-cycle result. STRICTLY INFORMATIONAL — this function and
  * the script that calls it perform NO writes (no record_outcome, no kg_add). The
  * operator copies the payload, sets `outcome` to their judgment, and invokes the
@@ -41,7 +41,7 @@ function makeCycleRef(query: string, now: Date): string {
 }
 
 /**
- * Phase 9 usability bridge: surface the explicit ruled-out marker on dead-end nodes in
+ * Usability bridge: surface the explicit ruled-out marker on dead-end nodes in
  * the operator-facing output. A node with a `ruled_out` field is a negative-knowledge
  * synthesis (an approach that was tried and failed or considered and rejected); this
  * renders it with the hard "[RULED OUT ...]" label so it can never read as a suggestion.
@@ -133,7 +133,7 @@ function parseArgs(argv: string[], runtimeConfig: ReturnType<typeof loadRuntimeC
     }
   }
 
-  // Phase 3 close-out: explicit opt-in for direct doc admission into the ranked pool.
+  // Explicit opt-in for direct doc admission into the ranked pool.
   // Factual intent already implies it; this flag matters for non-factual intents.
   const includeDocs = argv.includes("--include-docs");
 
@@ -156,10 +156,10 @@ function parseArgs(argv: string[], runtimeConfig: ReturnType<typeof loadRuntimeC
     always_include_labels: ["pinned"],
     intent,
     include_docs: includeDocs || undefined,
-    // Phase 10 (unified memory): shared skills wing for procedural-intent retrieval.
+    // Shared skills wing for procedural-intent retrieval.
     // Read directly from runtime config; expansion only uses it for procedural intent.
     shared_wing: getRuntimeConfigValueByPath(runtimeConfig, "memory.sharedSkillsWing") || undefined,
-    // Phase 12 (unified memory): the requesting project's es-domain — hard-filters
+    // The requesting project's es-domain — hard-filters
     // shared-skill admission on procedural intent. Prefer the runtime config path;
     // when absent keep the backward-compatible omission (expansion then admits only
     // null/general skills). Out-of-vocabulary values are dropped, not passed through.
@@ -197,12 +197,12 @@ async function main(): Promise<void> {
 
   const result = await expandScopedRetrieval(client, args);
 
-  // Phase 7 usability bridge: emit an operator-ready record_outcome proposal.
+  // Usability bridge: emit an operator-ready record_outcome proposal.
   // Informational only — no write path here; the script never calls record_outcome/kg_add.
   const output = {
     ...result,
     outcome_proposal: buildOutcomeProposal(result.selected_nodes ?? [], args.query),
-    // Phase 9 usability bridge: surface explicit ruled-out labels on dead-end nodes so
+    // Usability bridge: surface explicit ruled-out labels on dead-end nodes so
     // an unlabelled dead end can never read as a suggestion in the operator-facing output.
     ruled_out_notes: buildRuledOutNotes(result.selected_nodes ?? []),
   };

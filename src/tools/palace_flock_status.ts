@@ -19,7 +19,7 @@ declare const process: {
 
 const DEFAULT_THRESHOLD = 12;
 
-// Phase 7 (unified memory): re-synthesis candidate rule. A closet accumulating
+// Re-synthesis candidate rule. A closet accumulating
 // `revise` outcomes is a re-synthesis candidate — surfaced here at parent-drawer
 // granularity, the same way provisional backlog is surfaced. Approved threshold:
 // revise_count >= 2 AND revise_count > accept_count over a bounded recent window
@@ -32,7 +32,7 @@ export const RE_OUTCOME_CANDIDATE_SAMPLE_CAP = 10;
 
 export type OutcomeCounts = { accept: number; revise: number; failed: number; unused: number };
 
-/** Pure re-synthesis candidate predicate (approved Phase 7 rule). */
+/** Pure re-synthesis candidate predicate (approved rule). */
 export function isReSynthesisCandidate(counts: OutcomeCounts): boolean {
   return counts.revise >= RE_SYNTHESIS_REVISE_MIN && counts.revise > counts.accept;
 }
@@ -55,7 +55,7 @@ export function countOutcomesInWindow(
   return counts;
 }
 
-// Phase 11 (temporal validity): staleness backlog category. A synthesis whose basis doc
+// Staleness backlog category. A synthesis whose basis doc
 // changed after it was written carries an open `es-staleness` flag (written by /ingest-docs'
 // soft pass — flag only, never invalidates the synthesis). Surfaced here as its own backlog
 // category alongside provisional and re-synthesis candidates.
@@ -108,7 +108,7 @@ export function currentStalenessValueFromFacts(factsRaw: unknown, nodeId?: strin
 }
 
 /**
- * Build the top-level `staleness` report block (mirror of the Phase 7 `re_synthesis`
+ * Build the top-level `staleness` report block (mirror of the `re_synthesis`
  * block). Pure, exported for tests. The category is ALWAYS present — even at zero — so an
  * operator can tell "checked, none stale" from "not implemented" (deliberately different
  * from retrieval's stale_expansion envelope, which is absent when nothing is flagged).
@@ -294,7 +294,7 @@ export default tool({
 
     const provisionalCount = targetStatuses.filter(Boolean).length;
 
-    // Phase 7: re-synthesis candidates among the ALREADY-COLLECTED consolidated summary
+    // Re-synthesis candidates among the ALREADY-COLLECTED consolidated summary
     // nodes (parent-drawer granularity, bounded by the existing sampling — no new room
     // scans). One one-hop es-outcome kg_query per summary node, same concurrency pool.
     const windowStartIso = new Date(Date.now() - RE_OUTCOME_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
@@ -315,10 +315,10 @@ export default tool({
       }
     });
 
-    // Phase 11: staleness-flagged nodes among the ALREADY-COLLECTED consolidated summary
+    // Staleness-flagged nodes among the ALREADY-COLLECTED consolidated summary
     // nodes (parent-drawer granularity, bounded by the existing sampling — no new room
     // scans). One one-hop es-staleness kg_query per summary node, same concurrency pool.
-    // Independent of the Phase 7 loop: a failing staleness read degrades that node to
+    // Independent of the re-synthesis loop: a failing staleness read degrades that node to
     // unflagged and never aborts the other counts (per-query .catch discipline).
     const staleNodes: { node_id: string; value: string }[] = [];
     await mapLimit([...consolidatedTargets], 8, async (drawerId) => {
@@ -354,11 +354,11 @@ export default tool({
         consolidated_summary_nodes_is_partial_sample: !exactMode,
         provisional_summary_nodes: provisionalCount,
         provisional_summary_nodes_is_partial_sample: !exactMode,
-        // Phase 7: closets accumulating revise outcomes — a re-synthesis candidate is
+        // Closets accumulating revise outcomes — a re-synthesis candidate is
         // one with >= 2 revise AND more revise than accept over the recent window.
         re_synthesis_candidates: reSynthesisCandidates.length,
         re_synthesis_candidates_is_partial_sample: !exactMode,
-        // Phase 11: consolidated summary nodes carrying an open es-staleness flag (their
+        // Consolidated summary nodes carrying an open es-staleness flag (their
         // basis doc changed after synthesis). Summary-node population only — flagged docs
         // are surfaced by retrieval deprioritisation, not this count (see staleness.note).
         stale_source_changed_nodes: staleNodes.length,

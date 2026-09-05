@@ -45,7 +45,7 @@ export async function persistWorkedInterventionWithGating(args: {
   if (!modelId) return
 
 
-  // Gate 2: shape from the SAME Phase 14/13 shape function.
+// Gate 2: shape from the SAME capability shape function.
   const shape = args.extractWorkedExampleShape(taskText)
 
   const text = String(interventionText || "").trim().slice(0, args.failurePatchTextMaxChars)
@@ -170,7 +170,7 @@ export async function maybeRecordModelFailureWithGating(args: {
   if (!modelId) return
 
 
-  // Gate 2: shape from the SAME Phase 14/13 shape function.
+  // Gate 2: shape from the SAME capability shape function.
   const shape = args.extractWorkedExampleShape(taskText)
 
 

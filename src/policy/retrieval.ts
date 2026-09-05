@@ -5,7 +5,7 @@
  * canonical lineage neighborhoods and ranks scoped derived drawers with
  * stable tie-breaks. The scoring engine (weights, node extraction, factual floor)
  * lives in retrieval-scoring.ts; worked-example retrieval/formatting/shape and the
- * Phase 14/15/16 bucket helpers live in retrieval-worked-examples.ts — both are
+ * capability/calibration bucket helpers live in retrieval-worked-examples.ts — both are
  * re-exported here so existing importers keep their single entry point.
  */
 import type { MemgraphClient } from "../core/memgraph.ts";
@@ -192,14 +192,14 @@ export async function expandScopedRetrieval(
   const includeProvisional = Boolean(options.include_provisional);
   const intent = options.intent;
   let scopedNodes = extractScopedNodes(scopedResult);
-  // P2-2: drop provisional closets before ranking so top-N is computed over active
+  // Drop provisional closets before ranking so top-N is computed over active
   // (+ legacy/unstamped "unknown") nodes only. One-hop es-status query per node,
   // run in parallel — vanilla-only. include_provisional=true skips it entirely (zero
-  // cost). "unknown" (pre-P2-2 closets) is kept: absence of a stamp is not provisional.
-  // Phase 2: the factual floor also needs es-status when provisionals are included, so
+  // cost). "unknown" (pre-stamp closets) is kept: absence of a stamp is not provisional.
+  // The factual floor also needs es-status when provisionals are included, so
   // the status fetch runs whenever intent === "factual". es-source-type is fetched for
   // every node (one parallel one-hop kg_query each, same pattern/cost profile as the
-  // existing P2-2 fan-out) so ranked_nodes always expose the authority attribute.
+  // existing provisional fan-out) so ranked_nodes always expose the authority attribute.
   const needStatuses = !includeProvisional || intent === "factual";
   const statusMap = new Map<string, string>();
   if (scopedNodes.length > 0) {
@@ -224,17 +224,17 @@ export async function expandScopedRetrieval(
     scopedNodes = scopedNodes.filter((node) => statusMap.get(node.node_id) !== "provisional");
   }
 
-  // Phase 4 + Phase 3 close-out: DOC admission — concerns-neighbor expansion and the
+  // DOC admission — concerns-neighbor expansion and the
   // direct doc scan. Extracted to retrieval-expansion-docs.ts; call order and
-  // per-node work are unchanged (see that module for the full phase rationale).
+  // per-node work are unchanged (see that module for the full rationale).
   const concernNeighborIds = await expandConcernNeighbors(client, options, scope_room, scopedNodes, neighborhoodSet);
   const includeDocs = Boolean(options.include_docs) || intent === "factual";
   const docScanReport = await admitDirectDocs(client, options, scope_room, intent, scopedNodes);
 
-  // Phase 5 + Phase 10/12/P2-1: SKILL admission — refined-by expansion and the
+  // SKILL admission — refined-by expansion and the
   // shared-skills-wing scan (domain filter + promoted-from provenance). Extracted to
   // retrieval-expansion-skills.ts; call order and per-node work are unchanged (see
-  // that module for the full phase rationale).
+  // that module for the full rationale).
   const refinedNeighborIds = await expandRefinedNeighbors(client, options, intent, scopedNodes, neighborhoodSet);
   const sharedResult = await admitSharedSkills(client, options, intent, scopedNodes);
   const sharedSkillIds = sharedResult.ids;
@@ -243,12 +243,12 @@ export async function expandScopedRetrieval(
   const sharedPromotedChecked = sharedResult.counters.checked;
   const sharedPromotedWithOrigin = sharedResult.counters.withOrigin;
 
-  // Phase 7 (unified memory): outcome-feedback ranking term. Read the accumulated
+  // Outcome-feedback ranking term. Read the accumulated
   // es-outcome counts for the (already bounded) pool and add a net-positive/negative
   // term to each node's score. Capability-gated like concerns/refined: clients without
-  // getOutcomeCounts degrade to pre-Phase-7 scoring with zero extra calls. Bounded by
+  // getOutcomeCounts degrade to pre-outcome scoring with zero extra calls. Bounded by
   // construction — one one-hop kg_query per pool node (≤ limit), same cost profile as
-  // the P2-2 fan-out; read failures degrade to "no history" (neutral), never abort.
+  // the provisional fan-out; read failures degrade to "no history" (neutral), never abort.
   const outcomeEnabled = typeof client.getOutcomeCounts === "function";
   let outcomeCountsByNode: Map<string, OutcomeCounts> | undefined;
   if (outcomeEnabled && scopedNodes.length > 0) {
@@ -257,14 +257,14 @@ export async function expandScopedRetrieval(
       .catch(() => new Map<string, OutcomeCounts>());
   }
 
-  // Phase 9 (unified memory): negative-knowledge labelling. A dead end is a synthesis
+  // Negative-knowledge labelling. A dead end is a synthesis
   // with an outgoing `rules-out` edge; when such a node is in the ranked pool it must be
   // returned EXPLICITLY LABELLED as ruled out — "an unlabelled dead end reads as a
   // suggestion" (spec's main risk). Capability-gated like concerns/refined/outcome:
-  // clients without getRulesOut degrade to pre-Phase-9 output with zero extra calls.
+  // clients without getRulesOut degrade to pre-negative-knowledge output with zero extra calls.
   // Bounded by construction — one one-hop kg_query per pool node (≤ limit), same cost
-  // profile as the P2-2 fan-out; read failures degrade to "no rules-out" (unlabelled),
-  // never abort. This phase does NOT alter ranking: weights.ruledOut is 0 and the score
+  // profile as the provisional fan-out; read failures degrade to "no rules-out" (unlabelled),
+  // never abort. This pass does NOT alter ranking: weights.ruledOut is 0 and the score
   // formula below is untouched — labelling only, presentation not re-ranking.
   const ruledOutEnabled = typeof client.getRulesOut === "function";
   let ruledOutNodesLabeled = 0;
@@ -285,9 +285,9 @@ export async function expandScopedRetrieval(
     });
   }
 
-  // Phase 11 (unified memory): es-staleness flag read. Capability-gated like
+  // Es-staleness flag read. Capability-gated like
   // concerns/refined/outcome/rules-out: clients without getStalenessFlags degrade to
-  // pre-Phase-11 scoring with zero extra calls. One batch reader over the already-
+  // pre-staleness scoring with zero extra calls. One batch reader over the already-
   // bounded pool (concurrency 8 + maxNodes enforced inside the client, same shape as
   // getOutcomeCounts); read failures degrade to "unflagged" (neutral) per node, never
   // abort. The flag applies to ANY node type that carries it — the CREATE path flags
@@ -325,7 +325,7 @@ export async function expandScopedRetrieval(
     return node;
   });
 
-  // Phase 2 hard rule: on factual intent a provisional synthesis must never outrank a
+  // Hard rule: on factual intent a provisional synthesis must never outrank a
   // doc. Applied AFTER scoring (a floor, not a weight) and BEFORE the sort so all
   // within-class ordering and tie-breaks are preserved. The clamped set doubles as a
   // tie-break guard: when a provisional synth is clamped to EXACTLY a doc's score the two
@@ -405,7 +405,7 @@ export async function expandScopedRetrieval(
             truncated: docScanReport?.truncated ?? false,
           }
         : undefined,
-      // Phase 7 envelope honesty: state whether the outcome term was applied.
+      // Envelope honesty: state whether the outcome term was applied.
       // `applied` is true only when some node's score actually moved (non-zero net),
       // so a pool with history that nets to zero reports applied: false.
       outcome_expansion: outcomeEnabled && scopedNodes.length > 0
@@ -416,9 +416,9 @@ export async function expandScopedRetrieval(
             weight: weights.outcome,
           }
         : undefined,
-      // Phase 9 envelope honesty: state how many ranked nodes carried a rules-out edge
+      // Envelope honesty: state how many ranked nodes carried a rules-out edge
       // and were therefore returned with the explicit ruled_out marker. `weight` is 0 —
-      // this phase labels, it does not re-rank.
+      // this pass labels, it does not re-rank.
       ruled_out_expansion: ruledOutEnabled && scopedNodes.length > 0
         ? {
             enabled: true,
@@ -426,9 +426,9 @@ export async function expandScopedRetrieval(
             weight: weights.ruledOut,
           }
         : undefined,
-      // Phase 11 envelope honesty: state what the staleness read did. Present ONLY when
+      // Envelope honesty: state what the staleness read did. Present ONLY when
       // some node was flagged — unflagged pools (and clients without the reader) keep
-      // their envelopes byte-identical to pre-Phase-11 output, so this block never adds
+      // their envelopes byte-identical to pre-staleness output, so this block never adds
       // noise to the common case. `applied` is true whenever a node was flagged: the
       // flag is binary and strictly negative, so any flag moved that node's score.
       stale_expansion: stalenessEnabled && scopedNodes.length > 0 && staleValueByNode && staleValueByNode.size > 0
@@ -439,9 +439,9 @@ export async function expandScopedRetrieval(
             weight: weights.staleness,
           }
         : undefined,
-      // Phase 10 envelope honesty: state what the shared-skills scan did. Present only
+      // Envelope honesty: state what the shared-skills scan did. Present only
       // when the scan actually ran (procedural intent + shared_wing configured), so
-      // non-procedural envelopes stay byte-identical to pre-Phase-10 output.
+      // non-procedural envelopes stay byte-identical to pre-shared-skills output.
       shared_skills_expansion: sharedScanReport
         ? {
             enabled: true,
@@ -450,8 +450,8 @@ export async function expandScopedRetrieval(
             drawers_scanned: sharedScanReport.drawers_scanned,
             targets_admitted: scopedNodes.filter((n) => n.via === "shared").length,
             truncated: sharedScanReport.truncated,
-            // Phase 12 envelope honesty: state what the domain filter did. Present only
-            // when the client supports getClosetDomain; otherwise pre-Phase-12 output.
+            // Envelope honesty: state what the domain filter did. Present only
+            // when the client supports getClosetDomain; otherwise pre-domain-filter output.
             ...(typeof client.getClosetDomain === "function"
               ? {
                   domain_filter: {
@@ -462,9 +462,9 @@ export async function expandScopedRetrieval(
                   },
                 }
               : {}),
-            // P2-1 envelope honesty: state what the promoted-from provenance read did.
+            // Envelope honesty: state what the promoted-from provenance read did.
             // Present only when the capability exists AND at least one admitted shared
-            // skill was checked — otherwise pre-P2-1 output (no new field).
+            // skill was checked — otherwise pre-provenance output (no new field).
             ...(typeof client.getPromotedFrom === "function" && sharedPromotedChecked > 0
               ? {
                   promoted_from: {

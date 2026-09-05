@@ -239,7 +239,7 @@ export function initSessionPolicyState(valuesByPath: any): SessionPolicyState {
   const taskWindowBySession = new Map<string, string[]>()
   const taskEscalationsBySession = new Map<string, number>()
   const taskRecentLaunchBySession = new Map<string, Map<string, number>>()
-  // Phase 13 CREATE: in-session dedup — shapeKey → timestamp of last filed example.
+  // In-session dedup — shapeKey → timestamp of last filed example.
   // Prevents filing near-duplicate worked examples for the same problem shape.
   const workedExampleFiledByShape = new Map<string, Map<string, number>>()
   const loopGuardEnabled = cfgBool("loopGuard.enabled", DEFAULT_LOOP_GUARD_ENABLED)
@@ -285,7 +285,7 @@ export function initSessionPolicyState(valuesByPath: any): SessionPolicyState {
   const taskFallbackProvider = String(cfgRaw("taskWatchdog.fallback.provider") || "").trim()
   const taskFallbackModel = String(cfgRaw("taskWatchdog.fallback.model") || "").trim()
 
-  // Phase 13 (worked-example injection): config + lazy palace client.
+  // Worked-example injection: config + lazy palace client.
   const workedExampleInjectionEnabled = cfgBool(
     "taskWatchdog.workedExampleInjection.enabled",
     DEFAULT_WORKED_EXAMPLE_INJECTION_ENABLED,
@@ -294,27 +294,27 @@ export function initSessionPolicyState(valuesByPath: any): SessionPolicyState {
     "taskWatchdog.workedExampleInjection.searchTimeoutMs",
     DEFAULT_WORKED_EXAMPLE_SEARCH_TIMEOUT_MS,
   )
-  // Phase 13 CREATE: config for filing worked examples on successful subagent completion.
+  // Config for filing worked examples on successful subagent completion.
   const workedExampleFilingEnabled = cfgBool(
     "taskWatchdog.workedExampleFiling.enabled",
     DEFAULT_WORKED_EXAMPLE_FILING_ENABLED,
   )
-  // Phase 14 CREATE: config for recording capability tuples on routing-tier subagent completion.
+  // Config for recording capability tuples on routing-tier subagent completion.
   const capabilityRecordingEnabled = cfgBool(
     "taskWatchdog.capabilityRecording.enabled",
     DEFAULT_CAPABILITY_RECORDING_ENABLED,
   )
-  // Phase 15 CREATE: config for recording per-model failure events + interventions.
+  // Config for recording per-model failure events + interventions.
   const failureRecordingEnabled = cfgBool(
     "taskWatchdog.failureRecording.enabled",
     DEFAULT_FAILURE_RECORDING_ENABLED,
   )
-  // Phase 16 CREATE: config for capturing self-reported confidence at subagent completion.
+  // Config for capturing self-reported confidence at subagent completion.
   const calibrationCaptureEnabled = cfgBool(
     "taskWatchdog.calibrationCapture.enabled",
     DEFAULT_CALIBRATION_CAPTURE_ENABLED,
   )
-  // Phase 15 CONSUME: config for injecting (model, shape) intervention patches.
+  // Config for injecting (model, shape) intervention patches.
   const failurePatchInjectionEnabled = cfgBool(
     "taskWatchdog.failurePatchInjection.enabled",
     DEFAULT_FAILURE_PATCH_INJECTION_ENABLED,
@@ -322,7 +322,7 @@ export function initSessionPolicyState(valuesByPath: any): SessionPolicyState {
   // Session-local dedup for capability recording — prevents double-recording the
   // same (message, part) on repeated idle events. Keyed by subagentType:shapeKey.
   const capabilityRecordedBySession = new Map<string, Set<string>>()
-  // Phase 16 CREATE: pending calibration captures keyed by session. Each entry holds
+  // Pending calibration captures keyed by session. Each entry holds
   // the (modelId, shapeKey, confidence) triple parsed from a completed subagent's
   // terminal CONFIDENCE line. These are PENDING — they become durable es-calibration-
   // outcome edges only when the operator records an es-outcome for that unit via
@@ -330,11 +330,11 @@ export function initSessionPolicyState(valuesByPath: any): SessionPolicyState {
   // session-scoped and pruned like other per-session state; nothing here writes to
   // the palace directly (no proxy outcome labels).
   const pendingCalibrationBySession = new Map<string, Array<{ modelId: string; shapeKey: string; confidence: string }>>()
-  // Phase 15 CREATE: session-local dedup for failure-event recording. Turn-guard
+  // Session-local dedup for failure-event recording. Turn-guard
   // events can fire repeatedly in one session (repeated loop nudges on the same
   // model/shape); identical (bucketId, event) pairs are recorded once per session.
   const failureRecordedBySession = new Map<string, Set<string>>()
-  // Phase 15 CREATE: pending intervention patches awaiting proof of success.
+  // Pending intervention patches awaiting proof of success.
   // An intervention text is NOT durable knowledge the moment it is attempted —
   // only when there is deterministic evidence it actually broke the loop/spiral.
   // Each guard that issues a nudge queues its patch here (keyed by message id);

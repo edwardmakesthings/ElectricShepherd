@@ -111,7 +111,7 @@ export async function maybeSpiralNudgeWithGating(args: {
   )
 
   const routing = spiralRouting
-  // Phase 15 CREATE: task text for shape attribution — the real user prompt
+  // Task text for shape attribution — the real user prompt
   // (prev) when it is a user turn, else this turn's own text. Deterministic and
   // cheap; the shape function tolerates any text.
   const spiralTaskText = prevIsUser ? parentText : text
@@ -138,7 +138,7 @@ export async function maybeSpiralNudgeWithGating(args: {
     body,
   })
 
-  // Phase 15 CREATE: attribute the spiral to (model, shape) at nudge time. The
+  // Attribute the spiral to (model, shape) at nudge time. The
   // intervention text is only QUEUED — it becomes durable knowledge only if
   // confirmPendingInterventions later proves it worked (the next stop being
   // considered complete by issueRetry's predicates). Fire-and-forget — best-effort.

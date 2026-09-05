@@ -24,7 +24,7 @@ export async function createDerivedDrawer(core: MemgraphInternals, args: {
   source_file?: string;
   added_by?: string;
   labels?: string[];
-  // P2-3: provenance — the run_id of the consolidation execution
+  // Provenance — the run_id of the consolidation execution
   source_run_id?: string;
 }) {
   const sourceDrawerIds = uniq(args.source_drawer_ids || []);
@@ -70,7 +70,7 @@ export async function createDerivedDrawer(core: MemgraphInternals, args: {
       lineageErrors.push(`synthesized-from edge ${id} -> ${sourceId}: ${synthRes.kind}: ${synthRes.detail}`);
       continue;
     }
-    // P1-3: forward edge — source drawer → new closet (cheap worklist exclusion)
+    // Forward edge — source drawer → new closet (cheap worklist exclusion)
     const fwdRes = await core.invoke("kgAdd", {
       subject: sourceId,
       predicate: "consolidated-into",
@@ -85,7 +85,7 @@ export async function createDerivedDrawer(core: MemgraphInternals, args: {
     lineageEdgesAdded += 1;
   }
 
-  // P2-2: stamp the new closet `provisional`. Validation promotes it to `active`
+  // Stamp the new closet `provisional`. Validation promotes it to `active`
   // once it has >= 2 direct sources; until then it is filtered from default
   // retrieval. Vanilla-only (kg_add). Best-effort: a failed stamp must not fail
   // closet creation — an unstamped closet reads as "unknown" and stays visible.
@@ -101,7 +101,7 @@ export async function createDerivedDrawer(core: MemgraphInternals, args: {
     console.warn(`[memgraph] es-status stamp failed for ${id} (kind=${statusStamp.kind}), leaving closet unstamped: ${statusStamp.detail}`);
   }
 
-  // Phase 1: stamp the new closet `synthesis` on the es-source-type axis.
+  // Stamp the new closet `synthesis` on the es-source-type axis.
   // Independent of the es-status stamp above — one failure never masks the other;
   // a failed stamp leaves the axis "unknown".
   const typeStamp = await core.invoke("kgAdd", {

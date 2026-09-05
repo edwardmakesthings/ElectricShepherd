@@ -96,7 +96,7 @@ export function appendAutoConsolidationLog(projectRoot: string, line: string): v
     const statusDir = join(projectRoot, STATUS_DIR)
     mkdirSync(statusDir, { recursive: true })
     const logPath = join(statusDir, AUTOCONSOLIDATION_LOG_FILE)
-    // P3-2: rotate at 1 MB to .1 (keep one generation)
+    // Rotate at 1 MB to .1 (keep one generation)
     const MAX_LOG_SIZE = 1048576 // 1 MB
     try {
       const stat = statSync(logPath)
@@ -458,7 +458,7 @@ export function unwrapMessageResult(res: any): MessageWithParts | null {
 
 
 /**
- * P3-1: Evict oldest entries from a Map or Set to keep it bounded.
+ * Evict oldest entries from a Map or Set to keep it bounded.
  * Used for all session-keyed state to prevent memory leaks in long-lived processes.
  */
 export function pruneToMax(collection: Map<string, any> | Set<string>, max: number): void {

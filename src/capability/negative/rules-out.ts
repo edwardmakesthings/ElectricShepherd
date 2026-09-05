@@ -5,7 +5,7 @@
  * height or feed getLineageSources/getLineageDerivatives. One-hop by design —
  * recursive rules-out would create cycles through unrelated syntheses. The
  * subject is the dead-end drawer (a synthesis with negative polarity); the object
- * is the ruled-out statement text (free-text by approved Phase 9 design).
+ * is the ruled-out statement text (free-text by approved design).
  */
 
 import type { MemgraphInternals } from "../../core/memgraph-internals.ts";

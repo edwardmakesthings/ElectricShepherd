@@ -379,7 +379,7 @@ export function isDeliberationExemptPrompt(text: string | undefined | null): boo
 }
 
 /**
- * Phase 14/15 CONSUME (live routing decision): given the tier a delegation is
+ * Live routing decision: given the tier a delegation is
  * CURRENTLY targeting and the failure-adjusted recommendation from
  * MemgraphClient.getFailureAdjustedRouting, decide whether to re-route the unit
  * to a different tier.

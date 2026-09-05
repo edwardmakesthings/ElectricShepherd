@@ -1,8 +1,8 @@
 /**
- * Phase 1 (unified memory): bounded, dry-run-first backfill of the `es-source-type`
+ * Bounded, dry-run-first backfill of the `es-source-type`
  * KG axis for existing drawers.
  *
- * Inference rules (docs/unified-memory-spec.md, Phase 1):
+ * Inference rules:
  *   - transcript-like rooms (isTranscriptLikeRoom) → `transcript` (room name is the signal; no KG call)
  *   - drawers with outgoing `synthesized-from` edges → `synthesis` (one-hop kg_query per drawer)
  *   - everything else → left UNSTAMPED ("unknown authority"), never guessed

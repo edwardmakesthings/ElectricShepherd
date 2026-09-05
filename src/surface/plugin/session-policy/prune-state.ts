@@ -3,7 +3,7 @@
 // Domain category: shared session-state pruning helper.
 // Extracted from handlers.ts verbatim.
 
-/** Shared P3-1 pruning: bound all session-keyed state to prevent memory leaks. */
+/** Shared pruning: bound all session-keyed state to prevent memory leaks. */
 export function pruneAllSessionState(args: {
   retriedParentBySession: Map<string, Map<string, number>>
   retriesTotalBySession: Map<string, number>

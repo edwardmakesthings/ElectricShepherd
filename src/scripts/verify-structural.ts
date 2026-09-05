@@ -25,7 +25,7 @@
  *       lines. A ratchet, not a cleanup.
  *
  * Severity: A, B, C, and F are always strict. D and E warn by default (they report
- * violations without failing the build) and become strict with --strict, once the
+ * violations without failing the build) and become strict with --strict once the
  * codebase is brought into compliance.
  *
  * Diagnostics are `file:line [rule-id] message`. Exit code 1 when any strict
