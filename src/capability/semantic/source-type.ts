@@ -10,7 +10,7 @@
 import type { ClosetSourceType } from "../../core/memgraph-structure.ts";
 import { CLOSET_SOURCE_TYPES } from "../../core/memgraph-structure.ts";
 import type { MemgraphInternals } from "../../core/memgraph-internals.ts";
-import { parseKgFacts, uniqueFromFactsByDirection } from "../../core/memgraph-transport.ts";
+import { vocabValuesFromFacts } from "../../core/memgraph-transport.ts";
 
 /** Read a closet's es-source-type. Returns null when unstamped or on read failure. */
 export async function getClosetSourceType(core: MemgraphInternals, closetId: string): Promise<ClosetSourceType | null> {
@@ -22,7 +22,7 @@ export async function getClosetSourceType(core: MemgraphInternals, closetId: str
     recurse: false,
     max_depth: 1,
   }, `getClosetSourceType(${closetId}) read failure degrades to unstamped`);
-  const values = uniqueFromFactsByDirection(parseKgFacts(result), "outgoing");
+  const values = vocabValuesFromFacts(result, "outgoing");
   for (const value of values) {
     if ((CLOSET_SOURCE_TYPES as readonly string[]).includes(value)) return value as ClosetSourceType;
   }

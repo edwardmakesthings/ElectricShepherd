@@ -46,7 +46,7 @@ Run in order. STOP at the first failure and fix it; everything below depends on 
 Look at the raw/unconsolidated drawer count. Then do some work, and run it again.
 
 - **Count is zero or unchanged after real work** → capture is not firing. This is the
-  Gap #4 failure. Check `scripts/capture-source-transcripts.sh` exists and that
+  Gap #4 failure. Check `src/scripts/capture-source-transcripts.sh` exists and that
   `ESHEPHERD_SOURCE_CAPTURE_CMD` resolves. Nothing downstream can work.
 - **Count grows by a LOT per session** (dozens) → capture mode is `append` again; each
   turn is writing a full snapshot. Set `ESHEPHERD_SOURCE_CAPTURE_MODE=hybrid`.

@@ -49,6 +49,54 @@ export {
 } from "./memgraph-structure.ts";
 
 /**
+ * Parameters we send that the substrate does not declare, keyed by the resolved
+ * tool name suffix. MemPalace strict-validates its MCP input schemas and rejects
+ * any undeclared parameter with JSON-RPC -32602, failing the entire call — so an
+ * extra field is not ignored, it is fatal.
+ *
+ * `source_run_id` is operational provenance (which consolidation run wrote the
+ * edge), not semantic provenance. `mempalace_kg_add` accepts only subject,
+ * predicate, object, valid_from, valid_to, source_closet, source_file and
+ * source_drawer_id. We drop the run id rather than map it onto one of those,
+ * because they mean "where the fact came from" and reusing one would corrupt
+ * lineage. Run -> node attribution already lives on disk in the run journal
+ * (appendRunJournalEntry), so nothing is lost by keeping it out of the graph.
+ *
+ * `mempalace_kg_supersede` is stricter still: it declares ONLY subject,
+ * predicate, old_object, new_object and `at`. It takes no provenance at all, so
+ * both `source_closet` and `source_run_id` must be dropped. Provenance for a
+ * superseded fact is carried by the surrounding kg_add edges, not by the
+ * boundary operation that replaces the value.
+ */
+const UNDECLARED_SUBSTRATE_PARAMS: ReadonlyArray<{ toolSuffix: string; params: readonly string[] }> = [
+  { toolSuffix: "kg_add", params: ["source_run_id"] },
+  { toolSuffix: "kg_supersede", params: ["source_run_id", "source_closet"] },
+];
+
+/**
+ * Strip parameters the substrate does not declare, at the single boundary every
+ * call crosses. Applied to the injected `callTool` so `invoke`, `call` and
+ * `callIgnoringFailure` are all covered by one guard — call sites may keep
+ * passing the field for local logging without breaking the request.
+ */
+export function stripUndeclaredSubstrateParams(callTool: ToolCaller): ToolCaller {
+  return (name, args) => {
+    if (!args) return callTool(name, args);
+    const entry = UNDECLARED_SUBSTRATE_PARAMS.find((candidate) => name.endsWith(candidate.toolSuffix));
+    if (!entry) return callTool(name, args);
+    const sanitized: JsonMap = { ...args };
+    let stripped = false;
+    for (const param of entry.params) {
+      if (param in sanitized) {
+        delete sanitized[param];
+        stripped = true;
+      }
+    }
+    return callTool(name, stripped ? sanitized : args);
+  };
+}
+
+/**
  * Typed client over the MemPalace substrate.
  *
  * Criterion 2 decomposition: the method bodies live in four domain modules —
@@ -65,7 +113,7 @@ export class MemgraphClient {
   private readonly core: MemgraphInternals;
 
   constructor(options: MemgraphClientOptions) {
-    this.callTool = options.callTool;
+    this.callTool = stripUndeclaredSubstrateParams(options.callTool);
     this.tools = buildToolMap(resolveToolPrefix(options.toolPrefix), options.toolMap);
     const self = this;
     this.core = {

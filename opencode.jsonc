@@ -3,5 +3,8 @@
   // The electric-shepherd plugin self-provides its agents, slash commands, and
   // instruction rules via its `config` hook, so they load in any project that
   // enables the plugin — no `agent`/`command`/`instructions` config needed here.
-  "plugin": ["electric-shepherd"]
+  //
+  // No `plugin` entry here: `electric-shepherd` is not published to npm, so a
+  // bare package spec never resolves. Load it from `.opencode/plugins/` (or the
+  // global `~/.config/opencode/plugins/` shim), which OpenCode auto-discovers.
 }

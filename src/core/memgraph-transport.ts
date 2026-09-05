@@ -147,6 +147,30 @@ export function uniqueFromFactsByDirection(facts: JsonMap[], direction: "incomin
   return uniq(values);
 }
 
+/**
+ * Read CLOSED-VOCABULARY fact objects (es-status, es-source-type, es-domain,
+ * es-staleness, es-outcome) — lowercased.
+ *
+ * The substrate canonicalizes entity display names on the READ path: a value
+ * written as `synthesis` comes back from kg_query as `Synthesis`. The write
+ * receipt still echoes the lowercase form, so the transform is invisible at
+ * write time and only surfaces as a comparison that silently never matches.
+ * Whether a given value is affected depends on what else has been mined into
+ * the graph, so it is not predictable per-value: `provisional` survived while
+ * `synthesis` did not.
+ *
+ * Every closed-vocabulary comparison must therefore be case-insensitive. Use
+ * this instead of `uniqueFromFactsByDirection` whenever the values are matched
+ * against a fixed vocabulary.
+ *
+ * NEVER use this for IDs (drawer/node ids, lineage endpoints) — those are
+ * case-sensitive identifiers and lowercasing them would break resolution.
+ */
+export function vocabValuesFromFacts(payload: unknown, direction: "incoming" | "outgoing"): string[] {
+  return uniqueFromFactsByDirection(parseKgFacts(payload), direction).map((value) => value.toLowerCase());
+}
+
+
 export function parseRawMemoryItems(payload: unknown): SourceDrawerWorkItem[] {
   const pools = parseDrawerRows(payload);
 

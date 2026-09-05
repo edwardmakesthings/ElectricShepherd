@@ -315,6 +315,75 @@ function makeFakePalace({ drawers = {}, kgFacts = {}, taxonomy = {}, duplicateOf
   return { call, calls };
 }
 
+test("rung1: remind close fails when kg_add reports success:false response", async () => {
+  const REMINDER_ID = "drawer_proj_reminders_r1";
+  const FIXED_NOW = () => new Date("2026-08-30T00:00:00.000Z");
+  const calls = [];
+  const call = async (name, payload) => {
+    calls.push({ name, args: payload || {} });
+    if (name === "kg_add") {
+      return { success: false, error: "timestamp must match YYYY-MM-DDTHH:MM:SSZ" };
+    }
+    return {};
+  };
+
+  const report = await runRemind({
+    call,
+    action: "close",
+    wing: "proj",
+    drawerId: REMINDER_ID,
+    status: "satisfied",
+    dryRun: false,
+    now: FIXED_NOW,
+  });
+
+  assert.equal(report.ok, false);
+  assert.equal(report.counts.failed, 2);
+  assert.equal(report.steps[0].status, "failed");
+  assert.match(String(report.steps[0].error || ""), /timestamp/i);
+  assert.equal(report.steps[1].status, "failed");
+  assert.match(String(report.steps[1].error || ""), /timestamp/i);
+  assert.equal(calls.filter((c) => c.name === "kg_add").length, 2);
+});
+
+test("rung1: remind create falls back to check_duplicate drawer_id when checkpoint omits id", async () => {
+  const NOW = () => new Date("2026-08-30T00:00:00.000Z");
+  const DRAWER_ID = "drawer_proj_reminders_from_dedup";
+  const calls = [];
+  const call = async (name, payload) => {
+    calls.push({ name, args: payload || {} });
+    if (name === "checkpoint") {
+      return { ok: true, results: [{ ok: true }] };
+    }
+    if (name === "check_duplicate") {
+      return { is_duplicate: true, drawer_id: DRAWER_ID };
+    }
+    if (name === "kg_add") return {};
+    return {};
+  };
+
+  const report = await runRemind({
+    call,
+    action: "create",
+    wing: "proj",
+    room: "reminders",
+    what: "dedup fallback probe",
+    condition: "phase8-probe",
+    expiresAt: "2026-09-30T00:00:00.000Z",
+    dryRun: false,
+    now: NOW,
+  });
+
+  assert.equal(report.ok, true);
+  assert.equal(report.drawer_id, DRAWER_ID);
+  assert.equal(report.steps[0].status, "done");
+  assert.match(String(report.steps[0].detail || ""), new RegExp(DRAWER_ID));
+  assert.equal(calls.filter((c) => c.name === "check_duplicate").length, 1);
+  assert.equal(calls.filter((c) => c.name === "kg_add").length, 3);
+  const statusWrite = calls.filter((c) => c.name === "kg_add").find((c) => c.args?.predicate === "es-reminder-status");
+  assert.equal(statusWrite?.args?.valid_from, "2026-08-30T00:00:00Z");
+});
+
 test("rung1: dry-run propose_refinements writes nothing (valid + rejected edges)", async () => {
   const SKILL = "drawer_proj_skills_s1";
   const EVIDENCE_OK = "drawer_sess_transcript_e1";

@@ -32,7 +32,7 @@ import {
 } from "./memory-pipeline/subagent.ts";
 import {
   chunkItems, ensureRawEntriesForChunk,
-  postConsolidationMoves, moveAllToFailed, partitionChunk,
+  postConsolidationMoves, moveAllToRoom, partitionChunk,
 } from "./memory-pipeline/worklist-helpers.ts";
 import {
   buildMemcoreMarkdown, fetchHighHeightFacts, resolveMemcoreFilePath,
@@ -444,6 +444,9 @@ async function main(): Promise<void> {
       if (useLiveMapper) {
         chunkMapper = await callSubagentMapper({
           toolPrefix,
+          // callTool unwraps to the tool payload; callToolResult would hand back a
+          // SubstrateResult envelope that drawerContentFrom cannot read.
+          readTool: (name, toolArgs) => readMCP.callTool(name, toolArgs),
           mapperAgentName: getArg(argv, "--mapper-agent") || "dream-mapper",
           activeModel: activeRouting.model,
           query: consolidationOptions.query,
@@ -482,14 +485,23 @@ async function main(): Promise<void> {
 
       const createdNodeId = asString(chunkConsolidation.createdNodeId).trim();
       if (!createdNodeId) {
-        const failedMoves = await moveAllToFailed({
+        // No node is not automatically a failure. If the inflation guard refused
+        // the draft, the transcript simply had nothing worth synthesizing: that
+        // is a processed drawer with zero syntheses, and re-running it would
+        // refuse identically forever. Only a node missing despite a passing
+        // guard means the tools failed, which is what the failed room is for.
+        const noSubstance = !chunkConsolidation.inflationGuard.passed;
+        const moveOutcome = await moveAllToRoom({
           client, actionable, chunkIndex, totalChunks: worklistChunks.length,
-          failedRoom: worklistOptions.failedRoom, targetWing: consolidationOptions.targetWing,
+          targetRoom: noSubstance ? worklistOptions.processedRoom : worklistOptions.failedRoom,
+          targetWing: consolidationOptions.targetWing,
+          reason: noSubstance ? "no-substance" : "no-created-node",
         });
-        movedToFailed.push(...failedMoves.movedToFailed);
-        moveErrors.push(...failedMoves.moveErrors);
+        if (noSubstance) movedToProcessed.push(...moveOutcome.moved);
+        else movedToFailed.push(...moveOutcome.moved);
+        moveErrors.push(...moveOutcome.moveErrors);
         flushRunProgress(
-          { phase: "chunk-move-failed-no-created-node" },
+          { phase: noSubstance ? "chunk-move-processed-no-substance" : "chunk-move-failed-no-created-node" },
           {
             processedCount: movedToProcessed.length,
             failedCount: movedToFailed.length,
@@ -704,6 +716,12 @@ async function main(): Promise<void> {
       createdNodeCount: createdNodes.length,
       createdNodeIds: createdNodes,
       consolidationBatchCount: consolidationBatches.length,
+      // Why a batch produced no node. Without this the report says only that
+      // createdNodeCount is 0, and the refusal has to be recovered by reading
+      // the guard's source rather than the run's own log.
+      inflationGuardRefusals: consolidationBatches
+        .map((batch, index) => ({ index, reasons: batch?.inflationGuard?.reasons ?? [] }))
+        .filter((entry) => entry.reasons.length > 0),
       skipped: allSkipped.length > 0 ? allSkipped : undefined,
       warnings: traceWarnings.length > 0 ? traceWarnings : undefined,
       consolidationCoordMode,

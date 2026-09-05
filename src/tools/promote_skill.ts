@@ -110,7 +110,7 @@ async function closetSourceType(call: CallTool, id: string): Promise<string | nu
     .then((raw) => {
       for (const fact of parseFacts(raw)) {
         if (fact.current === false) continue;
-        const value = asText(fact.object).trim();
+        const value = asText(fact.object).trim().toLowerCase();
         if (value === "transcript" || value === "doc" || value === "synthesis" || value === "skill") return value;
       }
       return null; // unstamped or read failure — never a default type
@@ -124,7 +124,7 @@ async function closetDomain(call: CallTool, id: string): Promise<SkillDomain | n
     .then((raw) => {
       for (const fact of parseFacts(raw)) {
         if (fact.current === false) continue;
-        const value = asText(fact.object).trim();
+        const value = asText(fact.object).trim().toLowerCase();
         if ((SKILL_DOMAINS as readonly string[]).includes(value)) return value as SkillDomain;
       }
       return null; // unstamped, out-of-vocabulary, or read failure — never a default domain

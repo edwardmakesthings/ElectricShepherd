@@ -2,6 +2,8 @@
  * CLI option parsing for the memory consolidation + validation pipeline.
  * Extracted from run-memory-consolidation-and-validation.ts (criterion 2).
  */
+import { existsSync, readFileSync } from "node:fs";
+
 import type { SynthesisConsolidationOptions, TranscriptInsightSummary } from "../../capability/episodic/synthesis-consolidation.ts";
 import type { ValidationMergeReviewOptions } from "../../policy/validation-merge-review.ts";
 import type { CadenceArea, CadenceOrchestratorOptions } from "../../policy/cadence-orchestrator.ts";
@@ -68,8 +70,6 @@ export function parsePositiveInt(value: unknown, fallback: number, min = 1): num
 }
 
 export function tryReadFile(path: string): string | undefined {
-  // Lazy import to avoid circular deps at module load
-  const { existsSync, readFileSync } = require("node:fs") as typeof import("node:fs");
   if (!existsSync(path)) return undefined;
   return readFileSync(path, "utf8");
 }
@@ -131,7 +131,7 @@ export function parseConsolidationOptions(argv: string[], runtimeConfig: ReturnT
     targetRoom,
     targetHall: getArg(argv, "--target-hall") || getArg(argv, "--hall") || undefined,
     searchLimit: Number(getArg(argv, "--search-limit") || runtimeConfig.valuesByPath.consolidation?.searchLimit || "12"),
-    minimumDistinctSources: Number(getArg(argv, "--min-sources") || "2"),
+    minimumDistinctSources: Number(getArg(argv, "--min-sources") || "1"),
     minimumContentCharacters: Number(getArg(argv, "--min-content-chars") || "220"),
     minimumPopulatedSections: Number(getArg(argv, "--min-section-count") || "3"),
     minimumMapperConfidence: (getArg(argv, "--mapper-confidence-floor") as "high" | "medium" | "low" | undefined) || "medium",

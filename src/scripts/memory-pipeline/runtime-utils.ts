@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export type PromptModelRouting = {
@@ -46,10 +46,9 @@ export function parseMCPHttpOptions(config: Record<string, any>, parsePositiveIn
 }
 
 export function tryWriteFile(path: string, content: string, pid: number): void {
-  const { writeFileSync: wf, renameSync } = require("node:fs") as typeof import("node:fs");
   mkdirSync(dirname(path), { recursive: true });
   const tmpPath = `${path}.${pid}.tmp`;
-  wf(tmpPath, content, "utf8");
+  writeFileSync(tmpPath, content, "utf8");
   renameSync(tmpPath, path);
 }
 

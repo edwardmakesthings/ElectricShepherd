@@ -24,7 +24,7 @@
  */
 
 import { tool } from "@opencode-ai/plugin";
-import { runCheckpointWrite, runKgAddWrites } from "../core/operation.ts";
+import { runCheckDuplicate, runCheckpointWrite, runKgAddWrites } from "../core/operation.ts";
 import { asObject, asText, createPalaceClient } from "../core/palace-tools.ts";
 import { normalizeDryRunArg } from "../core/substrate.ts";
 import {
@@ -87,6 +87,10 @@ function parseISODate(value: unknown): Date | null {
   return new Date(ms);
 }
 
+function toSecondPrecisionISO(date: Date): string {
+  return date.toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
 function isTruthyFlag(value: string | undefined): boolean {
   const v = (value || "").trim().toLowerCase();
   return v === "1" || v === "true" || v === "yes" || v === "on";
@@ -125,7 +129,7 @@ export async function runRemind(args: {
   if (!wing) throw new Error("remind: wing is required (the project wing the reminder belongs to)");
   const room = asText(args.room).trim() || REMINDERS_ROOM;
   const dryRun = normalizeDryRunArg(args);
-  const nowIso = (args.now ?? (() => new Date()))().toISOString();
+  const nowIso = toSecondPrecisionISO((args.now ?? (() => new Date()))());
 
   if (action === "create") {
     const what = asText(args.what).trim();
@@ -146,7 +150,7 @@ export async function runRemind(args: {
       { op: `add_drawer ${wing}/${room}`, status: "proposed", detail: what },
       { op: "kg_add triggers-on", status: "proposed", detail: condition },
       { op: "kg_add es-reminder-status", status: "proposed", detail: "active" },
-      { op: `kg_add ${REMINDER_EXPIRES_AT_PREDICATE}`, status: "proposed", detail: expiresDate.toISOString() },
+      { op: `kg_add ${REMINDER_EXPIRES_AT_PREDICATE}`, status: "proposed", detail: toSecondPrecisionISO(expiresDate) },
     ];
 
     if (dryRun) {
@@ -189,6 +193,12 @@ export async function runRemind(args: {
       if (!checkpoint.ok) {
         throw new Error(checkpoint.error || checkpoint.failure_summary || "checkpoint failed");
       }
+      if (!drawerId) {
+        const dedup = await runCheckDuplicate(args.call, what);
+        if (dedup.ok && dedup.isDuplicate && dedup.drawerId) {
+          drawerId = dedup.drawerId;
+        }
+      }
       if (!drawerId) throw new Error("checkpoint returned no drawer_id");
       steps[0].status = "done";
       steps[0].detail = `${what} -> ${drawerId}`;
@@ -201,7 +211,7 @@ export async function runRemind(args: {
       const edgePayloads: Array<{ op: string; index: number; payload: Record<string, unknown> }> = [
         { op: "kg_add triggers-on", index: 1, payload: { subject: drawerId, predicate: TRIGGERS_ON_PREDICATE, object: condition, source_drawer_id: drawerId } },
         { op: "kg_add es-reminder-status", index: 2, payload: { subject: drawerId, predicate: REMINDER_STATUS_PREDICATE, object: "active", valid_from: nowIso, source_drawer_id: drawerId } },
-        { op: `kg_add ${REMINDER_EXPIRES_AT_PREDICATE}`, index: 3, payload: { subject: drawerId, predicate: REMINDER_EXPIRES_AT_PREDICATE, object: expiresDate.toISOString(), valid_from: nowIso, source_drawer_id: drawerId } },
+        { op: `kg_add ${REMINDER_EXPIRES_AT_PREDICATE}`, index: 3, payload: { subject: drawerId, predicate: REMINDER_EXPIRES_AT_PREDICATE, object: toSecondPrecisionISO(expiresDate), valid_from: nowIso, source_drawer_id: drawerId } },
       ];
       const edgeResults = await runKgAddWrites(
         args.call,
@@ -246,7 +256,7 @@ export async function runRemind(args: {
     const steps: RemindReport["steps"] = [];
     if (what) steps.push({ op: "update_drawer content", status: "proposed", detail: what });
     if (expiresDate) {
-      steps.push({ op: `kg_add ${REMINDER_EXPIRES_AT_PREDICATE}`, status: "proposed", detail: expiresDate.toISOString() });
+      steps.push({ op: `kg_add ${REMINDER_EXPIRES_AT_PREDICATE}`, status: "proposed", detail: toSecondPrecisionISO(expiresDate) });
     }
 
     if (dryRun) {
@@ -278,7 +288,7 @@ export async function runRemind(args: {
         payload: {
           subject: drawerId,
           predicate: REMINDER_EXPIRES_AT_PREDICATE,
-          object: expiresDate.toISOString(),
+          object: toSecondPrecisionISO(expiresDate),
           valid_from: nowIso,
           source_drawer_id: drawerId,
         },

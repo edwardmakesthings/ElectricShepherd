@@ -136,11 +136,11 @@ export function loadCommandDefinitions(dir: string): AssetRecord {
 }
 
 /**
- * Resolve the installed package root (one level above this `adapter/` file),
- * regardless of the consumer project's working directory.
+ * Resolve the installed package root (two levels above this `src/surface/`
+ * file), regardless of the consumer project's working directory.
  */
 export function packagedAssetRoot(): string {
-  return join(dirname(fileURLToPath(import.meta.url)), "..")
+  return join(dirname(fileURLToPath(import.meta.url)), "..", "..")
 }
 
 /**

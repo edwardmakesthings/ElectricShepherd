@@ -4,6 +4,8 @@
  */
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { drawerContentFrom, scratchFileNameFor } from "../../core/palace-tools.ts";
 import type { TranscriptInsightSummary } from "../../capability/episodic/synthesis-consolidation.ts";
 import { asObject, asArray, asString, parsePositiveInt } from "./cli-options.ts";
 import type { PromptModelRouting } from "./runtime-utils.ts";
@@ -163,8 +165,71 @@ export function resolveSubagentTimeoutMs(env: Record<string, string | undefined>
   return parsePositiveInt(env.ESHEPHERD_SUBAGENT_TIMEOUT_MS, 900000, 1000);
 }
 
+// Where worklist transcripts are staged for the mapper to read as files.
+const MAPPER_EXPORT_DIR = ".electric-shepherd/scratch/mapper";
+
+export type ReadToolFn = (name: string, args: Record<string, unknown>) => Promise<unknown>;
+
+/**
+ * A captured session transcript arrives as one enormous single-line JSON blob,
+ * which every line-based reader treats as a 1-line file: paging it returns
+ * "Offset 2 is out of range for this file (1 lines)", the mapper never sees the
+ * content, and it falls back to broad palace queries until it burns its spawn
+ * budget. Pretty-printing turns that one line into thousands, so the ordinary
+ * read tools work and the mapper does not have to pick one exotic tool to make
+ * progress. Content that is not JSON is written through untouched.
+ */
+function readableTranscript(content: string): string {
+  try {
+    return `${JSON.stringify(JSON.parse(content), null, 2)}\n`;
+  } catch {
+    return content;
+  }
+}
+
+/**
+ * Stage each worklist transcript as a local file and return the paths.
+ *
+ * The mapper used to be told to call get_drawer for every worklist id itself.
+ * For a raw session transcript that returns one oversized single-line JSON
+ * payload, which truncates in the agent's tool output and drives it to refetch
+ * the drawer chunk by chunk — ~93 sequential MCP round-trips for one drawer,
+ * enough to blow the spawn timeout and land the drawer in the failed room. A
+ * programmatic get_drawer has no such display limit, so one fetch per drawer
+ * here replaces the entire storm, and dream-mapper reads files instead (which
+ * is what its own brief already assumed: "an `export_drawer` file path it
+ * hands you").
+ */
+export async function exportWorklistTranscripts(args: {
+  toolPrefix: string;
+  worklistIds: string[];
+  readTool: ReadToolFn;
+}): Promise<{ drawerId: string; filePath: string }[]> {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "").slice(0, 15);
+  const exported: { drawerId: string; filePath: string }[] = [];
+  for (const drawerId of args.worklistIds) {
+    const response = await args.readTool(`${args.toolPrefix}get_drawer`, { drawer_id: drawerId });
+    const content = drawerContentFrom(response);
+    // A drawer that yields no content means the export contract is broken (wrong
+    // result shape, missing drawer). Staying silent here just re-creates the
+    // fetch storm via the fallback prompt, so say so and skip loudly.
+    if (!content) {
+      process.stderr.write(
+        `[memory-consolidation-validation] mapper export skipped ${drawerId}: get_drawer returned no content\n`,
+      );
+      continue;
+    }
+    const filePath = resolve(MAPPER_EXPORT_DIR, scratchFileNameFor(drawerId, stamp));
+    mkdirSync(dirname(filePath), { recursive: true });
+    writeFileSync(filePath, readableTranscript(content), "utf8");
+    exported.push({ drawerId, filePath });
+  }
+  return exported;
+}
+
 export async function callSubagentMapper(args: {
   toolPrefix: string;
+  readTool?: ReadToolFn;
   mapperAgentName: string;
   activeModel?: PromptModelRouting;
   query: string;
@@ -177,11 +242,29 @@ export async function callSubagentMapper(args: {
   const getDrawerTool = `${args.toolPrefix}get_drawer`;
   const orderedIds = args.worklistIds.filter(Boolean);
   const serializedIds = orderedIds.join(", ");
+  const exported = args.readTool
+    ? await exportWorklistTranscripts({
+        toolPrefix: args.toolPrefix,
+        worklistIds: orderedIds,
+        readTool: args.readTool,
+      })
+    : [];
+  const sourceInstructions =
+    exported.length > 0
+      ? [
+          "Each transcript has ALREADY been exported to a local file. Read only these files, in this exact order:",
+          ...exported.map((item) => `- transcriptId '${item.drawerId}' -> ${item.filePath}`),
+          "These are large single-line JSON session transcripts. Call file-reader_info first for size, then page with file-reader_json_session_extract_messages (start_index/limit). Never read a whole file in one call.",
+          `Do NOT call ${getDrawerTool}, search, or any other MemPalace tool. The files are the complete source.`,
+        ]
+      : [
+          `Use tool: ${getDrawerTool} for EACH drawer id in this exact order: ${serializedIds}.`,
+          "Do not use search or any broad query tools. Process only the provided IDs.",
+        ];
   const taskPrompt = [
     "Read the exact worklist transcripts and produce mapper summaries as JSON array.",
     `Scope context: wing='${args.wing}', room='${args.room}', query='${args.query}'.`,
-    `Use tool: ${getDrawerTool} for EACH drawer id in this exact order: ${serializedIds}.`,
-    "Do not use search or any broad query tools. Process only the provided IDs.",
+    ...sourceInstructions,
     "Return ONLY valid JSON array with items shaped as:",
     "{ transcriptId, confidence, durableFacts[], decisions[], rootCausesAndWorkedExamples[], subsystemsAndFiles[], openItems[], deadEnds[], rawExcerpt? }",
     "deadEnds[]: one line each for approaches TRIED AND FAILED or CONSIDERED AND REJECTED in this transcript, shaped `- <what was tried> | outcome: <what happened> | because: \"<why abandoned>\" | polarity: tried-failed|considered-rejected`. Each line MUST carry its outcome clause. Write an empty array when nothing qualifies — do not manufacture dead ends.",

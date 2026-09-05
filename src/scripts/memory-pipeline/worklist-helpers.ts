@@ -176,25 +176,35 @@ export async function postConsolidationMoves(args: {
 }
 
 
-export async function moveAllToFailed(args: {
+/**
+ * Move every drawer in a chunk to one room with one reason.
+ *
+ * A chunk can end without a synthesis node for two unrelated reasons, and they
+ * must not share a destination: the tools failed (retryable, belongs in the
+ * failed room), or the transcript simply had no substance to synthesize, which
+ * is a successful outcome that happens to produce zero drawers. The caller
+ * decides which by passing the room and the reason.
+ */
+export async function moveAllToRoom(args: {
   client: MemgraphClientLike;
   actionable: SourceDrawerWorkItem[];
   chunkIndex: number;
   totalChunks: number;
-  failedRoom: string;
+  targetRoom: string;
   targetWing: string;
-}): Promise<{ movedToFailed: Array<{ drawer_id: string; family_drawer_ids: string[]; reason: string }>; moveErrors: Array<{ drawer_id: string; phase: "processed" | "failed"; error: string }> }> {
-  const movedToFailed: Array<{ drawer_id: string; family_drawer_ids: string[]; reason: string }> = [];
+  reason: string;
+}): Promise<{ moved: Array<{ drawer_id: string; family_drawer_ids: string[]; reason: string }>; moveErrors: Array<{ drawer_id: string; phase: "processed" | "failed"; error: string }> }> {
+  const moved: Array<{ drawer_id: string; family_drawer_ids: string[]; reason: string }> = [];
   const moveErrors: Array<{ drawer_id: string; phase: "processed" | "failed"; error: string }> = [];
 
   for (const item of args.actionable) {
     const moveResult = await moveDrawerFamily(args.client, {
       item,
-      targetRoom: args.failedRoom,
+      targetRoom: args.targetRoom,
       targetWing: args.targetWing,
       applyWrites: true,
     });
-    movedToFailed.push({ drawer_id: item.drawer_id, family_drawer_ids: moveResult.attempted, reason: "no-created-node" });
+    moved.push({ drawer_id: item.drawer_id, family_drawer_ids: moveResult.attempted, reason: args.reason });
     moveErrors.push(
       ...moveResult.errors.map((entry) => ({
         drawer_id: entry.drawer_id,
@@ -205,10 +215,10 @@ export async function moveAllToFailed(args: {
   }
 
   process.stderr.write(
-    `[memory-consolidation-validation] chunk ${args.chunkIndex + 1}/${args.totalChunks} moved-to-failed=${args.actionable.length} reason=no-created-node\n`,
+    `[memory-consolidation-validation] chunk ${args.chunkIndex + 1}/${args.totalChunks} moved-to=${args.targetRoom} count=${args.actionable.length} reason=${args.reason}\n`,
   );
 
-  return { movedToFailed, moveErrors };
+  return { moved, moveErrors };
 }
 
 

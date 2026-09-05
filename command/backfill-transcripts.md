@@ -9,7 +9,7 @@ Arguments: $ARGUMENTS
 
 Execution:
 
-1. Build command from repo root: `bash scripts/backfill-source-transcripts.sh [args]`
+1. Build command from repo root: `bash src/scripts/backfill-source-transcripts.sh [args]`
 2. Pass `$ARGUMENTS` through verbatim.
 3. Stream output so the user sees:
    - discovered session list up front

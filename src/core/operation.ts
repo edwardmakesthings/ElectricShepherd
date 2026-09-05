@@ -106,6 +106,21 @@ function asRows(value: unknown): BatchResultRow[] {
   return pools.map((row) => asObject(row) as BatchResultRow);
 }
 
+function summarizeToolFailure(raw: unknown, fallback: string): string {
+  const obj = asObject(raw);
+  const text = String(obj.error || obj.message || obj.detail || fallback).trim();
+  return text || fallback;
+}
+
+function isExplicitToolFailure(raw: unknown): boolean {
+  const obj = asObject(raw);
+  if (obj.ok === false) return true;
+  if (obj.success === false) return true;
+  if (typeof obj.error === "string" && obj.error.trim()) return true;
+  if (typeof obj.message === "string" && obj.message.trim().toLowerCase().includes("failed")) return true;
+  return false;
+}
+
 function countFiledRows(rows: BatchResultRow[]): number {
   let filed = 0;
   for (const row of rows) {
@@ -191,8 +206,12 @@ export async function runKgAddWrites(call: CallTool, writes: KgAddWrite[]): Prom
   const results: KgAddWriteResult[] = [];
   for (const write of writes) {
     try {
-      await call("kg_add", write.payload);
-      results.push({ ok: true });
+      const raw = await call("kg_add", write.payload);
+      if (isExplicitToolFailure(raw)) {
+        results.push({ ok: false, error: summarizeToolFailure(raw, "kg_add failed") });
+      } else {
+        results.push({ ok: true });
+      }
     } catch (err) {
       results.push({ ok: false, error: String(err) });
     }

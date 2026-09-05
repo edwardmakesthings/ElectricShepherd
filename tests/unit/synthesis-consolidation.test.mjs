@@ -86,9 +86,24 @@ test("confidence floor includes high/medium sources and drops low ones", async (
   assert.deepEqual(result.droppedSummaryIds, ["raw-003"]);
 });
 
-test("inflation guard fails when there are too few distinct sources", async () => {
+test("inflation guard admits a single substantive source", async () => {
   const result = await runSynthesisConsolidation(stubClient(), {
     ...baseOptions,
+    mapperSummaries: [richSummaries()[0]], // single source
+  });
+
+  assert.equal(
+    result.inflationGuard.reasons.some((r) => /distinct source/i.test(r)),
+    false,
+    `single source must not be refused on source count, got: ${JSON.stringify(result.inflationGuard.reasons)}`
+  );
+  assert.equal(result.inflationGuard.passed, true, JSON.stringify(result.inflationGuard.reasons));
+});
+
+test("inflation guard still enforces a caller-supplied distinct-source minimum", async () => {
+  const result = await runSynthesisConsolidation(stubClient(), {
+    ...baseOptions,
+    minimumDistinctSources: 2,
     mapperSummaries: [richSummaries()[0]], // single source
   });
 
@@ -164,7 +179,8 @@ test("applyWrites does NOT persist when the inflation guard fails", async () => 
   const result = await runSynthesisConsolidation(client, {
     ...baseOptions,
     applyWrites: true,
-    mapperSummaries: [richSummaries()[0]], // single source -> guard fails
+    minimumDistinctSources: 2,
+    mapperSummaries: [richSummaries()[0]], // single source, below the explicit minimum -> guard fails
   });
 
   assert.equal(result.inflationGuard.passed, false);
@@ -278,7 +294,8 @@ test("applyWrites does NOT file dead ends when the inflation guard fails", async
   const result = await runSynthesisConsolidation(client, {
     ...baseOptions,
     applyWrites: true,
-    mapperSummaries: [summariesWithDeadEnds()[0]], // single source -> guard fails
+    minimumDistinctSources: 2,
+    mapperSummaries: [summariesWithDeadEnds()[0]], // single source, below the explicit minimum -> guard fails
   });
 
   assert.equal(result.inflationGuard.passed, false);

@@ -47,7 +47,8 @@ export async function getOutcomeCounts(
       const counts = empty();
       for (const fact of parseKgFacts(result)) {
         if (!asBoolean(fact.current, true)) continue;
-        const value = asString(fact.object).trim();
+        // lowercased: the substrate canonicalizes vocabulary values on read.
+        const value = asString(fact.object).trim().toLowerCase();
         if (value === "accept") counts.accept += 1;
         else if (value === "revise") counts.revise += 1;
         else if (value === "failed") counts.failed += 1;

@@ -334,8 +334,8 @@ materialized-view discipline again: the view is deterministic, but what it is a 
 can include curated marks. Result: never-rots (derived) *and* can-react-fast (via labels),
 with no tension.
 
-The deterministic policy runtime (`scripts/run-policy-cycle.ts`,
-`scripts/run-memory-consolidation-and-validation.ts`, and adapter modules)
+The deterministic policy runtime (`src/scripts/run-policy-cycle.ts`,
+`src/scripts/run-memory-consolidation-and-validation.ts`, and adapter modules)
 produces scoped selection/ranking plus automatic mem-core markdown renders. The runtime
 materializes memory files under `.electric-shepherd/memory/` so mem-core
 behaves like dynamic config instead of a human-maintained prompt artifact.

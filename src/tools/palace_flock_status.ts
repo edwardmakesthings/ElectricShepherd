@@ -45,7 +45,7 @@ export function countOutcomesInWindow(
   const counts: OutcomeCounts = { accept: 0, revise: 0, failed: 0, unused: 0 };
   for (const fact of parseFacts(factsRaw)) {
     if (fact.current === false) continue;
-    const value = asText(fact.object).trim();
+    const value = asText(fact.object).trim().toLowerCase();
     if (value !== "accept" && value !== "revise" && value !== "failed" && value !== "unused") continue;
     // Window by the edge's valid_from when present; untimestamped edges count in-window.
     const stamped = asText(fact.valid_from || fact.created_at).trim();

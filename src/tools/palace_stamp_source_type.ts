@@ -118,7 +118,10 @@ async function readCurrentSourceType(call: CallTool, drawerId: string): Promise<
     return null;
   }
   const values = extractOutgoingObjects(drawerId, facts);
-  for (const value of values) {
+  for (const raw of values) {
+    // MemPalace canonicalizes entity display names on read ("synthesis" -> "Synthesis"),
+    // so vocabulary values must be lowercased before matching the closed set.
+    const value = raw.toLowerCase();
     if (value === "transcript" || value === "doc" || value === "synthesis" || value === "skill") return value;
   }
   return null;

@@ -87,13 +87,25 @@ function shouldRetryWithDreamNamespacedTool(err: unknown): boolean {
   );
 }
 
+/**
+ * Add a KG fact. The optional fields mirror the substrate's declared
+ * `mempalace_kg_add` schema: subject/predicate/object are required, and
+ * valid_from, valid_to, source_closet, source_file and source_drawer_id are the
+ * accepted optionals.
+ *
+ * `source_run_id` is accepted for caller convenience but is NOT part of that
+ * schema; it is stripped at the transport boundary by
+ * `stripUndeclaredSubstrateParams` in memgraph.ts, which explains why.
+ */
 export function kgAdd(core: MemgraphInternals, args: {
   subject: string;
   predicate: string;
   object: string;
   valid_from?: string;
+  valid_to?: string;
   source_closet?: string;
-  // Provenance — the run_id of the consolidation execution
+  source_file?: string;
+  source_drawer_id?: string;
   source_run_id?: string;
 }) {
   return core.call("kgAdd", args as unknown as JsonMap);

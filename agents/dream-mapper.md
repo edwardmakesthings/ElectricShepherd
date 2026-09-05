@@ -13,6 +13,8 @@ permission:
 tools:
   litellm_mempalace-mempalace_*: true
   mempalace_direct_mempalace_*: true
+  brain_mempalace-mempalace_*: true
+  dream_mempalace-mempalace_*: true
   file-reader_info: true
   file-reader_lines: true
   file-reader_bytes: true

@@ -12,7 +12,7 @@
  */
 
 import type { MemgraphInternals } from "../../core/memgraph-internals.ts";
-import { asString, parseKgFacts, uniq, uniqueFromFactsByDirection } from "../../core/memgraph-transport.ts";
+import { asString, uniq, vocabValuesFromFacts } from "../../core/memgraph-transport.ts";
 
 /** Read a node's es-staleness flag. Returns the current value (e.g. "source-changed") or null when unflagged or on read failure. */
 export async function getStaleness(core: MemgraphInternals, nodeId: string): Promise<string | null> {
@@ -24,7 +24,7 @@ export async function getStaleness(core: MemgraphInternals, nodeId: string): Pro
     recurse: false,
     max_depth: 1,
   }, `getStaleness(${nodeId}) read failure degrades to unflagged`);
-  const values = uniqueFromFactsByDirection(parseKgFacts(result), "outgoing");
+  const values = vocabValuesFromFacts(result, "outgoing");
   return values.length > 0 ? values[0] : null;
 }
 

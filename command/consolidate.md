@@ -37,7 +37,9 @@ Optional flags you can pass in `$ARGUMENTS`:
 - `all` -> `--all`
 - `retry-failed` -> `--retry-failed-only`
 - `live` -> `--use-live-mapper --use-live-auditor`
-- `room=<room>` -> `--room <room>`
+- `room=<room>` -> `--room <room>` (the BASE room; processed/failed rooms are derived as
+  `<room>-processed` and `<room>-failed` unless overridden. With `retry-failed`, pass the base
+  room — passing `source-transcripts-failed` yields `source-transcripts-failed-failed` and 0 hits.)
 - `wing=<wing>` -> `--wing <wing>`
 - `processed-room=<room>` -> `--processed-room <room>`
 - `failed-room=<room>` -> `--failed-room <room>`
@@ -54,7 +56,7 @@ Examples:
 Execution steps:
 
 1. Parse `$ARGUMENTS` for mode/flags (`all`, `apply`, `retry-failed`, `live`, and optional scope/room overrides).
-2. Build this command from repo root: `node --experimental-strip-types scripts/run-memory-consolidation-and-validation.ts --query "memory consolidation candidates" --batch-size 1 [--wing "<wing>"] [--room "<room>"] [--processed-room "<room>"] [--failed-room "<room>"] [--all] [--retry-failed-only] [--use-live-mapper --use-live-auditor] [--no-move-already-consolidated] [--apply --apply-merges]`
+2. Build this command from repo root: `node --experimental-strip-types src/scripts/run-memory-consolidation-and-validation.ts --query "memory consolidation candidates" --batch-size 1 [--wing "<wing>"] [--room "<room>"] [--processed-room "<room>"] [--failed-room "<room>"] [--all] [--retry-failed-only] [--use-live-mapper --use-live-auditor] [--no-move-already-consolidated] [--apply --apply-merges]`
 3. Run it via shell and capture stdout JSON.
 4. Summarize result for the user with:
    - `worklistMode`, `worklist.count`

@@ -400,13 +400,14 @@ test("setClosetSourceType atomically supersedes the previous value", async () =>
 
   const supersedes = calls.filter((call) => call.name.endsWith("kg_supersede"));
   assert.equal(supersedes.length, 1);
+  // kg_supersede declares ONLY subject/predicate/old_object/new_object/at.
+  // source_closet and source_run_id are stripped at the client boundary —
+  // forwarding them fails the whole call with -32602.
   assert.deepEqual(supersedes[0].args, {
     subject: "drawer-1",
     predicate: "es-source-type",
     old_object: "doc",
     new_object: "synthesis",
-    source_closet: "drawer-1",
-    source_run_id: "run-9",
   });
   assert.equal(calls.filter((call) => call.name.endsWith("kg_add")).length, 0);
   assert.equal(calls.filter((call) => call.name.endsWith("kg_invalidate")).length, 0);
@@ -583,8 +584,6 @@ test("setStalenessFlag atomically supersedes the previous es-staleness value", a
     predicate: "es-staleness",
     old_object: "source-changed",
     new_object: "basis-drifted",
-    source_closet: "drawer-1",
-    source_run_id: "run-9",
   });
   assert.equal(calls.filter((call) => call.name.endsWith("kg_add")).length, 0);
   assert.equal(calls.filter((call) => call.name.endsWith("kg_invalidate")).length, 0);

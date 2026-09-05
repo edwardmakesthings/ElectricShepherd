@@ -15,6 +15,8 @@ permission:
 tools:
   litellm_mempalace-mempalace_*: true
   mempalace_direct_mempalace_*: true
+  brain_mempalace-mempalace_*: true
+  dream_mempalace-mempalace_*: true
   palace_report: true
   palace_diff: true
   export_drawer: true

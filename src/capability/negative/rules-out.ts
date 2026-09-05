@@ -29,7 +29,7 @@ export async function getRulesOut(core: MemgraphInternals, nodeId: string): Prom
   const polarities: string[] = [];
   for (const fact of parseKgFacts(result)) {
     if (!asBoolean(fact.current, true)) continue;
-    const object = asString(fact.object).trim();
+    const object = asString(fact.object).trim().toLowerCase();
     if (!object) continue;
     if (object === "tried-failed" || object === "considered-rejected") polarities.push(object);
     else statements.push(object);

@@ -78,7 +78,7 @@ function closetSourceType(call: CallTool, id: string): Promise<string | null> {
     .then((raw) => {
       for (const fact of parseFacts(raw)) {
         if (fact.current === false) continue;
-        const value = asText(fact.object).trim();
+        const value = asText(fact.object).trim().toLowerCase();
         if (value === "transcript" || value === "doc" || value === "synthesis" || value === "skill") return value;
       }
       return null; // unstamped or read failure — never a default type

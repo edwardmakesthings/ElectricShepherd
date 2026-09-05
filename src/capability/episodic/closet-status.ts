@@ -9,7 +9,7 @@
  */
 
 import type { MemgraphInternals } from "../../core/memgraph-internals.ts";
-import { parseKgFacts, uniqueFromFactsByDirection } from "../../core/memgraph-transport.ts";
+import { parseKgFacts, uniqueFromFactsByDirection, vocabValuesFromFacts } from "../../core/memgraph-transport.ts";
 
 /** Count a closet's DIRECT sources via its outgoing one-hop synthesized-from edges. */
 export async function countDirectSources(core: MemgraphInternals, closetId: string): Promise<number> {
@@ -35,7 +35,7 @@ export async function getClosetStatus(core: MemgraphInternals, closetId: string)
     recurse: false,
     max_depth: 1,
   }, `getClosetStatus(${closetId}) read failure degrades to unknown`);
-  const values = uniqueFromFactsByDirection(parseKgFacts(result), "outgoing");
+  const values = vocabValuesFromFacts(result, "outgoing");
   if (values.includes("active")) return "active";
   if (values.includes("provisional")) return "provisional";
   return "unknown";

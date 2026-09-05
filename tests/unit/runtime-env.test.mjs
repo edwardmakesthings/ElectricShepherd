@@ -11,9 +11,12 @@ function makeTempDir(prefix) {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 
+// Mirrors the real tree: callers live under src/, and the repo root is
+// identified by its package.json, not by a fixed depth from the script.
 function scriptUrlFor(repoRoot) {
-  const scriptPath = join(repoRoot, "scripts", "fake-script.ts");
+  const scriptPath = join(repoRoot, "src", "scripts", "fake-script.ts");
   mkdirSync(dirname(scriptPath), { recursive: true });
+  writeFileSync(join(repoRoot, "package.json"), "{}\n", "utf8");
   return pathToFileURL(scriptPath).href;
 }
 

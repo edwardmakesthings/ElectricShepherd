@@ -12,7 +12,7 @@
  */
 
 import type { JsonMap } from "../../core/memgraph-structure.ts";
-import { asArray, asBoolean, asNumber, asObject, asString, parseDrawerRows, parseKgFacts, uniq, uniqueFromFactsByDirection } from "../../core/memgraph-transport.ts";
+import { asArray, asBoolean, asNumber, asObject, asString, parseDrawerRows, parseKgFacts, uniq, uniqueFromFactsByDirection, vocabValuesFromFacts } from "../../core/memgraph-transport.ts";
 import type { MemgraphInternals } from "../../core/memgraph-internals.ts";
 
 export async function getOutgoingObjects(core: MemgraphInternals, entity: string, predicate: string): Promise<string[]> {
@@ -224,7 +224,7 @@ export async function listScopedDerivedDrawers(core: MemgraphInternals, args: {
       }, `listScopedDerivedDrawers hall read for ${nodeId} degrades to no labels`),
     );
 
-    const labels = uniqueFromFactsByDirection(parseKgFacts(hallFacts), "outgoing").map((v) => v.toLowerCase());
+    const labels = vocabValuesFromFacts(hallFacts, "outgoing");
     if (labeledOnly && labels.length === 0) continue;
     if (requestedLabels.length > 0) {
       const matchCount = labels.filter((label) => requestedLabels.includes(label)).length;

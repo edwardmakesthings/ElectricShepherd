@@ -21,7 +21,7 @@ Do not attempt to re-render here, and do not synthesize or merge.
 
 1. Load the scoped memory files from repo root:
 
-   `node --experimental-strip-types scripts/run-mem-core-loader.ts --start-dir "<scope>" --format json`
+   `node --experimental-strip-types src/scripts/run-mem-core-loader.ts --start-dir "<scope>" --format json`
 
    Omit `--start-dir` to use the current directory. Add `--strict` to exit non-zero when
    nothing is found.

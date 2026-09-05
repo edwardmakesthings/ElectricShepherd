@@ -502,7 +502,12 @@ export async function runSynthesisConsolidation(
   if (!targetRoom) throw new Error("Consolidation requires targetRoom");
 
   const confidenceFloor = options.minimumMapperConfidence || "medium";
-  const minimumDistinctSources = Math.max(2, Number(options.minimumDistinctSources ?? 2));
+  // One transcript is a legitimate synthesis source: a long multi-day session
+  // yields many focused drawers on its own. The "needs at least two" rule
+  // belongs to fact promotion (a fact earns durability through >=2 connections),
+  // not to counting source transcripts. Substance is still enforced below by the
+  // content-length and populated-section checks.
+  const minimumDistinctSources = Math.max(1, Number(options.minimumDistinctSources ?? 1));
   const minimumContentCharacters = Math.max(120, Number(options.minimumContentCharacters ?? 220));
   const minimumPopulatedSections = Math.max(2, Number(options.minimumPopulatedSections ?? 3));
   const applyWrites = Boolean(options.applyWrites);

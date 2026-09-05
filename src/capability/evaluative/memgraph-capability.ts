@@ -163,7 +163,7 @@ export async function getCapabilityRoutingEvidence(
       }, `getCapabilityRoutingEvidence(${bucketId}) read failure degrades to no history`);
       for (const fact of parseKgFacts(result)) {
         if (!asBoolean(fact.current, true)) continue;
-        const value = asString(fact.object).trim();
+        const value = asString(fact.object).trim().toLowerCase();
         if (value === "accept") counts.accept += 1;
         else if (value === "revise") counts.revise += 1;
         else if (value === "failed") counts.failed += 1;
@@ -329,7 +329,7 @@ export async function getFailureCounts(
   let loop = 0;
   for (const fact of parseKgFacts(result)) {
     if (!asBoolean(fact.current, true)) continue;
-    const value = asString(fact.object).trim();
+    const value = asString(fact.object).trim().toLowerCase();
     if (value === "spiral") spiral += 1;
     else if (value === "loop") loop += 1;
     // unknown values are ignored — the axis is closed by construction
@@ -544,7 +544,7 @@ export async function getCalibrationCell(
   }, `getCalibrationCell(${bucketId}) read failure degrades to no history`);
   for (const fact of parseKgFacts(result)) {
     if (!asBoolean(fact.current, true)) continue;
-    const value = asString(fact.object).trim();
+    const value = asString(fact.object).trim().toLowerCase();
     if (value === "accept") accept += 1;
     else if (value === "revise") revise += 1;
     else if (value === "failed") failed += 1;

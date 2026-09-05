@@ -9,7 +9,7 @@ Arguments: $ARGUMENTS
 
 Execution:
 
-1. Build command from repo root: `node --experimental-strip-types scripts/run-nontranscript-backfill.ts [args]`
+1. Build command from repo root: `node --experimental-strip-types src/scripts/run-nontranscript-backfill.ts [args]`
 2. Pass `$ARGUMENTS` through verbatim.
 3. Stream output so the user sees:
    - selected wing + resolved room list

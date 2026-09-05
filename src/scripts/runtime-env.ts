@@ -54,6 +54,20 @@ function loadEnvFile(path: string): Record<string, string> {
   return parseEnvText(content);
 }
 
+// Callers pass their own `import.meta.url` from varying depths (src/tools/,
+// src/scripts/, src/surface/plugin/), so a fixed number of ".." segments cannot
+// be correct for all of them. Walk up to the nearest package.json instead.
+function findRepoRoot(startDir: string): string {
+  let dir = startDir;
+  for (let hops = 0; hops < 12; hops += 1) {
+    if (existsSync(resolve(dir, "package.json"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return resolve(startDir, "..");
+}
+
 export function loadRuntimeEnv(options: LoadRuntimeEnvOptions): LoadRuntimeEnvResult {
   const { scriptUrl, env } = options;
   const runtimeCwd = (globalThis as { process?: { cwd?: () => string } }).process?.cwd?.() || ".";
@@ -69,7 +83,7 @@ export function loadRuntimeEnv(options: LoadRuntimeEnvOptions): LoadRuntimeEnvRe
   const loadedFiles: string[] = [];
   const scriptPath = fileURLToPath(scriptUrl);
   const scriptDir = dirname(scriptPath);
-  const repoRoot = resolve(scriptDir, "..");
+  const repoRoot = findRepoRoot(scriptDir);
 
   const explicitFile = (env.ESHEPHERD_ENV_FILE || "").trim();
   const applyLoadedValues = (values: Record<string, string>): void => {
