@@ -55,6 +55,10 @@ export async function createDerivedDrawer(core: MemgraphInternals, args: {
   const lineageErrors: string[] = [];
   let lineageEdgesAdded = 0;
   for (const sourceId of sourceDrawerIds) {
+    if (sourceId === id) {
+      lineageErrors.push(`synthesized-from edge ${id} -> ${sourceId}: rejected: self-loop`);
+      continue;
+    }
     // Explicit per-edge failure handling: a failed edge is recorded in
     // `lineageErrors` (operator-visible, returned to the caller) rather than
     // silently dropped. Both edges are attempted independently so one failure

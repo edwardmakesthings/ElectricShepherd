@@ -13,6 +13,7 @@ import { asString } from "./memgraph-transport.ts";
 import type { MemgraphInternals } from "./memgraph-internals.ts";
 import { UPDATE_DRAWER_FALLBACK_NAMES } from "./substrate-client.ts";
 
+const DAG_SELF_LOOP_PREDICATES = new Set(["synthesized-from", "consolidated-into", "merged-into"]);
 export function addDrawer(core: MemgraphInternals, args: {
   wing: string;
   room: string;
@@ -108,6 +109,12 @@ export function kgAdd(core: MemgraphInternals, args: {
   source_drawer_id?: string;
   source_run_id?: string;
 }) {
+  const predicate = asString(args.predicate).trim().toLowerCase();
+  const subject = asString(args.subject).trim();
+  const object = asString(args.object).trim();
+  if (DAG_SELF_LOOP_PREDICATES.has(predicate) && subject.length > 0 && subject === object) {
+    throw new Error(`kg_add rejected self-loop: ${predicate} ${subject} -> ${object}`);
+  }
   return core.call("kgAdd", args as unknown as JsonMap);
 }
 

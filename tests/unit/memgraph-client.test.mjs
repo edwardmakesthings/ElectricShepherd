@@ -360,6 +360,52 @@ test("createDerivedDrawer rejects empty lineage (orphan synthesis is unrepresent
   assert.equal(calls.some((call) => call.name.endsWith("add_drawer")), false, "must not create a drawer without lineage");
 });
 
+test("kgAdd rejects self-loop for DAG predicates", async () => {
+  const { client, calls } = makeRecordingClient();
+
+  assert.throws(
+    () => client.kgAdd({ subject: "drawer-1", predicate: "synthesized-from", object: "drawer-1" }),
+    /kg_add rejected self-loop/,
+  );
+
+  assert.equal(calls.some((call) => call.name.endsWith("kg_add")), false, "must not call substrate on rejected self-loop");
+});
+
+test("kgAdd allows self-loop for non-DAG predicates", async () => {
+  const { client, calls } = makeRecordingClient();
+
+  await client.kgAdd({ subject: "drawer-1", predicate: "in-hall", object: "drawer-1" });
+
+  const kgAdds = calls.filter((call) => call.name.endsWith("kg_add"));
+  assert.equal(kgAdds.length, 1);
+  assert.equal(kgAdds[0].args.predicate, "in-hall");
+  assert.equal(kgAdds[0].args.subject, "drawer-1");
+  assert.equal(kgAdds[0].args.object, "drawer-1");
+});
+
+test("createDerivedDrawer rejects self source id without calling kg_add", async () => {
+  const { client, calls } = makeRecordingClient({
+    add_drawer: () => ({ drawer_id: "drawer-self" }),
+  });
+
+  const result = await client.createDerivedDrawer({
+    wing: "w",
+    room: "synthesis",
+    content: "c",
+    source_drawer_ids: ["drawer-self"],
+    desc: "d",
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.lineage_edges_added, 0);
+  assert.ok(result.lineage_errors.some((msg) => msg.includes("rejected: self-loop")));
+
+  const lineageKgAdds = calls.filter(
+    (call) => call.name.endsWith("kg_add") && (call.args.predicate === "synthesized-from" || call.args.predicate === "consolidated-into"),
+  );
+  assert.equal(lineageKgAdds.length, 0, "must not attempt lineage writes for self-loop source ids");
+});
+
 test("getClosetSourceType reads the stamped value and returns null when unstamped", async () => {
   const { client } = makeRecordingClient({
     kg_query: (args) => {
