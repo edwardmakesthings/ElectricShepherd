@@ -3,43 +3,14 @@
  *
  * Mirrors `src/surface/opencode/tool-adapter.ts`: same definitions from
  * `src/tools/index.ts`, bound to omp's `ExtensionAPI` instead of OpenCode's
- * `tool()`.
- *
- * The `pi` shape below is declared structurally rather than imported from
- * `@oh-my-pi/pi-coding-agent`. omp injects `pi` at runtime, and the package is a
- * large dependency with native addons; typing only what we call keeps Electric
- * Shepherd from depending on the harness it is being adapted to. Swap these for
- * the real `ExtensionAPI` / `ToolDefinition` types if that dependency is ever added.
+ * `tool()`. The `pi` shape it binds to is declared in `./api.ts`.
  */
 
-import type { EsToolDefinition, SchemaBuilder } from "../../tools/contract.ts";
+import type { EsToolDefinition } from "../../tools/contract.ts";
 import { ES_TOOLS } from "../../tools/index.ts";
+import type { OmpExtensionApi, OmpToolContext, OmpToolResult } from "./api.ts";
 
-interface OmpToolResult {
-  content: { type: "text"; text: string }[];
-}
-
-interface OmpToolContext {
-  cwd: string;
-  sessionManager?: { getSessionId?(): string | undefined };
-}
-
-export interface OmpExtensionApi {
-  zod: SchemaBuilder & { object(shape: Record<string, unknown>): unknown };
-  registerTool(definition: {
-    name: string;
-    label: string;
-    description: string;
-    parameters: unknown;
-    execute(
-      toolCallId: string,
-      params: Record<string, unknown>,
-      signal: AbortSignal | undefined,
-      onUpdate: unknown,
-      context: OmpToolContext,
-    ): Promise<OmpToolResult>;
-  }): void;
-}
+export type { OmpExtensionApi } from "./api.ts";
 
 /** Turn a snake_case tool name into the label omp shows in its UI. */
 function labelFor(name: string): string {

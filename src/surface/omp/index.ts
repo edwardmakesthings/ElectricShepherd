@@ -5,14 +5,21 @@
  * the bundled `agents/`, `commands/` and `skills/` beside it, so the asset
  * injection OpenCode needs (src/surface/asset-loader.ts) has no counterpart here.
  *
- * Tools only, for now. The policy hooks that OpenCode drives through
- * `src/surface/plugin/session-policy.ts` (config, event, tool.execute.before)
- * map onto omp's `session_start`, `message_end`/`turn_end`/`session_stop`/
- * `session_compact` and `tool_call` events, and are not wired yet.
+ * Wired so far: the tool surface, and `before_agent_start` context injection.
+ * Still unwired: `session_stop` (checkpoint + outcome recording),
+ * `session.compacting` (preserveData) and `tool_call` (approval, failure patches).
+ *
+ * Deliberately NOT ported: the loop guard, stall retry, task watchdog and
+ * compaction archive. omp implements all four natively
+ * (`model.toolCallLoopGuard.*`, `session/turn-recovery`, `task.maxConcurrency`,
+ * `CompactionEntry`), and running both layers double-fires their correctives.
  */
 
-import { registerEsTools, type OmpExtensionApi } from "./tool-adapter.ts";
+import type { OmpExtensionApi } from "./api.ts";
+import { registerContextInjection } from "./context-injection.ts";
+import { registerEsTools } from "./tool-adapter.ts";
 
 export default function electricShepherd(pi: OmpExtensionApi) {
   registerEsTools(pi);
+  registerContextInjection(pi);
 }
