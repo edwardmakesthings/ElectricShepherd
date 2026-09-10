@@ -15,9 +15,8 @@
 
 import { CHECKPOINT_PROMPT, MIN_TURNS_BEFORE_CHECKPOINT } from "../../policy/checkpoint-prompt.ts";
 import { endsMidIntent, hasUsefulPayload, isAssistantStop, type TurnMessage } from "../../policy/turn-quality.ts";
-import { getRuntimeConfigEnvMap, loadRuntimeConfig } from "../../core/runtime-config.ts";
-import { loadRuntimeEnv } from "../../scripts/runtime-env.ts";
 import type { OmpAgentMessage, OmpExtensionApi, OmpExtensionContext, OmpSessionStopEvent } from "./api.ts";
+import { isTrue, log, resolveEnv } from "./runtime.ts";
 
 /** Map an omp `AgentMessage` onto the neutral shape the turn-quality predicates read. */
 function toTurnMessage(message: OmpAgentMessage | undefined): TurnMessage | undefined {
@@ -38,11 +37,6 @@ function lastAssistant(messages: OmpAgentMessage[]): OmpAgentMessage | undefined
   return undefined;
 }
 
-function log(pi: OmpExtensionApi, message: string): void {
-  if (pi.logger) pi.logger.warn(`[electric-shepherd] ${message}`);
-  else console.warn(`[electric-shepherd] ${message}`);
-}
-
 export function registerCheckpoint(pi: OmpExtensionApi): void {
   const checkpointed = new Set<string>();
 
@@ -53,10 +47,8 @@ export function registerCheckpoint(pi: OmpExtensionApi): void {
     if (!sessionID || checkpointed.has(sessionID)) return;
 
     const cwd = ctx.cwd || process.cwd();
-    const env: Record<string, string | undefined> = { ...process.env };
-    loadRuntimeEnv({ scriptUrl: import.meta.url, env, cwd });
-    Object.assign(env, getRuntimeConfigEnvMap(loadRuntimeConfig({ cwd, env })));
-    if (String(env.ESHEPHERD_CHECKPOINT_ENABLED ?? "").trim().toLowerCase() !== "true") return;
+    const env = resolveEnv(cwd, import.meta.url);
+    if (!isTrue(env.ESHEPHERD_CHECKPOINT_ENABLED)) return;
 
     const messages = event.messages ?? [];
     const assistantTurns = messages.filter((message) => message?.role === "assistant").length;

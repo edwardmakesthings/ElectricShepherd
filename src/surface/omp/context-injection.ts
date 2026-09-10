@@ -20,15 +20,9 @@
  * reason rather than throwing into the agent loop.
  */
 
-import { loadMemcoreForDirectory } from "../../capability/memcore/mem-core-loader.ts";
 import { createMemgraphClient } from "../../core/memgraph.ts";
 import { resolveMCPHeadersFromEnv } from "../../core/mcp-transport.ts";
-import {
-  DEFAULT_MCP_TOOL_PREFIX,
-  DEFAULT_MCP_URL,
-  getRuntimeConfigEnvMap,
-  loadRuntimeConfig,
-} from "../../core/runtime-config.ts";
+import { DEFAULT_MCP_TOOL_PREFIX, DEFAULT_MCP_URL } from "../../core/runtime-config.ts";
 import { createSubstrateClient } from "../../core/substrate-client.ts";
 import {
   formatWorkedExampleDemonstration,
@@ -36,53 +30,12 @@ import {
   WORKED_EXAMPLE_MAX_INJECT,
   WORKED_EXAMPLE_RELEVANCE_FLOOR,
 } from "../../policy/retrieval.ts";
-import { loadRuntimeEnv } from "../../scripts/runtime-env.ts";
 import type { OmpBeforeAgentStartEvent, OmpExtensionApi, OmpExtensionContext } from "./api.ts";
-
-const MEMCORE_HEADING = "## Mem-core: durable state for this project";
-
-type Env = Record<string, string | undefined>;
-
-function isTrue(value: string | undefined): boolean {
-  return String(value ?? "").trim().toLowerCase() === "true";
-}
-
-function toNumber(value: string | undefined, fallback: number): number {
-  const parsed = Number(String(value ?? "").trim());
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-function toList(value: string | undefined): string[] {
-  return String(value ?? "")
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-}
-
-function warn(pi: OmpExtensionApi, message: string): void {
-  if (pi.logger) pi.logger.warn(`[electric-shepherd] ${message}`);
-  else console.warn(`[electric-shepherd] ${message}`);
-}
-
-/** Scoped memory.md files, broad scope to narrow, capped at the configured budget. */
-function buildMemcoreBlock(env: Env, cwd: string): string | undefined {
-  const loaded = loadMemcoreForDirectory({
-    startDir: cwd,
-    directFileName: env.ESHEPHERD_MEMCORE_DIRECT_FILE,
-    storeRoots: toList(env.ESHEPHERD_MEMCORE_STORE_ROOTS),
-    maxScopes: toNumber(env.ESHEPHERD_MEMCORE_MAX_SCOPES, 6),
-  });
-  const merged = loaded.mergedMarkdown.trim();
-  if (!merged) return undefined;
-
-  const maxChars = toNumber(env.ESHEPHERD_MEMCORE_MAX_CHARS, 12000);
-  const body = merged.length > maxChars ? `${merged.slice(0, maxChars)}\n\n[truncated]` : merged;
-  return `${MEMCORE_HEADING}\n\n${body}`;
-}
+import { buildMemcoreBlock, isTrue, log, resolveEnv, toNumber, type EsEnv } from "./runtime.ts";
 
 async function buildWorkedExampleBlock(
   pi: OmpExtensionApi,
-  env: Env,
+  env: EsEnv,
   prompt: string,
   timeoutMs: number,
 ): Promise<string | undefined> {
@@ -107,7 +60,7 @@ async function buildWorkedExampleBlock(
     relevanceFloor: WORKED_EXAMPLE_RELEVANCE_FLOOR,
   });
   if (examples.length === 0) return undefined;
-  warn(pi, `injecting ${examples.length} worked example(s) (top relevance ${examples[0].relevance.toFixed(2)})`);
+  log(pi, `injecting ${examples.length} worked example(s) (top relevance ${examples[0].relevance.toFixed(2)})`);
   return formatWorkedExampleDemonstration(examples).trim() || undefined;
 }
 
@@ -117,10 +70,7 @@ export function registerContextInjection(pi: OmpExtensionApi): void {
     if (!prompt) return;
 
     const cwd = ctx.cwd || process.cwd();
-    const env: Env = { ...process.env };
-    loadRuntimeEnv({ scriptUrl: import.meta.url, env, cwd });
-    const config = loadRuntimeConfig({ cwd, env });
-    Object.assign(env, getRuntimeConfigEnvMap(config));
+    const env = resolveEnv(cwd, import.meta.url);
 
     const blocks: string[] = [];
 
@@ -129,7 +79,7 @@ export function registerContextInjection(pi: OmpExtensionApi): void {
         const block = buildMemcoreBlock(env, cwd);
         if (block) blocks.push(block);
       } catch (err) {
-        warn(pi, `mem-core injection skipped: ${err instanceof Error ? err.message : String(err)}`);
+        log(pi, `mem-core injection skipped: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 
@@ -142,7 +92,7 @@ export function registerContextInjection(pi: OmpExtensionApi): void {
         ]);
         if (block) blocks.push(block);
       } catch (err) {
-        warn(pi, `worked-example injection skipped: ${err instanceof Error ? err.message : String(err)}`);
+        log(pi, `worked-example injection skipped: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 

@@ -71,6 +71,20 @@ export interface OmpSessionStopResult {
   additionalContext?: string;
 }
 
+/** Fired before the compaction summary is requested, with the messages being folded. */
+export interface OmpSessionCompactingEvent {
+  type: "session.compacting";
+  sessionId: string;
+  messages: OmpAgentMessage[];
+}
+
+/** `context` entries are appended to the summarization prompt; `prompt` would replace it. */
+export interface OmpSessionCompactingResult {
+  context?: string[];
+  prompt?: string;
+  preserveData?: Record<string, unknown>;
+}
+
 export interface OmpExtensionApi {
   zod: SchemaBuilder & { object(shape: Record<string, unknown>): unknown };
   logger?: { warn(message: string): void };
@@ -88,5 +102,12 @@ export interface OmpExtensionApi {
       event: OmpSessionStopEvent,
       ctx: OmpExtensionContext,
     ) => Promise<OmpSessionStopResult | void> | OmpSessionStopResult | void,
+  ): void;
+  on(
+    event: "session.compacting",
+    handler: (
+      event: OmpSessionCompactingEvent,
+      ctx: OmpExtensionContext,
+    ) => Promise<OmpSessionCompactingResult | void> | OmpSessionCompactingResult | void,
   ): void;
 }
