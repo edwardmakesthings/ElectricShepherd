@@ -61,6 +61,8 @@ export interface OmpSessionStopEvent {
   turn_id: number;
   last_assistant_message?: OmpAgentMessage;
   session_id: string;
+  /** Path to the append-only session JSONL; the verbatim transcript source. */
+  session_file?: string;
   /** True while a continuation issued by a previous stop handler is still settling. */
   stop_hook_active: boolean;
 }

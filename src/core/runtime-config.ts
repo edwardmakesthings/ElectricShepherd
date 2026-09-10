@@ -89,6 +89,7 @@ export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
   // pre-domain-filter behavior. Closed vocabulary — out-of-vocabulary values are
   // dropped (read as unclassified), matching the read side's tolerance.
   { envKey: "ESHEPHERD_PROJECT_DOMAIN", path: "memory.projectDomain", kind: "enum", defaultValue: "", allowedValues: ["code", "writing", "infra", "research", "general"] },
+  { envKey: "ESHEPHERD_SOURCE_CAPTURE_ENABLED", path: "sourceCapture.enabled", kind: "boolean", defaultValue: true },
   { envKey: "ESHEPHERD_SOURCE_CAPTURE_WING", path: "sourceCapture.wing", kind: "string", defaultValue: "opencode" },
   { envKey: "ESHEPHERD_SOURCE_CAPTURE_ROOM", path: "sourceCapture.room", kind: "string", defaultValue: "source-transcripts" },
   { envKey: "ESHEPHERD_SOURCE_CAPTURE_ADDED_BY", path: "sourceCapture.addedBy", kind: "string", defaultValue: "electric-shepherd-capture" },
