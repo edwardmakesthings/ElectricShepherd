@@ -81,6 +81,78 @@ export function parseEmbeddedJSON(text: string, accept: (value: unknown) => bool
   return undefined;
 }
 
+/**
+ * Parse the mapper's SECTION format into summaries.
+ *
+ * `agents/dream-mapper.md` specifies markdown sections (DURABLE_FACTS,
+ * DECISIONS, ...) while the task prompt asks for a JSON array. The agent's own
+ * system prompt wins, so a mapper that follows its definition emitted prose the
+ * JSON parser could not read — and the pipeline recorded that as every drawer
+ * failing. Accepting both shapes removes the contract mismatch as a failure mode
+ * regardless of which instruction the model follows.
+ */
+export function parseMapperSections(text: string, transcriptIds: readonly string[]): TranscriptInsightSummary[] {
+  const clean = text.replace(ANSI_ESCAPE_PATTERN, "");
+  const SECTIONS: Array<[keyof TranscriptInsightSummary, string]> = [
+    ["durableFacts", "DURABLE_FACTS"],
+    ["decisions", "DECISIONS"],
+    ["rootCausesAndWorkedExamples", "ROOT_CAUSES_AND_WORKED_EXAMPLES"],
+    ["subsystemsAndFiles", "SUBSYSTEMS_AND_FILES"],
+    ["openItems", "OPEN_ITEMS"],
+    ["deadEnds", "DEAD_ENDS"],
+  ];
+
+  // Headings appear as `**NAME**`, `## NAME`, or bare `NAME`, optionally colon-terminated.
+  // Both edges are tracked: content starts after a heading, but a section ends at
+  // the START of the next one, or the next heading's own text lands in the bullets.
+  const found = SECTIONS.map(([key, name]) => {
+    const match = new RegExp(`^[\\s>#*]*${name}\\s*:?[\\s*]*$`, "im").exec(clean);
+    return match
+      ? { key, start: match.index, contentStart: match.index + match[0].length }
+      : { key, start: -1, contentStart: -1 };
+  });
+  const headingStarts = found.filter((entry) => entry.start >= 0).map((entry) => entry.start);
+  if (headingStarts.length === 0) return [];
+
+  // The CONFIDENCE trailer terminates the last section; without it that section
+  // swallows the trailer as a bullet.
+  const confidenceMatch = /^[\s>#*]*CONFIDENCE\s*:?\s*\**\s*(high|medium|low)/im.exec(clean);
+  const boundaries = confidenceMatch ? [...headingStarts, confidenceMatch.index] : headingStarts;
+
+  const bulletsFor = (contentStart: number): string[] => {
+    if (contentStart < 0) return [];
+    const laterStarts = boundaries.filter((index) => index >= contentStart);
+    const end = laterStarts.length > 0 ? Math.min(...laterStarts) : clean.length;
+    return clean
+      .slice(contentStart, end)
+      .split("\n")
+      .map((line) => line.replace(/^[\s>]*[-*]\s+/, "").trim())
+      .filter((line) => line && !/^\**[A-Z_]{4,}\**\s*:?$/.test(line));
+  };
+
+  const sections = Object.fromEntries(
+    found.map((entry) => [entry.key, bulletsFor(entry.contentStart)]),
+  ) as Record<string, string[]>;
+
+  const confidence = (confidenceMatch?.[1]?.toLowerCase() ?? "medium") as "high" | "medium" | "low";
+
+  const populated = Object.values(sections).filter((list) => list.length > 0).length;
+  if (populated === 0) return [];
+
+  // One section set describes the whole batch; attribute it to every transcript
+  // the batch asked about so lineage still points at real sources.
+  return transcriptIds.filter(Boolean).map((transcriptId) => ({
+    transcriptId,
+    confidence,
+    durableFacts: sections.durableFacts,
+    decisions: sections.decisions,
+    rootCausesAndWorkedExamples: sections.rootCausesAndWorkedExamples,
+    subsystemsAndFiles: sections.subsystemsAndFiles,
+    openItems: sections.openItems,
+    deadEnds: sections.deadEnds,
+  }));
+}
+
 export function toSummaryFromRaw(raw: unknown): TranscriptInsightSummary[] {
   const out: TranscriptInsightSummary[] = [];
   const arr = asArray(raw);
@@ -131,6 +203,12 @@ export function toSummaryFromRaw(raw: unknown): TranscriptInsightSummary[] {
 export function buildIsolatedSubagentEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return {
     ...env,
+    // The OpenCode surface loads as a plugin inside `opencode run` and logs to
+    // stdout, which is the same channel the mapper answers on. Its banner and
+    // per-turn lines were landing in the parsed output. This flag makes the
+    // plugin no-op, which also stops a subagent pass re-entering capture and
+    // consolidation -- the guarantee `--no-extensions` gives on the omp side.
+    ESHEPHERD_SUBAGENT_RUN: "1",
     ESHEPHERD_MEMCORE_REINJECT_ENABLED: "false",
     ESHEPHERD_MEMCORE_REINJECT_ON_IDLE: "false",
     ESHEPHERD_MEMCORE_REINJECT_ON_START: "false",
@@ -373,6 +451,13 @@ export async function callSubagentMapper(args: {
         );
         return { summaries, raw: output, via: `${args.runner.kind}-run` as SubagentVia };
       }
+    }
+    const sectionSummaries = parseMapperSections(output, orderedIds);
+    if (sectionSummaries.length > 0) {
+      process.stderr.write(
+        `[memory-consolidation-validation] mapper ${args.runner.kind}-run done summaries=${sectionSummaries.length} format=sections durationMs=${Date.now() - startedAt}\n`,
+      );
+      return { summaries: sectionSummaries, raw: output, via: `${args.runner.kind}-run` as SubagentVia };
     }
     const debugPath = `${SUBAGENT_DEBUG_DIR}/mapper-${Date.now()}.txt`;
     try {

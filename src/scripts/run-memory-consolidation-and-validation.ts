@@ -383,7 +383,12 @@ async function main(): Promise<void> {
   );
   if (includeBasePipeline) {
     const worklistChunks = chunkItems(worklist, worklistOptions.batchSize);
-    const useLiveMapper = hasFlag(argv, "--use-live-mapper");
+    // The keyword fallback splits on sentences and lines, so a captured transcript
+    // -- one long single-line JSON blob -- yields too few populated sections to
+    // clear the confidence floor, and every drawer scores `low` and is dropped.
+    // The live mapper is therefore the default; --no-live-mapper keeps the
+    // heuristic path for plain-text drawers and offline runs.
+    const useLiveMapper = !hasFlag(argv, "--no-live-mapper");
     const movedToProcessed: Array<{ drawer_id: string; family_drawer_ids: string[]; reason: string }> = [];
     const movedToFailed: Array<{ drawer_id: string; family_drawer_ids: string[]; reason: string }> = [];
     const moveErrors: Array<{ drawer_id: string; phase: "processed" | "failed"; error: string }> = [];
@@ -500,6 +505,21 @@ async function main(): Promise<void> {
 
       const createdNodeId = asString(chunkConsolidation.createdNodeId).trim();
       if (!createdNodeId) {
+        // A mapper that never answered says nothing about these drawers -- they
+        // were not examined, so quarantining them records a data failure for a
+        // tooling one and hides them from every later run. Leave them where they
+        // are; the next pass with a working mapper picks them up.
+        if (useLiveMapper && chunkMapper?.via === "none") {
+          for (const item of actionable) {
+            allSkipped.push({ drawer_id: item.drawer_id, reason: "mapper-unavailable" });
+          }
+          process.stderr.write(
+            `[memory-consolidation-validation] chunk ${chunkIndex + 1}/${worklistChunks.length} left in place count=${actionable.length} reason=mapper-unavailable\n`,
+          );
+          flushRunProgress({ phase: "chunk-left-in-place-mapper-unavailable" });
+          continue;
+        }
+
         // No node is not automatically a failure. If the inflation guard refused
         // the draft, the transcript simply had nothing worth synthesizing: that
         // is a processed drawer with zero syntheses, and re-running it would

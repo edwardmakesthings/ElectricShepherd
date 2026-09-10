@@ -87,6 +87,11 @@ import { initSessionPolicyState } from "./session-policy/state.ts"
 const ESHEPHERD_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 
 export const TurnGuard = async ({ client, directory }: any) => {
+  // A mapper/auditor pass runs `opencode run`, which loads this plugin. Its
+  // logging shares stdout with the subagent's answer, and its hooks would
+  // re-enter capture/consolidation from inside a consolidation run. Stay out.
+  if (String(process.env.ESHEPHERD_SUBAGENT_RUN ?? "").trim() === "1") return {}
+
   const rootDirectory = normalizePathForHost(directory || process.cwd())
   const projectRoot = findProjectRoot(rootDirectory)
   const runtimeConfig = loadRuntimeConfig({
