@@ -94,6 +94,21 @@ export interface OmpSessionCompactEvent {
   fromExtension: boolean;
 }
 
+/** Fired at arg-prep time, before scheduling and before the approval gate. */
+export interface OmpToolCallEvent {
+  type: "tool_call";
+  toolCallId: string;
+  toolName: string;
+  input: Record<string, unknown>;
+}
+
+/** `input` replaces the arguments the tool runs with; ignored when `block` is set. */
+export interface OmpToolCallResult {
+  block?: boolean;
+  reason?: string;
+  input?: Record<string, unknown>;
+}
+
 export interface OmpExtensionApi {
   zod: SchemaBuilder & { object(shape: Record<string, unknown>): unknown };
   logger?: { warn(message: string): void };
@@ -122,5 +137,12 @@ export interface OmpExtensionApi {
   on(
     event: "session_compact",
     handler: (event: OmpSessionCompactEvent, ctx: OmpExtensionContext) => void,
+  ): void;
+  on(
+    event: "tool_call",
+    handler: (
+      event: OmpToolCallEvent,
+      ctx: OmpExtensionContext,
+    ) => Promise<OmpToolCallResult | void> | OmpToolCallResult | void,
   ): void;
 }

@@ -194,8 +194,8 @@ export const DEFAULT_SPIRAL_EXEMPT_PROVIDERS = ["github_copilot"]
 // In OpenCode, cloud calls often route through providerID="litellm" with the
 // concrete model in modelID (e.g. copilot-*). Exempt by model prefix too.
 export const DEFAULT_SPIRAL_EXEMPT_MODEL_PREFIXES = ["copilot-"]
-export const DEFAULT_ALLOWED_CONSOLIDATION_WRITERS = ["dreamer"]
-export const CONSOLIDATION_WRITE_TOOL_NAMES = ["add_drawer", "update_drawer", "kg_add", "kg_invalidate", "apply_merge"]
+// The synthesis boundary is shared policy, so both surfaces read one list.
+export { CONSOLIDATION_WRITE_TOOL_NAMES, DEFAULT_ALLOWED_CONSOLIDATION_WRITERS } from "../../../policy/synthesis-boundary.ts"
 
 // Automatic consolidation ("consolidate in the background"): OPT-IN. When enabled,
 // the plugin runs the deterministic consolidation script after the session has
