@@ -2,7 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { registerToolCallGuard } from "../../src/surface/omp/tool-call.ts";
-import { isConsolidationWriteTool } from "../../src/policy/synthesis-boundary.ts";
+import {
+  isAllowedConsolidationWriter,
+  isConsolidationWriteTool,
+} from "../../src/policy/synthesis-boundary.ts";
+
+const DREAMER_PROMPT = [
+  "# Dreamer",
+  "You are the Dreamer. You orchestrate memory consolidation over raw transcript drawers.",
+];
 
 function capture() {
   let handler;
@@ -65,6 +73,30 @@ test("omp tool_call passes through unrelated tools", () => {
   assert.equal(handler(call("read"), ctx), undefined);
   assert.equal(handler(call("mempalace-mempalace_search"), ctx), undefined);
   assert.equal(logs.length, 0);
+});
+
+// The dreamer builds derived nodes through exactly these tools, including
+// higher-height syntheses of syntheses. Blocking it would break /consolidate-deep.
+test("omp tool_call lets the dreamer through", () => {
+  const { handler, logs } = capture();
+  const result = handler(call("mempalace-mempalace_add_drawer"), {
+    cwd: process.cwd(),
+    getSystemPrompt: () => DREAMER_PROMPT,
+  });
+
+  assert.equal(result, undefined);
+  assert.equal(logs.length, 0);
+});
+
+// Matching the identity sentence, not a keyword, so a transcript that merely
+// discusses the dreamer cannot unlock the boundary.
+test("writer exemption needs the agent's identity sentence", () => {
+  assert.equal(isAllowedConsolidationWriter(DREAMER_PROMPT), true);
+  assert.equal(isAllowedConsolidationWriter(["You are dreamer."]), true);
+  assert.equal(isAllowedConsolidationWriter([]), false);
+  assert.equal(isAllowedConsolidationWriter(["The dreamer consolidates memory."]), false);
+  assert.equal(isAllowedConsolidationWriter(["We discussed the Dreamer agent earlier."]), false);
+  assert.equal(isAllowedConsolidationWriter(["You are dream-auditor."]), false);
 });
 
 // The boundary is an invariant with no off switch, so in particular an inherited

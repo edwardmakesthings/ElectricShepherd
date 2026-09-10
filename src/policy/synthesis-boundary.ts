@@ -25,6 +25,31 @@ export const CONSOLIDATION_WRITE_TOOL_NAMES = [
 /** Agents permitted to cross the boundary. */
 export const DEFAULT_ALLOWED_CONSOLIDATION_WRITERS = ["dreamer"];
 
+/**
+ * Identify an allowed writer from the active system prompt.
+ *
+ * The dreamer creates derived nodes through the model's tool surface by design —
+ * `add_drawer` then `kg_add` for the `synthesized-from` edge — and that is also
+ * how higher-height syntheses (syntheses of syntheses) get built. Blocking it
+ * would break `/consolidate-deep`.
+ *
+ * omp's `tool_call` event carries no agent identity, and its session manager
+ * does not expose the active agent, so the system prompt is the only signal
+ * available. Matching is on the agent's identity sentence rather than a loose
+ * keyword, so a transcript that merely discusses the dreamer cannot unlock it.
+ */
+export function isAllowedConsolidationWriter(
+  systemPrompt: readonly string[],
+  allowed: readonly string[] = DEFAULT_ALLOWED_CONSOLIDATION_WRITERS,
+): boolean {
+  const text = systemPrompt.join("\n").toLowerCase();
+  return allowed.some((name) => {
+    const agent = name.trim().toLowerCase();
+    if (!agent) return false;
+    return text.includes(`you are the ${agent}.`) || text.includes(`you are ${agent}.`);
+  });
+}
+
 /** True when a tool name is a derived-memory write, whatever gateway prefix it carries. */
 export function isConsolidationWriteTool(toolName: string): boolean {
   const normalized = String(toolName || "").trim().toLowerCase();

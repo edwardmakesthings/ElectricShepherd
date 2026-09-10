@@ -74,7 +74,15 @@ function launch(pi: OmpExtensionApi, env: EsEnv, projectRoot: string, sessionID:
       // detached and unref'd: the lock, not the parent, bounds it.
       detached: true,
       stdio: "ignore",
-      env: { ...process.env, ...env, ESHEPHERD_CONSOLIDATION_TRIGGER: trigger, ESHEPHERD_CONSOLIDATION_SESSION: sessionID },
+      env: {
+        ...process.env,
+        ...env,
+        // Keep the harnesses independent: an omp session must not drive its
+        // mapper through opencode just because that binary resolves first.
+        ESHEPHERD_SUBAGENT_BIN: env.ESHEPHERD_SUBAGENT_BIN || process.execPath,
+        ESHEPHERD_CONSOLIDATION_TRIGGER: trigger,
+        ESHEPHERD_CONSOLIDATION_SESSION: sessionID,
+      },
     },
   );
   child.unref();

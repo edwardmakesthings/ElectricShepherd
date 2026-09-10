@@ -15,23 +15,21 @@
  * (`model.toolCallLoopGuard.*`, `task.maxConcurrency`), so re-adding them here
  * would double-fire their correctives.
  *
- * `ToolCallEvent` carries no agent identity, so the allowed-writers list cannot
- * be applied per-caller here. Anything reaching this hook is a session agent by
- * construction — the pipeline calls the substrate over MCP from its own script,
- * never through the model's tool surface, and so do Electric Shepherd's own
- * tools. There is deliberately no off switch: an env-settable one could be
- * cleared by any inherited environment, and a config-settable one would be an
- * escape hatch on an invariant the checkpoint prompt already states as a rule.
+ * The dreamer is exempt — it builds derived nodes, including higher-height
+ * syntheses of syntheses, through exactly these tools. `ToolCallEvent` carries
+ * no agent identity and omp's session manager does not expose the active agent,
+ * so the exemption is recognised from the system prompt.
  */
 
-import { consolidationWriteRefusal, isConsolidationWriteTool } from "../../policy/synthesis-boundary.ts";
+import { isAllowedConsolidationWriter, consolidationWriteRefusal, isConsolidationWriteTool } from "../../policy/synthesis-boundary.ts";
 import type { OmpExtensionApi, OmpExtensionContext, OmpToolCallEvent } from "./api.ts";
 import { log } from "./runtime.ts";
 
 export function registerToolCallGuard(pi: OmpExtensionApi): void {
-  pi.on("tool_call", (event: OmpToolCallEvent, _ctx: OmpExtensionContext) => {
+  pi.on("tool_call", (event: OmpToolCallEvent, ctx: OmpExtensionContext) => {
     const toolName = String(event.toolName || "").trim();
     if (!isConsolidationWriteTool(toolName)) return;
+    if (isAllowedConsolidationWriter(ctx.getSystemPrompt?.() ?? [])) return;
 
     log(pi, `synthesis boundary: blocked ${toolName}`);
     return { block: true, reason: consolidationWriteRefusal(toolName) };

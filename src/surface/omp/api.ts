@@ -17,6 +17,8 @@ export interface OmpToolResult {
 export interface OmpExtensionContext {
   cwd: string;
   sessionManager?: { getSessionId?(): string | undefined };
+  /** The turn's effective system prompt; the only signal of which agent is active. */
+  getSystemPrompt?(): string[];
 }
 
 export interface OmpToolContext extends OmpExtensionContext {}
