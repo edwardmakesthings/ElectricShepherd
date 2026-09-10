@@ -356,25 +356,16 @@ export function classifyMemoryTools(toolNames: string[]): { reads: string[]; wri
 }
 
 
-export function getText(parts: any[]): string {
-  return parts
-    .filter((p) => p?.type === "text" && typeof p?.text === "string")
-    .map((p) => p.text)
-    .join("\n")
-    .trim()
-}
-
-export function hasUsefulPayload(msg: MessageWithParts): boolean {
-  const parts = msg.parts ?? []
-  const text = getText(parts)
-  if (text.length >= MIN_USEFUL_TEXT) return true
-  // Short but still useful status/blocker responses should not trigger retries.
-  if (/no files found|not found|blocked|error|unable|cannot|next step|i will/i.test(text)) return true
-  if (text.length >= 8) return true
-  if (parts.some((p) => p?.type === "patch")) return true
-  if (parts.some((p) => p?.type === "file")) return true
-  return false
-}
+// The turn-quality predicates moved to policy/turn-quality.ts so the omp surface
+// can reach them without importing the OpenCode adapter. Re-exported here so this
+// module's existing importers keep working unchanged.
+export {
+  endsMidIntent,
+  getText,
+  hasActionPart,
+  hasUsefulPayload,
+  isAssistantStop,
+} from "../../../policy/turn-quality.ts"
 
 export function hasFinalReviewSignal(msg: MessageWithParts): boolean {
   const text = getText(msg.parts ?? []).toLowerCase()
@@ -382,39 +373,10 @@ export function hasFinalReviewSignal(msg: MessageWithParts): boolean {
   return /review|summary|what i did|what changed|result|blocker|next step|next action/.test(text)
 }
 
-export function hasActionPart(msg: MessageWithParts | null | undefined): boolean {
-  const parts = msg?.parts ?? []
-  return parts.some((p: any) => {
-    const type = String(p?.type ?? "")
-    return type === "tool" || type === "patch" || type === "file" || type === "subtask"
-  })
-}
-
 export function isCapabilityQuestion(text: string): boolean {
   const normalized = String(text || "").trim().toLowerCase()
   if (!normalized || !normalized.includes("?")) return false
   return /^(are you able|can you|could you|are you capable|do you have|are you able to)\b/.test(normalized)
-}
-
-// Mode B premature stop: the model announced an action (or trailed off on a
-// colon) but emitted finish=stop with no tool/patch/file part executing it.
-// e.g. "Now let me verify the delete button in the Control Panel:" then nothing.
-export function endsMidIntent(msg: MessageWithParts): boolean {
-  const parts = msg.parts ?? []
-  if (hasActionPart(msg)) return false
-  const text = getText(parts).trim()
-  if (!text) return false
-  const lastLine = (text.split(/\n/).pop() ?? "").trim()
-  const danglingColon = /[:\uFF1A]\s*$/.test(text)
-  const announcesAction =
-    /\b(let me|let's|now (?:i|we)|i'?ll|i will|i'm going to|going to|next,?\s+i|then i|first,? i|i need to|i'?m going to|let me now)\b/i.test(
-      lastLine,
-    )
-  return danglingColon || announcesAction
-}
-
-export function isAssistantStop(msg: MessageWithParts): boolean {
-  return msg?.info?.role === "assistant" && msg?.info?.finish === "stop"
 }
 
 export function isAssistantToolCallFinish(msg: MessageWithParts): boolean {
