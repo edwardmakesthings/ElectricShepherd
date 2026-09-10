@@ -3,17 +3,23 @@
  * Extracted from run-memory-consolidation-and-validation.ts (criterion 2).
  */
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { drawerContentFrom, scratchFileNameFor } from "../../core/palace-tools.ts";
 import type { TranscriptInsightSummary } from "../../capability/episodic/synthesis-consolidation.ts";
 import { asObject, asArray, asString, parsePositiveInt } from "./cli-options.ts";
 import type { PromptModelRouting } from "./runtime-utils.ts";
 
+/** Which CLI drives a one-shot subagent, and the absolute binary to invoke. */
+export type SubagentRunner = { kind: "opencode" | "omp"; bin: string };
+
+export type SubagentVia = "opencode-run" | "omp-run" | "none";
+
 export type MapperEnvelope = {
   summaries: TranscriptInsightSummary[];
   raw: unknown;
-  via: "opencode-run" | "none";
+  via: SubagentVia;
 };
 
 export type AuditorEnvelope = {
@@ -21,7 +27,7 @@ export type AuditorEnvelope = {
   findings: string[];
   recommendedActions: string[];
   raw: unknown;
-  via: "opencode-run" | "none";
+  via: SubagentVia;
 };
 
 export type { PromptModelRouting } from "./runtime-utils.ts";
@@ -135,21 +141,95 @@ export function buildIsolatedSubagentEnv(env: NodeJS.ProcessEnv): NodeJS.Process
   };
 }
 
-export function runSubagentViaOpenCode(args: {
-  opencodeBin: string;
+/** Candidate install locations, checked when the binary is not on PATH. */
+const WELL_KNOWN_BINS: ReadonlyArray<{ kind: "opencode" | "omp"; relative: string }> = [
+  { kind: "opencode", relative: ".opencode/bin/opencode" },
+  { kind: "omp", relative: ".local/bin/omp" },
+];
+
+function kindForBin(bin: string): "opencode" | "omp" {
+  return /(^|[^a-z])omp(\.[a-z]+)?$/i.test(basename(bin)) ? "omp" : "opencode";
+}
+
+function findOnPath(name: string, env: Record<string, string | undefined>): string | undefined {
+  for (const dir of String(env.PATH || "").split(process.platform === "win32" ? ";" : ":")) {
+    if (!dir) continue;
+    const candidate = join(dir, name);
+    if (existsSync(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+/**
+ * Resolve the CLI that runs mapper/auditor passes.
+ *
+ * Bare `execFileSync("opencode", ...)` was ENOENT for every caller that did not
+ * inherit a LOGIN shell's PATH — the systemd service, a detached spawn, cron —
+ * which surfaced as a mapper that returned nothing and quarantined every
+ * transcript as `no-created-node` rather than as a missing-binary error. So the
+ * binary is resolved to an absolute path here, falling back to the well-known
+ * install locations that a non-login PATH omits.
+ */
+export function resolveSubagentRunner(args: {
+  explicitBin?: string;
+  env: Record<string, string | undefined>;
+  home?: string;
+}): SubagentRunner | undefined {
+  const explicit = String(args.explicitBin || args.env.ESHEPHERD_SUBAGENT_BIN || "").trim();
+  if (explicit) return { kind: kindForBin(explicit), bin: explicit };
+
+  const home = args.home || homedir();
+  for (const { kind, relative } of WELL_KNOWN_BINS) {
+    const onPath = findOnPath(kind, args.env);
+    if (onPath) return { kind, bin: onPath };
+    const installed = join(home, relative);
+    if (existsSync(installed)) return { kind, bin: installed };
+  }
+  return undefined;
+}
+
+/** Strip YAML frontmatter so an agent definition can be appended as a system prompt. */
+export function stripFrontmatter(markdown: string): string {
+  const match = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/.exec(markdown);
+  return (match ? markdown.slice(match[0].length) : markdown).trim();
+}
+
+function ompAgentPromptFile(agentName: string, esRoot: string): string | undefined {
+  const source = join(esRoot, "agents", `${agentName}.md`);
+  if (!existsSync(source)) return undefined;
+  const dir = mkdtempSync(join(tmpdir(), "eshepherd-agent-"));
+  const target = join(dir, `${agentName}.md`);
+  writeFileSync(target, stripFrontmatter(readFileSync(source, "utf8")), "utf8");
+  return target;
+}
+
+export function runSubagent(args: {
+  runner: SubagentRunner;
   agentName?: string;
   modelArg?: string;
   prompt: string;
   timeoutMs: number;
+  esRoot?: string;
 }): string {
-  const commandArgs = ["run", args.prompt];
-  if (args.agentName) {
-    commandArgs.push("--agent", args.agentName);
+  const commandArgs: string[] =
+    args.runner.kind === "omp"
+      ? // omp has no --agent for a top-level run (agents are `task` subagents), so
+        // the agent definition rides in as an appended system prompt. Extensions
+        // are disabled so a subagent pass cannot re-enter Electric Shepherd and
+        // recursively trigger capture/consolidation.
+        ["-p", args.prompt, "--no-session", "--no-extensions", "--no-title", "--auto-approve"]
+      : ["run", args.prompt];
+
+  if (args.runner.kind === "omp") {
+    const promptFile = args.agentName && args.esRoot ? ompAgentPromptFile(args.agentName, args.esRoot) : undefined;
+    if (promptFile) commandArgs.push(`--append-system-prompt=${promptFile}`);
+    if (args.modelArg) commandArgs.push("--model", args.modelArg.replace(",", "/"));
+  } else {
+    if (args.agentName) commandArgs.push("--agent", args.agentName);
+    if (args.modelArg) commandArgs.push("--model", args.modelArg);
   }
-  if (args.modelArg) {
-    commandArgs.push("--model", args.modelArg);
-  }
-  return execFileSync(args.opencodeBin, commandArgs, {
+
+  return execFileSync(args.runner.bin, commandArgs, {
     encoding: "utf8",
     timeout: args.timeoutMs,
     maxBuffer: 2 * 1024 * 1024,
@@ -236,7 +316,8 @@ export async function callSubagentMapper(args: {
   wing: string;
   room: string;
   worklistIds: string[];
-  opencodeBin: string;
+  runner: SubagentRunner;
+  esRoot?: string;
   timeoutMs: number;
 }): Promise<MapperEnvelope> {
   const getDrawerTool = `${args.toolPrefix}get_drawer`;
@@ -273,10 +354,11 @@ export async function callSubagentMapper(args: {
   try {
     const startedAt = Date.now();
     process.stderr.write(
-      `[memory-consolidation-validation] mapper opencode-run start agent=${args.mapperAgentName} timeoutMs=${args.timeoutMs}\n`,
+      `[memory-consolidation-validation] mapper ${args.runner.kind}-run start agent=${args.mapperAgentName} bin=${args.runner.bin} timeoutMs=${args.timeoutMs}\n`,
     );
-    const output = runSubagentViaOpenCode({
-      opencodeBin: args.opencodeBin,
+    const output = runSubagent({
+      runner: args.runner,
+      esRoot: args.esRoot,
       agentName: args.mapperAgentName,
       modelArg: formatPromptModelArg(args.activeModel),
       prompt: taskPrompt,
@@ -287,9 +369,9 @@ export async function callSubagentMapper(args: {
       const summaries = toSummaryFromRaw(parsedJSON);
       if (summaries.length > 0) {
         process.stderr.write(
-          `[memory-consolidation-validation] mapper opencode-run done summaries=${summaries.length} durationMs=${Date.now() - startedAt}\n`,
+          `[memory-consolidation-validation] mapper ${args.runner.kind}-run done summaries=${summaries.length} durationMs=${Date.now() - startedAt}\n`,
         );
-        return { summaries, raw: output, via: "opencode-run" };
+        return { summaries, raw: output, via: `${args.runner.kind}-run` as SubagentVia };
       }
     }
     const debugPath = `${SUBAGENT_DEBUG_DIR}/mapper-${Date.now()}.txt`;
@@ -304,7 +386,7 @@ export async function callSubagentMapper(args: {
     }
   } catch (err) {
     process.stderr.write(
-      `[memory-consolidation-validation] mapper opencode-run failed err=${String(err)}\n`,
+      `[memory-consolidation-validation] mapper ${args.runner.kind}-run failed err=${String(err)}\n`,
     );
   }
 
@@ -318,7 +400,8 @@ export async function callSubagentAuditor(args: {
   activeModel?: PromptModelRouting;
   consolidationResult: unknown;
   validationResult: unknown;
-  opencodeBin: string;
+  runner: SubagentRunner;
+  esRoot?: string;
   timeoutMs: number;
 }): Promise<AuditorEnvelope> {
   const taskPrompt = [
@@ -338,10 +421,11 @@ export async function callSubagentAuditor(args: {
   try {
     const startedAt = Date.now();
     process.stderr.write(
-      `[memory-consolidation-validation] auditor opencode-run start agent=${args.auditorAgentName} timeoutMs=${args.timeoutMs}\n`,
+      `[memory-consolidation-validation] auditor ${args.runner.kind}-run start agent=${args.auditorAgentName} bin=${args.runner.bin} timeoutMs=${args.timeoutMs}\n`,
     );
-    const output = runSubagentViaOpenCode({
-      opencodeBin: args.opencodeBin,
+    const output = runSubagent({
+      runner: args.runner,
+      esRoot: args.esRoot,
       agentName: args.auditorAgentName,
       modelArg: formatPromptModelArg(args.activeModel),
       prompt: taskPrompt,
@@ -363,13 +447,13 @@ export async function callSubagentAuditor(args: {
         .map((v) => asString(v))
         .filter(Boolean);
       process.stderr.write(
-        `[memory-consolidation-validation] auditor opencode-run done verdict=${verdict} findings=${findings.length} durationMs=${Date.now() - startedAt}\n`,
+        `[memory-consolidation-validation] auditor ${args.runner.kind}-run done verdict=${verdict} findings=${findings.length} durationMs=${Date.now() - startedAt}\n`,
       );
-      return { verdict, findings, recommendedActions, raw: output, via: "opencode-run" };
+      return { verdict, findings, recommendedActions, raw: output, via: `${args.runner.kind}-run` as SubagentVia };
     }
   } catch (err) {
     process.stderr.write(
-      `[memory-consolidation-validation] auditor opencode-run failed err=${String(err)}\n`,
+      `[memory-consolidation-validation] auditor ${args.runner.kind}-run failed err=${String(err)}\n`,
     );
   }
 

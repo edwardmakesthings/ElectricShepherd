@@ -1,3 +1,5 @@
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createMemgraphClient, type SourceDrawerWorkItem } from "../core/memgraph.ts";
 // Substrate transport is constructed ONLY through the core/ seam (Check A2).
 import { createSubstrateClient } from "../core/substrate-client.ts";
@@ -27,7 +29,7 @@ import {
   type CadenceState,
 } from "./memory-pipeline/cli-options.ts";
 import {
-  callSubagentMapper, callSubagentAuditor, resolveSubagentTimeoutMs,
+  callSubagentMapper, callSubagentAuditor, resolveSubagentTimeoutMs, resolveSubagentRunner,
   type MapperEnvelope, type AuditorEnvelope,
 } from "./memory-pipeline/subagent.ts";
 import {
@@ -299,7 +301,19 @@ async function main(): Promise<void> {
 
   const runCadence = hasFlag(argv, "--run-cadence");
   const includeBasePipeline = !runCadence || hasFlag(argv, "--include-base-pipeline");
-  const opencodeBin = getArg(argv, "--opencode-bin") || "opencode";
+  // --opencode-bin is kept as the legacy spelling of --subagent-bin.
+  const explicitSubagentBin = getArg(argv, "--subagent-bin") || getArg(argv, "--opencode-bin") || undefined;
+  const subagentRunner = resolveSubagentRunner({ explicitBin: explicitSubagentBin, env: process.env });
+  const esRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+  if (!subagentRunner) {
+    // Named degradation: without a runner every mapper pass would return nothing
+    // and quarantine its whole worklist as `no-created-node`, which reads as a
+    // data problem rather than a missing binary. Say so once, plainly.
+    process.stderr.write(
+      "[memory-consolidation-validation] no subagent CLI found (looked for opencode/omp on PATH, then ~/.opencode/bin and ~/.local/bin). " +
+        "Set --subagent-bin or ESHEPHERD_SUBAGENT_BIN.\n",
+    );
+  }
   flushRunProgress({ phase: "discovering-worklist" });
 
   let mapper: MapperEnvelope | undefined;
@@ -453,7 +467,8 @@ async function main(): Promise<void> {
           wing: consolidationOptions.targetWing,
           room: worklistOptions.retryFailedOnly ? worklistOptions.failedRoom : worklistOptions.sourceRoom,
           worklistIds: actionable.map((item) => item.drawer_id),
-          opencodeBin,
+          runner: subagentRunner!,
+          esRoot,
           timeoutMs: subagentTimeoutMs,
         });
         mapperBatches.push(chunkMapper);
@@ -571,7 +586,8 @@ async function main(): Promise<void> {
       activeModel: activeRouting.model,
       consolidationResult: consolidation,
       validationResult: validationMergeReview,
-      opencodeBin,
+      runner: subagentRunner!,
+      esRoot,
       timeoutMs: subagentTimeoutMs,
     });
   }
