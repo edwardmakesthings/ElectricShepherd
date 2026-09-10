@@ -229,4 +229,10 @@ eshepherd-config.jsonc
 node_modules/
 .serena/
 .ast-cache/
+
+# Staged into the omp extension root by `npm run omp:assets`; canonical copies
+# live at the repo root.
+/src/surface/omp/commands/
+/src/surface/omp/agents/
+/src/surface/omp/skills/
 .opencode/
