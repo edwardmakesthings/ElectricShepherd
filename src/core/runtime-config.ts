@@ -26,6 +26,8 @@ export type LoadedRuntimeConfig = {
   configPath?: string
   valuesByPath: Record<string, any>
   warnings: string[]
+  /** Spec paths the config FILE spoke to — distinct from paths holding a default. */
+  configuredPaths: string[]
 }
 
 const DEFAULT_LOOP_MUTATION_TOOLS = [
@@ -464,6 +466,7 @@ export function loadRuntimeConfig(args: {
     configPath: pathResult.path,
     valuesByPath,
     warnings,
+    configuredPaths: [...configuredPaths],
   }
 }
 
@@ -491,9 +494,19 @@ export function getRuntimeConfigValueByPath(config: LoadedRuntimeConfig, path: s
   return raw
 }
 
+/**
+ * Project the config file's EXPLICIT values into env, for the substrate seam and
+ * child processes that still resolve from env (endpoint URL, tool prefix, auth
+ * header). Paths the file did not speak to are left alone, so env-only inputs
+ * (secrets, .env fallbacks) are never clobbered by a spec default.
+ */
 export function applyRuntimeConfigToEnv(env: RuntimeEnv, config: LoadedRuntimeConfig): void {
-  void env
-  void config
+  const configured = new Set(config.configuredPaths ?? [])
+  for (const spec of RUNTIME_CONFIG_SPECS) {
+    if (!configured.has(spec.path)) continue
+    const value = getRuntimeConfigValueByEnvKey(config, spec.envKey)
+    if (typeof value === "string") env[spec.envKey] = value
+  }
 }
 
 export function listRuntimeConfigEnvKeys(): string[] {
