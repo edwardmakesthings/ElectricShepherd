@@ -40,7 +40,11 @@ export function isTrue(value: string | undefined): boolean {
 }
 
 export function toNumber(value: string | undefined, fallback: number): number {
-  const parsed = Number(String(value ?? "").trim());
+  // `Number("")` is 0 and finite, so an unset key would otherwise read as zero —
+  // which silently disables timeouts and budgets instead of using their default.
+  const raw = String(value ?? "").trim();
+  if (!raw) return fallback;
+  const parsed = Number(raw);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 

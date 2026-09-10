@@ -85,6 +85,13 @@ export interface OmpSessionCompactingResult {
   preserveData?: Record<string, unknown>;
 }
 
+/** Fired after a fold lands. `firstKeptEntryId` is the boundary it folded up to. */
+export interface OmpSessionCompactEvent {
+  type: "session_compact";
+  compactionEntry?: { firstKeptEntryId?: string; preserveData?: Record<string, unknown> };
+  fromExtension: boolean;
+}
+
 export interface OmpExtensionApi {
   zod: SchemaBuilder & { object(shape: Record<string, unknown>): unknown };
   logger?: { warn(message: string): void };
@@ -109,5 +116,9 @@ export interface OmpExtensionApi {
       event: OmpSessionCompactingEvent,
       ctx: OmpExtensionContext,
     ) => Promise<OmpSessionCompactingResult | void> | OmpSessionCompactingResult | void,
+  ): void;
+  on(
+    event: "session_compact",
+    handler: (event: OmpSessionCompactEvent, ctx: OmpExtensionContext) => void,
   ): void;
 }
