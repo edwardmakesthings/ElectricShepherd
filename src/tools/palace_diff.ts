@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "./contract.ts";
 import {
   asObject,
   createPalaceClient,
@@ -15,28 +15,28 @@ declare const process: {
   env: Record<string, string | undefined>;
 };
 
-export default tool({
+export default defineTool({
+  name: "palace_diff",
   description:
     "Compare a recent time window against the one immediately before it, per room, and report what changed: new drawers, growth or silence, new sources, and how much of the new material is still unconsolidated. Answers 'what has my memory picked up lately?' without loading drawer content.",
-  args: {
-    wing: tool.schema.string().optional().describe("Wing to diff. Defaults to this project's wing."),
-    room: tool.schema.string().optional().describe("Restrict the diff to one room."),
-    since: tool.schema
+  args: (s) => ({
+    wing: s.string().optional().describe("Wing to diff. Defaults to this project's wing."),
+    room: s.string().optional().describe("Restrict the diff to one room."),
+    since: s
       .string()
       .optional()
       .describe("Start of the current window: relative (7d, 24h, 2w, 1m) or an ISO date. Default 7d."),
-    until: tool.schema.string().optional().describe("End of the current window (ISO). Defaults to now."),
-    max_rooms: tool.schema.number().optional().describe("Maximum rooms to compare (default 8)."),
-    sample_limit: tool.schema.number().optional().describe("Sample previews of new drawers per room (default 3)."),
-    preview_chars: tool.schema.number().optional().describe("Characters per preview (default 140)."),
-    check_consolidation: tool.schema
+    until: s.string().optional().describe("End of the current window (ISO). Defaults to now."),
+    max_rooms: s.number().optional().describe("Maximum rooms to compare (default 8)."),
+    sample_limit: s.number().optional().describe("Sample previews of new drawers per room (default 3)."),
+    preview_chars: s.number().optional().describe("Characters per preview (default 140)."),
+    check_consolidation: s
       .boolean()
       .optional()
       .describe("Check consolidated-into edges on the new drawers (default true)."),
-    tool_prefix: tool.schema.string().optional().describe("MCP tool prefix override."),
-  },
-  async execute(args, context) {
-    const cwd = context.worktree || context.directory;
+    tool_prefix: s.string().optional().describe("MCP tool prefix override."),
+  }),
+  async execute(args, { cwd }) {
     loadRuntimeEnv({ scriptUrl: import.meta.url, env: process.env, cwd });
     const runtimeConfig = loadRuntimeConfig({ cwd, env: process.env });
     applyRuntimeConfigToEnv(process.env, runtimeConfig);

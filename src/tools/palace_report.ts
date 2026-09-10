@@ -1,4 +1,3 @@
-import { tool } from "@opencode-ai/plugin";
 import {
   asObject,
   asText,
@@ -9,6 +8,7 @@ import {
   parseTaxonomy,
   summarizeDrawerRows,
 } from "../core/palace-tools.ts";
+import { defineTool } from "./contract.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../core/runtime-config.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
 
@@ -18,30 +18,30 @@ declare const process: {
 
 const MAX_PAGE_LIMIT = 100;
 
-export default tool({
+export default defineTool({
+  name: "palace_report",
   description:
     "Survey MemPalace and return a compact digest instead of raw content. With no arguments it reports every wing and its rooms; with a wing it reports that wing's rooms; with wing+room it pages the room and reports counts, date range, sources, sample previews, and how many drawers are still unconsolidated. Use this to answer 'what is actually in my memory?' without pulling drawer contents into context.",
-  args: {
-    wing: tool.schema.string().optional().describe("Wing to inspect. Omit for a palace-wide overview."),
-    room: tool.schema.string().optional().describe("Room to inspect. Requires wing."),
-    since: tool.schema.string().optional().describe("Only drawers filed on/after this ISO date (inclusive)."),
-    before: tool.schema.string().optional().describe("Only drawers filed before this ISO date (exclusive)."),
-    sample_limit: tool.schema.number().optional().describe("How many drawer previews to return (default 8, max 50)."),
-    preview_chars: tool.schema.number().optional().describe("Characters per preview (default 160)."),
-    page_limit: tool.schema.number().optional().describe("Drawers per page request (default 50, max 100)."),
-    max_pages: tool.schema.number().optional().describe("Maximum pages to walk (default 4)."),
-    check_consolidation: tool.schema
+  args: (s) => ({
+    wing: s.string().optional().describe("Wing to inspect. Omit for a palace-wide overview."),
+    room: s.string().optional().describe("Room to inspect. Requires wing."),
+    since: s.string().optional().describe("Only drawers filed on/after this ISO date (inclusive)."),
+    before: s.string().optional().describe("Only drawers filed before this ISO date (exclusive)."),
+    sample_limit: s.number().optional().describe("How many drawer previews to return (default 8, max 50)."),
+    preview_chars: s.number().optional().describe("Characters per preview (default 160)."),
+    page_limit: s.number().optional().describe("Drawers per page request (default 50, max 100)."),
+    max_pages: s.number().optional().describe("Maximum pages to walk (default 4)."),
+    check_consolidation: s
       .boolean()
       .optional()
       .describe("Check consolidated-into edges to count pending vs consumed drawers (default true)."),
-    consolidation_sample: tool.schema
+    consolidation_sample: s
       .number()
       .optional()
       .describe("How many drawers to check for consolidation edges (default 25)."),
-    tool_prefix: tool.schema.string().optional().describe("MCP tool prefix override (example: mygateway_<prefix>)."),
-  },
-  async execute(args, context) {
-    const cwd = context.worktree || context.directory;
+    tool_prefix: s.string().optional().describe("MCP tool prefix override (example: mygateway_<prefix>)."),
+  }),
+  async execute(args, { cwd }) {
     loadRuntimeEnv({ scriptUrl: import.meta.url, env: process.env, cwd });
     const runtimeConfig = loadRuntimeConfig({ cwd, env: process.env });
     applyRuntimeConfigToEnv(process.env, runtimeConfig);

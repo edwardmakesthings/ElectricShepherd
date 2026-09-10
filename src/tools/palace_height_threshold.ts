@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "./contract.ts";
 import { asObject, createPalaceClient, parseRows } from "../core/palace-tools.ts";
 import { collectDrawerIDsByScope } from "../core/substrate.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../core/runtime-config.ts";
@@ -8,20 +8,20 @@ declare const process: {
   env: Record<string, string | undefined>;
 };
 
-export default tool({
+export default defineTool({
+  name: "palace_height_threshold",
   description:
     "Return drawers whose synthesis DAG height is at least min_height. Can scope by wing, room, or explicit drawer IDs.",
-  args: {
-    min_height: tool.schema.number().describe("Minimum height to include (inclusive)."),
-    wing: tool.schema.string().optional().describe("Wing scope for list_drawers enumeration."),
-    room: tool.schema.string().optional().describe("Optional room scope (requires wing)."),
-    drawer_ids: tool.schema.array(tool.schema.string()).optional().describe("Explicit drawer IDs to evaluate."),
-    limit: tool.schema.number().optional().describe("Max drawers to evaluate from list scope (default 200)."),
-    include_zero: tool.schema.boolean().optional().describe("Include zero-height rows in evaluated output (default false)."),
-    tool_prefix: tool.schema.string().optional().describe("MCP tool prefix override."),
-  },
-  async execute(args, context) {
-    const cwd = context.worktree || context.directory;
+  args: (s) => ({
+    min_height: s.number().describe("Minimum height to include (inclusive)."),
+    wing: s.string().optional().describe("Wing scope for list_drawers enumeration."),
+    room: s.string().optional().describe("Optional room scope (requires wing)."),
+    drawer_ids: s.array(s.string()).optional().describe("Explicit drawer IDs to evaluate."),
+    limit: s.number().optional().describe("Max drawers to evaluate from list scope (default 200)."),
+    include_zero: s.boolean().optional().describe("Include zero-height rows in evaluated output (default false)."),
+    tool_prefix: s.string().optional().describe("MCP tool prefix override."),
+  }),
+  async execute(args, { cwd }) {
     loadRuntimeEnv({ scriptUrl: import.meta.url, env: process.env, cwd });
     const runtimeConfig = loadRuntimeConfig({ cwd, env: process.env });
     applyRuntimeConfigToEnv(process.env, runtimeConfig);

@@ -26,7 +26,7 @@
  * lineage pattern). `es-status` is intentionally not touched — orthogonal axis.
  */
 
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "./contract.ts";
 import { asObject, asText, createPalaceClient, parseFacts } from "../core/palace-tools.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../core/runtime-config.ts";
 import { runKgAddWrites } from "../core/operation.ts";
@@ -218,17 +218,17 @@ export async function runConcernProposal(args: {
   return report;
 }
 
-export default tool({
+export default defineTool({
+  name: "propose_concerns",
   description:
     "Cross-type linking: validate and (when approved) add `concerns` edges from a synthesis closet to its authority docs. Edge shape: {subject: <synthesis id>, predicate: 'concerns', object: <doc id>}. Validates both endpoints before preview or apply: subject must have synthesized-from lineage, each target must carry es-source-type: doc; rejects self-links and duplicates (idempotent). Dry-run by default — the first call makes no kg_add; pass dry_run:false to apply only after user approval of the numbered proposal list.",
-  args: {
-    synthesis_id: tool.schema.string().describe("Synthesis closet ID (subject of the concerns edges)."),
-    doc_ids: tool.schema.array(tool.schema.string()).describe("Doc drawer IDs (objects of the concerns edges) — one apply call per approved item keeps approval atomic per edge."),
-    dry_run: tool.schema.boolean().optional().describe("Preview without writing (default true)."),
-    tool_prefix: tool.schema.string().optional().describe("MCP tool prefix override."),
-  },
-  async execute(args, context) {
-    const cwd = context.worktree || context.directory;
+  args: (s) => ({
+    synthesis_id: s.string().describe("Synthesis closet ID (subject of the concerns edges)."),
+    doc_ids: s.array(s.string()).describe("Doc drawer IDs (objects of the concerns edges) — one apply call per approved item keeps approval atomic per edge."),
+    dry_run: s.boolean().optional().describe("Preview without writing (default true)."),
+    tool_prefix: s.string().optional().describe("MCP tool prefix override."),
+  }),
+  async execute(args, { cwd }) {
     loadRuntimeEnv({ scriptUrl: import.meta.url, env: process.env, cwd });
     const runtimeConfig = loadRuntimeConfig({ cwd, env: process.env });
     applyRuntimeConfigToEnv(process.env, runtimeConfig);

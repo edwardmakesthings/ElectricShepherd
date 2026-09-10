@@ -35,7 +35,7 @@ export function createHookHeadHandlers(deps: any) {
       }
 
       // Make the bundled agents and slash commands load like the rest of the
-      // plugin. OpenCode only auto-discovers agents/ and command/ folders when a
+      // plugin. OpenCode only auto-discovers agents/ and commands/ folders when a
       // repo is the active project, which never happens for an installed plugin.
       // Reading the markdown files here and injecting them into the resolved
       // config means they load in any consumer project — while each agent and

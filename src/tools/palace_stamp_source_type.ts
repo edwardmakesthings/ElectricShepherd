@@ -14,7 +14,7 @@
  * mutating tool in this project.
  */
 
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "./contract.ts";
 import {
   runKgAddWrites,
   runKgSupersedeWrites,
@@ -371,25 +371,25 @@ function clampNumber(value: unknown, fallback: number, min: number, max: number)
   return Math.max(min, Math.min(max, Math.floor(parsed)));
 }
 
-export default tool({
+export default defineTool({
+  name: "palace_stamp_source_type",
   description:
     "Bounded, dry-run-first backfill of the `es-source-type` KG axis for existing drawers. Infers `transcript` for transcript-like rooms (isTranscriptLikeRoom) and `synthesis` for drawers with outgoing synthesized-from edges; everything else is left unstamped (unknown), never guessed. Each room is probed for its total then walked with at most max_pages pages of page_size drawers — a room can never be paged to exhaustion. Dry-run by default: pass dry_run:false to apply.",
-  args: {
-    wing: tool.schema.string().optional().describe("Wing to backfill. Defaults to this project's wing."),
-    rooms: tool.schema
+  args: (s) => ({
+    wing: s.string().optional().describe("Wing to backfill. Defaults to this project's wing."),
+    rooms: s
       .string()
       .optional()
       .describe("Comma-separated explicit rooms. Default: every room in the wing (capped by max_rooms)."),
-    exclude_rooms: tool.schema.string().optional().describe("Comma-separated rooms to skip."),
-    page_size: tool.schema.number().optional().describe("Drawers per page request (default 50, max 100)."),
-    max_pages: tool.schema.number().optional().describe("Maximum pages per room (default 4, max 40)."),
-    max_rooms: tool.schema.number().optional().describe("Maximum rooms to process (default 25, max 200)."),
-    concurrency: tool.schema.number().optional().describe("Parallel KG checks per drawer (default 8, max 16)."),
-    dry_run: tool.schema.boolean().optional().describe("Preview without writing (default true)."),
-    tool_prefix: tool.schema.string().optional().describe("MCP tool prefix override."),
-  },
-  async execute(args, context) {
-    const cwd = context.worktree || context.directory;
+    exclude_rooms: s.string().optional().describe("Comma-separated rooms to skip."),
+    page_size: s.number().optional().describe("Drawers per page request (default 50, max 100)."),
+    max_pages: s.number().optional().describe("Maximum pages per room (default 4, max 40)."),
+    max_rooms: s.number().optional().describe("Maximum rooms to process (default 25, max 200)."),
+    concurrency: s.number().optional().describe("Parallel KG checks per drawer (default 8, max 16)."),
+    dry_run: s.boolean().optional().describe("Preview without writing (default true)."),
+    tool_prefix: s.string().optional().describe("MCP tool prefix override."),
+  }),
+  async execute(args, { cwd }) {
     loadRuntimeEnv({ scriptUrl: import.meta.url, env: process.env, cwd });
     const runtimeConfig = loadRuntimeConfig({ cwd, env: process.env });
     applyRuntimeConfigToEnv(process.env, runtimeConfig);

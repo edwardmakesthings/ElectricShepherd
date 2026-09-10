@@ -153,7 +153,7 @@ export function loadPackagedAssets(root: string = packagedAssetRoot()): {
 } {
   return {
     agents: loadAgentDefinitions(join(root, "agents")),
-    commands: loadCommandDefinitions(join(root, "command")),
+    commands: loadCommandDefinitions(join(root, "commands")),
   }
 }
 

@@ -40,7 +40,7 @@
  * orthogonal axis.
  */
 
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "./contract.ts";
 import { asObject, asText, createPalaceClient, parseFacts } from "../core/palace-tools.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../core/runtime-config.ts";
 import { runKgAddWrites } from "../core/operation.ts";
@@ -241,17 +241,17 @@ export async function runRefinementProposal(args: {
   return report;
 }
 
-export default tool({
+export default defineTool({
+  name: "propose_refinements",
   description:
     "Procedural memory: validate and (when approved) add `refined-by` edges from a skill drawer to the session/synthesis/apprenticeship drawers that changed how the skill should work. Edge shape: {subject: <skill id>, predicate: 'refined-by', object: <evidence id>}. Validates both endpoints before preview or apply: subject must exist and carry es-source-type: skill, each evidence drawer must exist (any source type — transcript, synthesis, or unstamped session note); rejects self-links and duplicates (idempotent). NOT lineage — never counts toward height. Dry-run by default — the first call makes no kg_add; pass dry_run:false to apply only after user approval of the numbered proposal list.",
-  args: {
-    skill_id: tool.schema.string().describe("Skill drawer ID (subject of the refined-by edges) — must carry es-source-type: skill."),
-    evidence_ids: tool.schema.array(tool.schema.string()).describe("Evidence drawer IDs (objects): session transcripts, synthesis closets, or apprenticeship worked examples that changed how the skill works. One apply call per approved item keeps approval atomic per edge."),
-    dry_run: tool.schema.boolean().optional().describe("Preview without writing (default true)."),
-    tool_prefix: tool.schema.string().optional().describe("MCP tool prefix override."),
-  },
-  async execute(args, context) {
-    const cwd = context.worktree || context.directory;
+  args: (s) => ({
+    skill_id: s.string().describe("Skill drawer ID (subject of the refined-by edges) — must carry es-source-type: skill."),
+    evidence_ids: s.array(s.string()).describe("Evidence drawer IDs (objects): session transcripts, synthesis closets, or apprenticeship worked examples that changed how the skill works. One apply call per approved item keeps approval atomic per edge."),
+    dry_run: s.boolean().optional().describe("Preview without writing (default true)."),
+    tool_prefix: s.string().optional().describe("MCP tool prefix override."),
+  }),
+  async execute(args, { cwd }) {
     loadRuntimeEnv({ scriptUrl: import.meta.url, env: process.env, cwd });
     const runtimeConfig = loadRuntimeConfig({ cwd, env: process.env });
     applyRuntimeConfigToEnv(process.env, runtimeConfig);

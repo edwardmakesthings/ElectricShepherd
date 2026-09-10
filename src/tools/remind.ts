@@ -23,7 +23,7 @@
  * Per-step failures are counted and never abort the rest (relocate_memory pattern).
  */
 
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "./contract.ts";
 import { runCheckDuplicate, runCheckpointWrite, runKgAddWrites } from "../core/operation.ts";
 import { asObject, asText, createPalaceClient } from "../core/palace-tools.ts";
 import { normalizeDryRunArg } from "../core/substrate.ts";
@@ -457,38 +457,38 @@ export async function runRemindList(args: {
   return { ok: true, wing, room, total: out.length, reminders: out, errors };
 }
 
-export default tool({
+export default defineTool({
+  name: "remind",
   description:
     "Prospective memory: create/update/close/list reminders (one drawer per reminder in the project wing's `reminders` room, with triggers-on + es-reminder-status/expires-at edges). Reminders render into mem-core under a [pending] block when their trigger matches the current scope. Dry-run by default; pass dry_run:false to apply. No expiry, no reminder: create requires a valid ISO expires_at.",
-  args: {
-    action: tool.schema.enum(["create", "update", "close", "list"]).describe("Lifecycle action."),
-    wing: tool.schema.string().describe("Project wing the reminder belongs to (required)."),
-    room: tool.schema.string().optional().describe("Reminder room (default: reminders)."),
-    what: tool.schema.string().optional().describe("create: the reminder text. update: new text."),
-    condition: tool.schema
+  args: (s) => ({
+    action: s.enum(["create", "update", "close", "list"]).describe("Lifecycle action."),
+    wing: s.string().describe("Project wing the reminder belongs to (required)."),
+    room: s.string().optional().describe("Reminder room (default: reminders)."),
+    what: s.string().optional().describe("create: the reminder text. update: new text."),
+    condition: s
       .string()
       .optional()
       .describe("create: triggers-on condition — a path/glob (web/src/**), a topic keyword (prompt caching), or a wing/room scope."),
-    expires_at: tool.schema
+    expires_at: s
       .string()
       .optional()
       .describe("ISO date/time. REQUIRED for create (no expiry, no reminder); optional on update."),
-    drawer_id: tool.schema
+    drawer_id: s
       .string()
       .optional()
       .describe("update/close: the explicit reminder drawer id (from /reminders). No broad write mode exists."),
-    status: tool.schema
+    status: s
       .enum(["satisfied", "expired"])
       .optional()
       .describe("close: target status (default satisfied). list: filter by status."),
-    limit: tool.schema.number().optional().describe("list: max reminders to return (default 20, max 50)."),
-    condition_contains: tool.schema.string().optional().describe("list: only reminders whose condition contains this substring."),
-    dry_run: tool.schema.boolean().optional().describe("Preview without writing (default true). Pass false only after explicit operator confirmation."),
-    added_by: tool.schema.string().optional().describe("Attribution for created drawers (default electric-shepherd-remind)."),
-    tool_prefix: tool.schema.string().optional().describe("MCP tool prefix override."),
-  },
-  async execute(args, context) {
-    const cwd = context.worktree || context.directory;
+    limit: s.number().optional().describe("list: max reminders to return (default 20, max 50)."),
+    condition_contains: s.string().optional().describe("list: only reminders whose condition contains this substring."),
+    dry_run: s.boolean().optional().describe("Preview without writing (default true). Pass false only after explicit operator confirmation."),
+    added_by: s.string().optional().describe("Attribution for created drawers (default electric-shepherd-remind)."),
+    tool_prefix: s.string().optional().describe("MCP tool prefix override."),
+  }),
+  async execute(args, { cwd }) {
     loadRuntimeEnv({ scriptUrl: import.meta.url, env: process.env, cwd });
     const runtimeConfig = loadRuntimeConfig({ cwd, env: process.env });
     applyRuntimeConfigToEnv(process.env, runtimeConfig);

@@ -14,7 +14,7 @@
     "index.ts",
     "src",
     "agents",
-    "command",
+    "commands",
     "instructions",
     "skills",
     "snippets",

@@ -35,7 +35,7 @@
 
 import { existsSync, statSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "./contract.ts";
 import {
   runKgAddWrites,
   runKgInvalidateWrites,
@@ -609,22 +609,22 @@ function clampNumber(value: unknown, fallback: number, min: number, max: number)
   return Math.max(min, Math.min(max, Math.floor(parsed)));
 }
 
-export default tool({
+export default defineTool({
+  name: "ingest_docs",
   description:
     "Doc ingestion: mine a docs directory into the project wing's `reference` room via the substrate mine tool (projects mode), stamp every ingested drawer es-source-type: doc, and on re-ingest invalidate stale KG facts on changed drawers (bounded pre/post ID snapshot + id-diff) and soft-flag syntheses that concern a changed doc with es-staleness: source-changed (flag only — never invalidates a synthesis). Reuses an existing reference-like room via get_taxonomy before minting one. Dry-run by default — the first call makes no mutating MCP call; pass dry_run:false to apply.",
-  args: {
-    path: tool.schema.string().describe("Directory of docs to mine (required)."),
-    wing: tool.schema.string().optional().describe("Wing to mine into. Defaults to this project's wing."),
-    room: tool.schema.string().optional().describe("Explicit destination room. Default: reuse an existing reference-like room, else `reference`."),
-    page_size: tool.schema.number().optional().describe("Drawers per snapshot page (default 50, max 100)."),
-    max_pages: tool.schema.number().optional().describe("Maximum snapshot pages per pass (default 4, max 40)."),
-    concurrency: tool.schema.number().optional().describe("Parallel staleness checks per changed drawer (default 8, max 16)."),
-    max_changed: tool.schema.number().optional().describe("Cap on drawers to invalidate/re-stamp per run (default 500, max 5000)."),
-    dry_run: tool.schema.boolean().optional().describe("Preview without writing (default true)."),
-    tool_prefix: tool.schema.string().optional().describe("MCP tool prefix override."),
-  },
-  async execute(args, context) {
-    const cwd = context.worktree || context.directory;
+  args: (s) => ({
+    path: s.string().describe("Directory of docs to mine (required)."),
+    wing: s.string().optional().describe("Wing to mine into. Defaults to this project's wing."),
+    room: s.string().optional().describe("Explicit destination room. Default: reuse an existing reference-like room, else `reference`."),
+    page_size: s.number().optional().describe("Drawers per snapshot page (default 50, max 100)."),
+    max_pages: s.number().optional().describe("Maximum snapshot pages per pass (default 4, max 40)."),
+    concurrency: s.number().optional().describe("Parallel staleness checks per changed drawer (default 8, max 16)."),
+    max_changed: s.number().optional().describe("Cap on drawers to invalidate/re-stamp per run (default 500, max 5000)."),
+    dry_run: s.boolean().optional().describe("Preview without writing (default true)."),
+    tool_prefix: s.string().optional().describe("MCP tool prefix override."),
+  }),
+  async execute(args, { cwd }) {
     loadRuntimeEnv({ scriptUrl: import.meta.url, env: process.env, cwd });
     const runtimeConfig = loadRuntimeConfig({ cwd, env: process.env });
     applyRuntimeConfigToEnv(process.env, runtimeConfig);

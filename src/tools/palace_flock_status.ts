@@ -1,4 +1,3 @@
-import { tool } from "@opencode-ai/plugin";
 import {
   asObject,
   asText,
@@ -8,6 +7,7 @@ import {
   parseRows,
   parseTaxonomy,
 } from "../core/palace-tools.ts";
+import { defineTool } from "./contract.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../core/runtime-config.ts";
 import { collectDrawerIDsByScope } from "../core/substrate.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
@@ -128,27 +128,27 @@ export function stalenessReportBlock(
   };
 }
 
-export default tool({
+export default defineTool({
+  name: "palace_flock_status",
   description:
     "Fast flock status counts at parent-drawer granularity (not chunk rows): unconsolidated sources, consolidated summaries, provisional summaries, staleness-flagged nodes, re-synthesis candidates, backlog estimate, and threshold decision.",
-  args: {
-    wing: tool.schema.string().optional().describe("Wing to inspect. Defaults to this project's wing."),
-    source_rooms: tool.schema
+  args: (s) => ({
+    wing: s.string().optional().describe("Wing to inspect. Defaults to this project's wing."),
+    source_rooms: s
       .string()
       .optional()
       .describe("Comma-separated explicit source rooms. Default: transcript-like rooms in the wing."),
-    exact_scan_cap: tool.schema
+    exact_scan_cap: s
       .number()
       .optional()
       .describe("If total source parents <= this, scan all source IDs exactly (default 300)."),
-    sample_cap: tool.schema
+    sample_cap: s
       .number()
       .optional()
       .describe("When above exact cap, max source IDs to edge-check for estimation (default 120)."),
-    tool_prefix: tool.schema.string().optional().describe("MCP tool prefix override."),
-  },
-  async execute(args, context) {
-    const cwd = context.worktree || context.directory;
+    tool_prefix: s.string().optional().describe("MCP tool prefix override."),
+  }),
+  async execute(args, { cwd }) {
     loadRuntimeEnv({ scriptUrl: import.meta.url, env: process.env, cwd });
     const runtimeConfig = loadRuntimeConfig({ cwd, env: process.env });
     applyRuntimeConfigToEnv(process.env, runtimeConfig);

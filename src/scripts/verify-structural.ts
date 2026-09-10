@@ -5,7 +5,7 @@
  * One deterministic, dependency-free check command enforcing six rules:
  *
  *   A — substrate boundary: no runtime code outside core/ invokes a substrate tool.
- *       Scope: src/. Excluded: docs/, instructions/, skills/, agents/, command/,
+ *       Scope: src/. Excluded: docs/, instructions/, skills/, agents/, commands/,
  *       tests, and anything else outside the runtime dirs. Implemented as an
  *       import/call-site check over runtime source — never a repo-wide string grep
  *       (comments/strings are ignored).
@@ -43,7 +43,7 @@ const ROOT = process.cwd();
 /** Runtime source directories subject to the checks (spec §6.6). */
 const RUNTIME_DIRS = ["src"];
 /** Directories explicitly excluded from Check A (documentation, not runtime code). */
-const EXCLUDED_DIRS = new Set(["docs", "instructions", "skills", "agents", "command"]);
+const EXCLUDED_DIRS = new Set(["docs", "instructions", "skills", "agents", "commands"]);
 /**
  * Test-fixture directories excluded from the runtime scope of Check A (spec §6.6 /
  * criterion 1: "explicitly excludes ... and test fixtures"). Applied by name at any

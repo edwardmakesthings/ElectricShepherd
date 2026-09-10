@@ -29,7 +29,7 @@
  * never abort the batch (relocate_memory lineage pattern).
  */
 
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "./contract.ts";
 import { asText } from "../core/palace-tools.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../core/runtime-config.ts";
 import { runKgAddWrites } from "../core/operation.ts";
@@ -256,43 +256,43 @@ function resolveCalibrationCapture(capture?: CalibrationCapture): {
   };
 }
 
-export default tool({
+export default defineTool({
+  name: "record_outcome",
   description:
     "Outcome feedback (HUMAN-AUTHORITATIVE): record an es-outcome judgment (accept | revise | failed | unused) for an EXPLICIT set of node ids — the selected_nodes actually consulted for a unit of work. Outcomes accumulate (never overwrite). Dry-run by default; pass dry_run:false only after explicit operator confirmation. There is no scope/wing/room write mode and no automatic path: test failures, reviewer verdicts, and loop/spiral logs are evidence for the operator's judgment, never writers.",
-  args: {
-    node_ids: tool.schema
-      .array(tool.schema.string())
+  args: (s) => ({
+    node_ids: s
+      .array(s.string())
       .describe(
         "Explicit node ids to attach the outcome to — exactly the selected_nodes recorded against this unit of work. Broad/scope-based writes are not supported; an empty list is rejected (write nothing when the consulted set is undeterminable).",
       ),
-    outcome: tool.schema.string().describe("The operator's terminal judgment for this cycle: accept | revise | failed | unused."),
-    cycle_ref: tool.schema
+    outcome: s.string().describe("The operator's terminal judgment for this cycle: accept | revise | failed | unused."),
+    cycle_ref: s
       .string()
       .optional()
       .describe("Optional identifier for the closed work unit (session/run/cycle id) — recorded as source_run_id provenance on each edge."),
-    dry_run: tool.schema.boolean().optional().describe("Preview without writing (default true). Pass false only after explicit operator confirmation."),
-    model_id: tool.schema
+    dry_run: s.boolean().optional().describe("Preview without writing (default true). Pass false only after explicit operator confirmation."),
+    model_id: s
       .string()
       .optional()
       .describe(
         "Calibration: canonical model id of the unit this outcome closes (e.g. from the capability layer's canonicalModelId). Required WITH task_shape + confidence to record a calibration tuple.",
       ),
-    task_shape: tool.schema
+    task_shape: s
       .string()
       .optional()
       .describe(
         "Calibration: the unit's canonical task shape key (from extractWorkedExampleShape/buildCapabilityCanonicalShape — the SAME shape system). Required WITH model_id + confidence.",
       ),
-    confidence: tool.schema
+    confidence: s
       .string()
       .optional()
       .describe(
         "Calibration: the unit's self-reported confidence level (high | medium | low), parsed from its terminal CONFIDENCE line. Required WITH model_id + task_shape. When all three are present, this es-outcome value is ALSO persisted as an es-calibration-outcome edge on the (model, shape, confidence) bucket.",
       ),
-    tool_prefix: tool.schema.string().optional().describe("MCP tool prefix override."),
-  },
-  async execute(args, context) {
-    const cwd = context.worktree || context.directory;
+    tool_prefix: s.string().optional().describe("MCP tool prefix override."),
+  }),
+  async execute(args, { cwd }) {
     loadRuntimeEnv({ scriptUrl: import.meta.url, env: process.env, cwd });
     const runtimeConfig = loadRuntimeConfig({ cwd, env: process.env });
     applyRuntimeConfigToEnv(process.env, runtimeConfig);

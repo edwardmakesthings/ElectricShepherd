@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "./contract.ts";
 // Substrate transport is constructed ONLY through the core/ seam (Check A2).
 import { createSubstrateClient } from "../core/substrate-client.ts";
 import { applyRuntimeConfigToEnv, DEFAULT_MCP_TOOL_PREFIX, DEFAULT_MCP_URL, loadRuntimeConfig } from "../core/runtime-config.ts";
@@ -77,68 +77,68 @@ function sameIgnoreCase(a: string, b: string): boolean {
   return a.localeCompare(b, undefined, { sensitivity: "base" }) === 0;
 }
 
-export default tool({
+export default defineTool({
+  name: "move_drawers",
   description:
     "Move MemPalace drawers in bulk via update_drawer. Supports explicit IDs, source wing scopes (single or list), or a list of source→target mappings, with optional dry-run and case-only bridge moves.",
-  args: {
-    drawer_ids: tool.schema
-      .array(tool.schema.string())
+  args: (s) => ({
+    drawer_ids: s
+      .array(s.string())
       .optional()
       .describe("Drawer IDs to move."),
-    ids_file: tool.schema
+    ids_file: s
       .string()
       .optional()
       .describe("Path to a file containing drawer IDs (newline/csv/json array)."),
-    source_wing: tool.schema
+    source_wing: s
       .string()
       .optional()
       .describe("Source wing to move from (can be used with source_room for scoped mass move)."),
-    source_wings: tool.schema
-      .array(tool.schema.string())
+    source_wings: s
+      .array(s.string())
       .optional()
       .describe("Source wings to move from (fan-in merge into one target_wing)."),
-    source_room: tool.schema
+    source_room: s
       .string()
       .optional()
       .describe("Optional source room filter when selecting by source_wing."),
-    target_wing: tool.schema
+    target_wing: s
       .string()
       .optional()
       .describe("Target wing to move into (required unless using moves[] mapping mode)."),
-    target_room: tool.schema
+    target_room: s
       .string()
       .optional()
       .describe("Optional target room override (default preserves each drawer room)."),
-    moves: tool.schema
+    moves: s
       .array(
-        tool.schema.object({
-          source_wing: tool.schema.string(),
-          source_room: tool.schema.string().optional(),
-          target_wing: tool.schema.string(),
-          target_room: tool.schema.string().optional(),
+        s.object({
+          source_wing: s.string(),
+          source_room: s.string().optional(),
+          target_wing: s.string(),
+          target_room: s.string().optional(),
         }),
       )
       .optional()
       .describe("Explicit source→target mappings. Use this to run many merges in one call."),
-    dry_run: tool.schema
+    dry_run: s
       .boolean()
       .default(true)
       .describe("When true, prints planned moves without writing."),
-    fail_fast: tool.schema
+    fail_fast: s
       .boolean()
       .default(false)
       .describe("When true, stop on first failed move."),
-    bridge_wing: tool.schema
+    bridge_wing: s
       .string()
       .default("move-drawer-hop")
       .describe("Intermediate wing for case-only source→target moves (e.g., Armet→armet)."),
-    tool_prefix: tool.schema
+    tool_prefix: s
       .string()
       .optional()
       .describe("Optional MCP tool prefix override (example: mygateway_<prefix>)."),
-  },
-  async execute(args, context) {
-    const cwd = context.worktree || context.directory;
+  }),
+  async execute(args, { cwd }) {
     loadRuntimeEnv({ scriptUrl: import.meta.url, env: process.env, cwd });
     const runtimeConfig = loadRuntimeConfig({ cwd, env: process.env });
     applyRuntimeConfigToEnv(process.env, runtimeConfig);

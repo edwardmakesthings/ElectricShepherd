@@ -260,7 +260,7 @@ function makeProve4Palace() {
 
 async function executeFlockStatus(palace, wing) {
   // Hermetic: the tool's own createPalaceClient is bypassed via the __call seam.
-  const out = await flockStatusTool.execute({ wing, __call: palace.call }, { worktree: docDir, directory: docDir });
+  const out = await flockStatusTool.execute({ wing, __call: palace.call }, { cwd: docDir });
   return JSON.parse(out);
 }
 

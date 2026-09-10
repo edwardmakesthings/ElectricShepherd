@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "./contract.ts";
 import {
   asObject,
   asText,
@@ -17,39 +17,39 @@ declare const process: {
   env: Record<string, string | undefined>;
 };
 
-export default tool({
+export default defineTool({
+  name: "relocate_memory",
   description:
     "Re-file memory into a different wing/room. mode=move relocates a whole drawer (update_drawer). mode=excerpt lifts a verbatim passage out of a drawer (an aside about another project, say) into the correct wing/room as a NEW drawer, leaving the source untouched, and records an excerpted-from lineage edge. Defaults to dry_run.",
-  args: {
-    drawer_id: tool.schema.string().describe("Source drawer ID."),
-    target_wing: tool.schema.string().describe("Destination wing."),
-    target_room: tool.schema.string().describe("Destination room."),
-    mode: tool.schema
+  args: (s) => ({
+    drawer_id: s.string().describe("Source drawer ID."),
+    target_wing: s.string().describe("Destination wing."),
+    target_room: s.string().describe("Destination room."),
+    mode: s
       .enum(["move", "excerpt"])
       .optional()
       .describe("move = relocate the whole drawer; excerpt = copy a verbatim passage out (default move)."),
-    excerpt: tool.schema
+    excerpt: s
       .string()
       .optional()
       .describe("Verbatim passage to lift, for mode=excerpt. Must appear exactly in the source drawer."),
-    excerpt_start: tool.schema
+    excerpt_start: s
       .string()
       .optional()
       .describe("First line/phrase of the passage. Use with excerpt_end instead of excerpt to avoid carrying long text."),
-    excerpt_end: tool.schema
+    excerpt_end: s
       .string()
       .optional()
       .describe("Last line/phrase of the passage. The tool slices verbatim between the anchors."),
-    dry_run: tool.schema.boolean().optional().describe("Preview without writing (default true)."),
-    link_predicate: tool.schema
+    dry_run: s.boolean().optional().describe("Preview without writing (default true)."),
+    link_predicate: s
       .string()
       .optional()
       .describe("KG predicate linking the new drawer to its source (default excerpted-from)."),
-    added_by: tool.schema.string().optional().describe("Attribution for the new drawer (default electric-shepherd-relocate)."),
-    tool_prefix: tool.schema.string().optional().describe("MCP tool prefix override."),
-  },
-  async execute(args, context) {
-    const cwd = context.worktree || context.directory;
+    added_by: s.string().optional().describe("Attribution for the new drawer (default electric-shepherd-relocate)."),
+    tool_prefix: s.string().optional().describe("MCP tool prefix override."),
+  }),
+  async execute(args, { cwd }) {
     loadRuntimeEnv({ scriptUrl: import.meta.url, env: process.env, cwd });
     const runtimeConfig = loadRuntimeConfig({ cwd, env: process.env });
     applyRuntimeConfigToEnv(process.env, runtimeConfig);

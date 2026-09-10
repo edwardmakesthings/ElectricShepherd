@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "./contract.ts";
 import { asObject, createPalaceClient, parseRows, parseTaxonomy } from "../core/palace-tools.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../core/runtime-config.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
@@ -9,22 +9,22 @@ declare const process: {
 
 type RoomCount = { room: string; drawers: number };
 
-export default tool({
+export default defineTool({
+  name: "palace_organize_memories",
   description:
     "Analyze memory organization and propose room/wing cleanup moves. Read-only: returns recommendations only, never mutates drawers.",
-  args: {
-    wing: tool.schema.string().describe("Wing to analyze."),
-    rooms: tool.schema.array(tool.schema.string()).optional().describe("Optional subset of rooms to analyze."),
-    drawer_ids: tool.schema.array(tool.schema.string()).optional().describe("Optional explicit drawer set to inspect for room mismatches."),
-    tiny_room_threshold: tool.schema
+  args: (s) => ({
+    wing: s.string().describe("Wing to analyze."),
+    rooms: s.array(s.string()).optional().describe("Optional subset of rooms to analyze."),
+    drawer_ids: s.array(s.string()).optional().describe("Optional explicit drawer set to inspect for room mismatches."),
+    tiny_room_threshold: s
       .number()
       .optional()
       .describe("Rooms at or below this count are considered tiny (default 2, chunk-count based from taxonomy)."),
-    include_samples: tool.schema.boolean().optional().describe("Include sample drawer previews for candidates."),
-    tool_prefix: tool.schema.string().optional().describe("MCP tool prefix override."),
-  },
-  async execute(args, context) {
-    const cwd = context.worktree || context.directory;
+    include_samples: s.boolean().optional().describe("Include sample drawer previews for candidates."),
+    tool_prefix: s.string().optional().describe("MCP tool prefix override."),
+  }),
+  async execute(args, { cwd }) {
     loadRuntimeEnv({ scriptUrl: import.meta.url, env: process.env, cwd });
     const runtimeConfig = loadRuntimeConfig({ cwd, env: process.env });
     applyRuntimeConfigToEnv(process.env, runtimeConfig);

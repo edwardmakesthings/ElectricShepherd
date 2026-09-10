@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "./contract.ts";
 import {
   asObject,
   createPalaceClient,
@@ -14,27 +14,27 @@ declare const process: {
   env: Record<string, string | undefined>;
 };
 
-export default tool({
+export default defineTool({
+  name: "palace_list_drawers_multi_room",
   description:
     "List drawers across multiple rooms in one call. Returns per-room totals and bounded samples so agents do not need one list_drawers call per room.",
-  args: {
-    wing: tool.schema.string().describe("Wing to inspect."),
-    rooms: tool.schema.array(tool.schema.string()).optional().describe("Specific rooms to inspect. Omit to auto-select from taxonomy."),
-    exclude_transcript_like: tool.schema
+  args: (s) => ({
+    wing: s.string().describe("Wing to inspect."),
+    rooms: s.array(s.string()).optional().describe("Specific rooms to inspect. Omit to auto-select from taxonomy."),
+    exclude_transcript_like: s
       .boolean()
       .optional()
       .describe("When true, skips transcript-like rooms (default false)."),
-    since: tool.schema.string().optional().describe("Only drawers filed on/after this ISO date (inclusive)."),
-    before: tool.schema.string().optional().describe("Only drawers filed before this ISO date (exclusive)."),
-    limit_per_room: tool.schema.number().optional().describe("Rows to sample per room (default 20, max 100)."),
-    max_rooms: tool.schema.number().optional().describe("Maximum rooms when rooms[] is omitted (default 25)."),
-    samples_per_room: tool.schema.number().optional().describe("Sample previews to return per room (default 5)."),
-    preview_chars: tool.schema.number().optional().describe("Preview width for samples (default 160)."),
-    count_only: tool.schema.boolean().optional().describe("When true, skip per-row sampling and return only counts."),
-    tool_prefix: tool.schema.string().optional().describe("MCP tool prefix override."),
-  },
-  async execute(args, context) {
-    const cwd = context.worktree || context.directory;
+    since: s.string().optional().describe("Only drawers filed on/after this ISO date (inclusive)."),
+    before: s.string().optional().describe("Only drawers filed before this ISO date (exclusive)."),
+    limit_per_room: s.number().optional().describe("Rows to sample per room (default 20, max 100)."),
+    max_rooms: s.number().optional().describe("Maximum rooms when rooms[] is omitted (default 25)."),
+    samples_per_room: s.number().optional().describe("Sample previews to return per room (default 5)."),
+    preview_chars: s.number().optional().describe("Preview width for samples (default 160)."),
+    count_only: s.boolean().optional().describe("When true, skip per-row sampling and return only counts."),
+    tool_prefix: s.string().optional().describe("MCP tool prefix override."),
+  }),
+  async execute(args, { cwd }) {
     loadRuntimeEnv({ scriptUrl: import.meta.url, env: process.env, cwd });
     const runtimeConfig = loadRuntimeConfig({ cwd, env: process.env });
     applyRuntimeConfigToEnv(process.env, runtimeConfig);

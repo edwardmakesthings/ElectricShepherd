@@ -665,7 +665,7 @@ async function runBulkToolHermetically(tool, args) {
   globalThis.fetch = fetchFn;
 
   try {
-    const raw = await tool.execute(args, { worktree: dir, directory: dir });
+    const raw = await tool.execute(args, { cwd: dir });
     return { report: JSON.parse(raw), toolCalls };
   } finally {
     globalThis.fetch = originalFetch;

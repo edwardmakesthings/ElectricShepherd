@@ -24,7 +24,7 @@
  * like a doc; the two axes are orthogonal (spec: never conflate them).
  */
 
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "./contract.ts";
 import { SKILL_DOMAINS, type SkillDomain } from "../core/memgraph.ts";
 import { asObject, asText, createPalaceClient, parseRows, parseTaxonomy } from "../core/palace-tools.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../core/runtime-config.ts";
@@ -216,20 +216,20 @@ export async function runSkillFiling(args: {
   return report;
 }
 
-export default tool({
+export default defineTool({
+  name: "file_skill",
   description:
     "Procedural memory: file a skill definition as a drawer in the project wing's `skills` room (reusing an existing skill-like room via get_taxonomy before minting one) and stamp it es-source-type: skill. Stores the full procedure verbatim; refinement happens later via refined-by edges, never by rewriting. Exact-duplicate guard prevents sprawl. Dry-run by default — the first call makes no mutating MCP call (read-only duplicate check + bounded one-page room listing); pass dry_run:false to apply. Never touches es-status.",
-  args: {
-    content: tool.schema.string().describe("The skill procedure, verbatim and complete (goal, preconditions, steps, failure modes, verification)."),
-    desc: tool.schema.string().optional().describe("One-line description for discoverability."),
-    wing: tool.schema.string().optional().describe("Wing to file into. Defaults to this project's wing."),
-    room: tool.schema.string().optional().describe("Explicit destination room. Default: reuse an existing skill-like room, else `skills`."),
-    domain: tool.schema.string().optional().describe("es-domain axis: code | writing | infra | research | general. Defaults to 'general' (temporary conservative default until project-domain inference is added)."),
-    dry_run: tool.schema.boolean().optional().describe("Preview without writing (default true)."),
-    tool_prefix: tool.schema.string().optional().describe("MCP tool prefix override."),
-  },
-  async execute(args, context) {
-    const cwd = context.worktree || context.directory;
+  args: (s) => ({
+    content: s.string().describe("The skill procedure, verbatim and complete (goal, preconditions, steps, failure modes, verification)."),
+    desc: s.string().optional().describe("One-line description for discoverability."),
+    wing: s.string().optional().describe("Wing to file into. Defaults to this project's wing."),
+    room: s.string().optional().describe("Explicit destination room. Default: reuse an existing skill-like room, else `skills`."),
+    domain: s.string().optional().describe("es-domain axis: code | writing | infra | research | general. Defaults to 'general' (temporary conservative default until project-domain inference is added)."),
+    dry_run: s.boolean().optional().describe("Preview without writing (default true)."),
+    tool_prefix: s.string().optional().describe("MCP tool prefix override."),
+  }),
+  async execute(args, { cwd }) {
     loadRuntimeEnv({ scriptUrl: import.meta.url, env: process.env, cwd });
     const runtimeConfig = loadRuntimeConfig({ cwd, env: process.env });
     applyRuntimeConfigToEnv(process.env, runtimeConfig);

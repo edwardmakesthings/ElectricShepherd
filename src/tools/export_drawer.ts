@@ -1,4 +1,3 @@
-import { tool } from "@opencode-ai/plugin";
 import {
   asObject,
   asText,
@@ -7,6 +6,7 @@ import {
   previewEnds,
   scratchFileNameFor,
 } from "../core/palace-tools.ts";
+import { defineTool } from "./contract.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../core/runtime-config.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -16,21 +16,21 @@ declare const process: {
   env: Record<string, string | undefined>;
 };
 
-export default tool({
+export default defineTool({
+  name: "export_drawer",
   description:
     "Fetch a drawer from MemPalace and write its full verbatim content to a local file, returning ONLY metadata and short head/tail previews. Use this instead of get_drawer for large drawers (raw session transcripts especially): the file can then be summarized by a cheap subagent (drawer-digest) without spending the orchestrator's context window on raw content.",
-  args: {
-    drawer_id: tool.schema.string().describe("Drawer ID to export."),
-    out_dir: tool.schema
+  args: (s) => ({
+    drawer_id: s.string().describe("Drawer ID to export."),
+    out_dir: s
       .string()
       .optional()
       .describe("Directory for the export, relative to the project root (default .electric-shepherd/scratch)."),
-    head_chars: tool.schema.number().optional().describe("Characters of head preview to return (default 600)."),
-    tail_chars: tool.schema.number().optional().describe("Characters of tail preview to return (default 300)."),
-    tool_prefix: tool.schema.string().optional().describe("MCP tool prefix override."),
-  },
-  async execute(args, context) {
-    const cwd = context.worktree || context.directory;
+    head_chars: s.number().optional().describe("Characters of head preview to return (default 600)."),
+    tail_chars: s.number().optional().describe("Characters of tail preview to return (default 300)."),
+    tool_prefix: s.string().optional().describe("MCP tool prefix override."),
+  }),
+  async execute(args, { cwd }) {
     loadRuntimeEnv({ scriptUrl: import.meta.url, env: process.env, cwd });
     const runtimeConfig = loadRuntimeConfig({ cwd, env: process.env });
     applyRuntimeConfigToEnv(process.env, runtimeConfig);

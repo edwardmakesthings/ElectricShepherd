@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "./contract.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -18,29 +18,30 @@ function getNumberEnv(name: string, fallback: number): number {
   return Number.isFinite(raw) && raw > 0 ? raw : fallback;
 }
 
-export default tool({
+export default defineTool({
+  name: "capture_transcript",
   description:
     "Force-capture the CURRENT session's transcript into MemPalace right now, bypassing the idle/compaction triggers that normally gate automatic capture. Use when you need this session's content available for consolidation immediately rather than waiting for it to go idle or compact.",
-  args: {
-    mode: tool.schema
+  args: (s) => ({
+    mode: s
       .enum(["append", "replace", "hybrid"])
       .optional()
       .describe("Override the configured source-capture mode for this one call."),
-    reason: tool.schema
+    reason: s
       .string()
       .optional()
       .describe("Short free-text reason, recorded in the capture event log (default: manual)."),
-  },
-  async execute(args, context) {
+  }),
+  async execute(args, { cwd, sessionID }) {
     loadRuntimeEnv({ scriptUrl: import.meta.url, env: process.env });
 
-    const sid = String(context.sessionID || "").trim();
+    const sid = String(sessionID || "").trim();
     if (!sid) {
       throw new Error("capture_transcript: no sessionID available from tool context");
     }
     // The consumer project, NOT this plugin's own install directory -- capture
     // config (wing/room) must resolve against the project actually being captured.
-    const projectRoot = context.worktree || context.directory;
+    const projectRoot = cwd;
 
     const configured = String(process?.env?.ESHEPHERD_SOURCE_CAPTURE_CMD || "").trim();
     const defaultScript = join(ESHEPHERD_ROOT, "src", "scripts", "capture-source-transcripts.sh");

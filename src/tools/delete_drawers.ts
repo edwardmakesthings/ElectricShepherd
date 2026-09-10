@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "./contract.ts";
 // Substrate transport is constructed ONLY through the core/ seam (Check A2). The
 // raw MCPHttpClient and header resolver live in core/mcp-transport.ts.
 import { createSubstrateClient } from "../core/substrate-client.ts";
@@ -51,45 +51,45 @@ type DeleteScriptResult = {
 };
 
 
-export default tool({
+export default defineTool({
+  name: "delete_drawers",
   description:
     "Delete MemPalace drawers by ID with structured failure reporting.",
-  args: {
-    drawer_ids: tool.schema
-      .array(tool.schema.string())
+  args: (s) => ({
+    drawer_ids: s
+      .array(s.string())
       .optional()
       .describe("Drawer IDs to delete."),
-    ids_file: tool.schema
+    ids_file: s
       .string()
       .optional()
       .describe("Path to a file containing drawer IDs (newline/csv/json array)."),
-    source_wing: tool.schema
+    source_wing: s
       .string()
       .optional()
       .describe("Source wing to delete from (can be used with source_room)."),
-    source_wings: tool.schema
-      .array(tool.schema.string())
+    source_wings: s
+      .array(s.string())
       .optional()
       .describe("Source wings to delete from (union of all matched drawers)."),
-    source_room: tool.schema
+    source_room: s
       .string()
       .optional()
       .describe("Optional source room filter when selecting by source_wing/source_wings."),
-    dry_run: tool.schema
+    dry_run: s
       .boolean()
       .optional()
       .describe("Preview without writing (default true). Pass false only after explicit operator confirmation."),
-    fail_fast: tool.schema
+    fail_fast: s
       .boolean()
       .default(false)
       .describe("When true, stop on first failed delete."),
-    tool_prefix: tool.schema
+    tool_prefix: s
       .string()
       .optional()
       .describe("Optional MCP tool prefix override (example: mygateway_<prefix>)."),
-  },
-  async execute(args, context) {
-    const cwd = context.worktree || context.directory;
+  }),
+  async execute(args, { cwd }) {
     loadRuntimeEnv({ scriptUrl: import.meta.url, env: process.env, cwd });
     const runtimeConfig = loadRuntimeConfig({
       cwd,

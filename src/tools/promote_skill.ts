@@ -39,7 +39,7 @@
  * like a doc; the two axes are orthogonal.
  */
 
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "./contract.ts";
 import { asObject, asText, createPalaceClient, drawerContentFrom, parseFacts, parseTaxonomy } from "../core/palace-tools.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../core/runtime-config.ts";
 import { normalizeDryRunArg } from "../core/substrate.ts";
@@ -277,7 +277,7 @@ export async function runSkillPromotion(args: {
 
   // Resolve the destination room against the SHARED wing's taxonomy: reuse an
   // existing skill-like room before minting `skills`. A missing shared wing is NOT
-  // an error — filing there creates it (command/relocate-memory.md convention).
+  // an error — filing there creates it (commands/relocate-memory.md convention).
   const explicitRoom = String(args.sharedRoom || "").trim();
   let room = SHARED_SKILLS_ROOM;
   let reused = false;
@@ -557,21 +557,21 @@ export async function findPromotionCandidates(args: {
   };
 }
 
-export default tool({
+export default defineTool({
+  name: "promote_skill",
   description:
     "Promote a project skill into the shared skills wing so procedural-intent retrieval from ANY project wing can reach it. COPY, not move — the source drawer stays untouched; the shared copy is stamped es-source-type: skill + es-domain (propagated from the origin) and linked back via a promoted-from edge (NOT lineage). Promotion REQUIRES an explicit es-domain on the source — an unstamped/out-of-vocabulary domain is refused with no writes. Promotion is explicit and approval-gated only: dry-run by default, apply files via the shared checkpoint write path + kg_add after operator approval of the numbered proposal. Idempotent: an exact-duplicate guard plus an existing-edge guard make re-runs no-ops. Use findPromotionCandidates (via the memory-status surface) to discover skills present in >= 2 project wings before proposing.",
-  args: {
-    skill_id: tool.schema.string().describe("Drawer ID of the project skill to promote (must carry es-source-type: skill)."),
-    shared_wing: tool.schema
+  args: (s) => ({
+    skill_id: s.string().describe("Drawer ID of the project skill to promote (must carry es-source-type: skill)."),
+    shared_wing: s
       .string()
       .optional()
       .describe(`Destination wing for promoted skills. Defaults to ${DEFAULT_SHARED_WING} (or memory.sharedSkillsWing in runtime config).`),
-    room: tool.schema.string().optional().describe("Explicit destination room in the shared wing. Default: reuse-or-mint `skills`."),
-    dry_run: tool.schema.boolean().optional().describe("Preview without writing (default true). Pass false to apply after approval."),
-    tool_prefix: tool.schema.string().optional().describe("MCP tool prefix override."),
-  },
-  async execute(args, context) {
-    const cwd = context.worktree || context.directory;
+    room: s.string().optional().describe("Explicit destination room in the shared wing. Default: reuse-or-mint `skills`."),
+    dry_run: s.boolean().optional().describe("Preview without writing (default true). Pass false to apply after approval."),
+    tool_prefix: s.string().optional().describe("MCP tool prefix override."),
+  }),
+  async execute(args, { cwd }) {
     loadRuntimeEnv({ scriptUrl: import.meta.url, env: process.env, cwd });
     const runtimeConfig = loadRuntimeConfig({ cwd, env: process.env });
     applyRuntimeConfigToEnv(process.env, runtimeConfig);
