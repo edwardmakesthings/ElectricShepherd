@@ -24,6 +24,7 @@
  */
 
 import { runKgAddWrites, runKgSupersedeWrites } from "../core/operation.ts";
+import { stripUndeclaredArgs } from "../core/memgraph.ts";
 import {
   asText,
   isTranscriptLikeRoom,
@@ -140,14 +141,21 @@ export async function backfillRoom(args: {
       if (!args.apply) return; // dry-run: classification above already reports what WOULD happen
 
       try {
-        const payload = { subject: drawerId as string, predicate: "es-source-type", source_closet: drawerId as string };
+        const payload = { subject: drawerId as string, predicate: "es-source-type" };
         const [result] = current
           ? await runKgSupersedeWrites(args.call, [{ payload: { ...payload, old_object: current, new_object: inference } }])
-          : await runKgAddWrites(args.call, [{ payload: { ...payload, object: inference } }]);
-        if (result?.ok) totals.stamped += 1;
-        else totals.stamp_failed += 1;
-      } catch {
+          : await runKgAddWrites(args.call, [{ payload: { ...payload, source_closet: drawerId as string, object: inference } }]);
+        if (result?.ok) {
+          totals.stamped += 1;
+        } else {
+          totals.stamp_failed += 1;
+          runtimeProcess.stderr.write(
+            `[stamp-source-type-backfill] stamp failed for ${drawerId}: ${(result as { error?: string })?.error ?? "unknown"}\n`,
+          );
+        }
+      } catch (err) {
         totals.stamp_failed += 1;
+        runtimeProcess.stderr.write(`[stamp-source-type-backfill] stamp threw for ${drawerId}: ${String(err)}\n`);
       }
     });
 
@@ -196,7 +204,11 @@ async function main(): Promise<void> {
     clientName: "electric-shepherd-source-type-backfill",
     urlOverride: mcpURL,
   });
-  const call: CallTool = (name, payload) => client.callTool(`${toolPrefix}${name}`, payload);
+  // Raw substrate calls bypass MemgraphClient, so the param-stripping rule that
+  // its constructor applies (stripUndeclaredSubstrateParams) does not run here.
+  // Apply the same rule directly rather than duplicate the table.
+  const call: CallTool = (name, payload) =>
+    client.callTool(`${toolPrefix}${name}`, payload ? stripUndeclaredArgs(name, payload) : payload);
 
   const taxonomy = parseTaxonomy(await call("get_taxonomy", {}));
   const wingEntry = taxonomy.find((entry) => entry.wing === wing);

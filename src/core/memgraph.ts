@@ -74,26 +74,34 @@ const UNDECLARED_SUBSTRATE_PARAMS: ReadonlyArray<{ toolSuffix: string; params: r
 ];
 
 /**
+ * The stripping rule itself, factored out of `stripUndeclaredSubstrateParams` so
+ * a caller that never constructs a `MemgraphClient` — a standalone script
+ * calling the substrate client directly — can apply the same rule without
+ * duplicating the table. `stripUndeclaredSubstrateParams` below is a thin
+ * `ToolCaller`-shaped wrapper over this for `MemgraphClient`'s constructor.
+ */
+export function stripUndeclaredArgs(name: string, args: Record<string, unknown>): Record<string, unknown> {
+  const entry = UNDECLARED_SUBSTRATE_PARAMS.find((candidate) => name.endsWith(candidate.toolSuffix));
+  if (!entry) return args;
+  let stripped = false;
+  const sanitized: Record<string, unknown> = { ...args };
+  for (const param of entry.params) {
+    if (param in sanitized) {
+      delete sanitized[param];
+      stripped = true;
+    }
+  }
+  return stripped ? sanitized : args;
+}
+
+/**
  * Strip parameters the substrate does not declare, at the single boundary every
  * call crosses. Applied to the injected `callTool` so `invoke`, `call` and
  * `callIgnoringFailure` are all covered by one guard — call sites may keep
  * passing the field for local logging without breaking the request.
  */
 export function stripUndeclaredSubstrateParams(callTool: ToolCaller): ToolCaller {
-  return (name, args) => {
-    if (!args) return callTool(name, args);
-    const entry = UNDECLARED_SUBSTRATE_PARAMS.find((candidate) => name.endsWith(candidate.toolSuffix));
-    if (!entry) return callTool(name, args);
-    const sanitized: JsonMap = { ...args };
-    let stripped = false;
-    for (const param of entry.params) {
-      if (param in sanitized) {
-        delete sanitized[param];
-        stripped = true;
-      }
-    }
-    return callTool(name, stripped ? sanitized : args);
-  };
+  return (name, args) => (args ? callTool(name, stripUndeclaredArgs(name, args) as JsonMap) : callTool(name, args));
 }
 
 /**

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { stripUndeclaredSubstrateParams } from "../../src/core/memgraph.ts";
+import { stripUndeclaredArgs, stripUndeclaredSubstrateParams } from "../../src/core/memgraph.ts";
 
 /**
  * Regression guard for the -32602 outage: MemPalace strict-validates its MCP
@@ -127,4 +127,36 @@ test("keeps source_closet on kg_add — it is declared there, and only stripped 
   await wrapped("mempalace_kg_add", { subject: "a", predicate: "p", object: "b", source_closet: "a" });
 
   assert.equal(calls[0].args.source_closet, "a", "kg_add declares source_closet; stripping it would lose provenance");
+});
+
+// Any caller that talks to the substrate directly (a standalone script,
+// bypassing MemgraphClient entirely) needs the same rule without constructing
+// a client — this is the pure form stripUndeclaredSubstrateParams wraps.
+test("stripUndeclaredArgs applies the same rule with no ToolCaller wrapping", () => {
+  const supersede = stripUndeclaredArgs("mempalace-mempalace_kg_supersede", {
+    subject: "a",
+    predicate: "p",
+    old_object: "x",
+    new_object: "y",
+    source_closet: "a",
+    source_run_id: "run-1",
+  });
+  assert.deepEqual(supersede, { subject: "a", predicate: "p", old_object: "x", new_object: "y" });
+
+  const add = stripUndeclaredArgs("mempalace-mempalace_kg_add", {
+    subject: "a",
+    predicate: "p",
+    object: "b",
+    source_closet: "a",
+    source_run_id: "run-1",
+  });
+  assert.deepEqual(add, { subject: "a", predicate: "p", object: "b", source_closet: "a" });
+});
+
+test("stripUndeclaredArgs leaves unrelated tools and clean payloads untouched", () => {
+  const args = { wing: "w", room: "r", limit: 10 };
+  assert.equal(stripUndeclaredArgs("mempalace-mempalace_list_drawers", args), args, "no matching rule: same reference back");
+
+  const clean = { subject: "a", predicate: "p", object: "b" };
+  assert.equal(stripUndeclaredArgs("mempalace-mempalace_kg_add", clean), clean, "nothing to strip: same reference back");
 });

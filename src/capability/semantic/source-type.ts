@@ -43,8 +43,6 @@ export async function setClosetSourceType(core: MemgraphInternals, closetId: str
       predicate: "es-source-type",
       old_object: previous,
       new_object: sourceType,
-      source_closet: closetId,
-      source_run_id: sourceRunId,
     });
     if (supersedeRes.ok === false) {
       console.warn(`[memgraph] es-source-type supersede for ${closetId} (${previous} -> ${sourceType}) failed (kind=${supersedeRes.kind}), leaving axis unchanged: ${supersedeRes.detail}`);
