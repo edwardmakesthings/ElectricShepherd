@@ -47,6 +47,19 @@ test("agent translation drops OpenCode-only frontmatter", () => {
   assert.match(out, /You are the Dreamer\./);
 });
 
+// Both harnesses use the same provider/model selector. Dropping the pin would
+// silently re-route the agent to whatever the `task` model role points at —
+// these agents pin a local model deliberately.
+test("agent translation preserves the model pin", () => {
+  const out = translateAgent("dreamer", ES_AGENT);
+  assert.match(out, /^model: "litellm\/implementer-qwen3\.8-27b"$/m);
+});
+
+test("agent translation omits model when none is declared", () => {
+  const out = translateAgent("scout", "---\ndescription: X\n---\nbody\n");
+  assert.ok(!out.includes("model:"));
+});
+
 test("agent translation falls back to a description when none is declared", () => {
   assert.match(translateAgent("scout", "# Scout\n\nbody"), /description: "Electric Shepherd scout agent"/);
 });

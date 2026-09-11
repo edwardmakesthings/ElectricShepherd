@@ -40,11 +40,16 @@ function splitFrontmatter(markdown: string): { fields: Record<string, string>; b
  * omp requires `name`, and its `tools` is an array of exact names rather than
  * OpenCode's glob map. A map handed to omp restricts nothing, so it is dropped
  * rather than mistranslated — the agent gets omp's default tool surface.
+ *
+ * `model` IS carried over: both harnesses use the same `provider/model` selector,
+ * and dropping it would silently re-route these agents to whatever the `task`
+ * model role points at. They pin a local model on purpose.
  */
 export function translateAgent(name: string, markdown: string): string {
   const { fields, body } = splitFrontmatter(markdown);
   const description = fields.description || `Electric Shepherd ${name} agent`;
-  return `---\nname: ${name}\ndescription: ${JSON.stringify(description)}\n---\n${body.trimStart()}`;
+  const model = fields.model ? `model: ${JSON.stringify(fields.model.replace(/^["']|["']$/g, ""))}\n` : "";
+  return `---\nname: ${name}\ndescription: ${JSON.stringify(description)}\n${model}---\n${body.trimStart()}`;
 }
 
 /**

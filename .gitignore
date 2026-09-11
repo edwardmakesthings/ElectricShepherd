@@ -240,3 +240,7 @@ graphify-out/
 /src/surface/omp/skills/
 /src/surface/omp/rules/
 .opencode/
+# omp bundled agents unpacked locally (omp agents unpack --project). Project
+# .omp/agents has HIGHEST precedence, so tracking these would freeze upstream
+# copies at whatever version was unpacked. Keep them local-only.
+.omp/
