@@ -15,6 +15,7 @@ import fileSkill from "./file_skill.ts";
 import ingestDocs from "./ingest_docs.ts";
 import moveDrawers from "./move_drawers.ts";
 import palaceDiff from "./palace_diff.ts";
+import consolidationProgress from "./consolidation_progress.ts";
 import palaceFlockStatus from "./palace_flock_status.ts";
 import palaceHeightThreshold from "./palace_height_threshold.ts";
 import palaceListDrawersMultiRoom from "./palace_list_drawers_multi_room.ts";
@@ -30,6 +31,7 @@ import remind from "./remind.ts";
 
 export const ES_TOOLS: readonly EsToolDefinition[] = [
   captureTranscript,
+  consolidationProgress,
   deleteDrawers,
   exportDrawer,
   fileSkill,

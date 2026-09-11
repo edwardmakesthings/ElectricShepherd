@@ -31,6 +31,15 @@ export function getActivePromptRoutingFromEnv(env: Record<string, string | undef
   return { agent, model };
 }
 
+/** Split a `<provider>/<model>` selector. Returns undefined when either half is missing. */
+export function parseModelSelector(selector: string): PromptModelRouting | undefined {
+  const separator = selector.indexOf("/");
+  if (separator <= 0) return undefined;
+  const providerID = selector.slice(0, separator).trim();
+  const modelID = selector.slice(separator + 1).trim();
+  return providerID && modelID ? { providerID, modelID } : undefined;
+}
+
 export function parseMCPHttpOptions(config: Record<string, any>, parsePositiveInt: (value: unknown, fallback: number, min?: number) => number): {
   requestTimeoutMs: number;
   maxRetries: number;

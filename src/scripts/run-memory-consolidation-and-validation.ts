@@ -50,6 +50,7 @@ import {
   isFalsyFlag,
   isTruthyFlag,
   parseMCPHttpOptions,
+  parseModelSelector,
   resolveConsolidationMCPURLs,
   resolveRunEventLogPath,
   tryWriteFile,
@@ -264,6 +265,18 @@ async function main(): Promise<void> {
   const toolPrefix = String(runtimeConfig.valuesByPath.mcp?.toolPrefix || "").trim() || DEFAULT_MCP_TOOL_PREFIX;
   const mcpHttpOptions = parseMCPHttpOptions((runtimeConfig.valuesByPath.mcp || {}) as Record<string, any>, parsePositiveInt);
   const activeRouting = getActivePromptRoutingFromEnv(process.env);
+  // A configured mapper model beats the calling session's model: per-drawer
+  // judgement wants a short answer, and inheriting a thinking-heavy general
+  // model spends minutes per drawer deliberating a one-line verdict.
+  const configuredMapperModel = String(runtimeConfig.valuesByPath.consolidation?.mapperModel || "").trim();
+  const mapperModel = configuredMapperModel
+    ? parseModelSelector(configuredMapperModel) ?? activeRouting.model
+    : activeRouting.model;
+  if (configuredMapperModel && !parseModelSelector(configuredMapperModel)) {
+    process.stderr.write(
+      `[memory-consolidation-validation] ignoring consolidation.mapperModel="${configuredMapperModel}": expected "<provider>/<model>"\n`,
+    );
+  }
   const subagentTimeoutMs = resolveSubagentTimeoutMs(process.env);
 
   // Construct through the core/ seam (Check A2): owns transport + initialize and
@@ -303,7 +316,14 @@ async function main(): Promise<void> {
   const includeBasePipeline = !runCadence || hasFlag(argv, "--include-base-pipeline");
   // --opencode-bin is kept as the legacy spelling of --subagent-bin.
   const explicitSubagentBin = getArg(argv, "--subagent-bin") || getArg(argv, "--opencode-bin") || undefined;
-  const subagentRunner = resolveSubagentRunner({ explicitBin: explicitSubagentBin, env: process.env });
+  const subagentRunner = resolveSubagentRunner({
+    explicitBin: explicitSubagentBin,
+    env: process.env,
+    preferKind: String(runtimeConfig.valuesByPath.consolidation?.subagentHarness || "").trim().toLowerCase() as
+      | "opencode"
+      | "omp"
+      | undefined,
+  });
   const esRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
   if (!subagentRunner) {
     // Named degradation: without a runner every mapper pass would return nothing
@@ -467,7 +487,7 @@ async function main(): Promise<void> {
           // SubstrateResult envelope that drawerContentFrom cannot read.
           readTool: (name, toolArgs) => readMCP.callTool(name, toolArgs),
           mapperAgentName: getArg(argv, "--mapper-agent") || "dream-mapper",
-          activeModel: activeRouting.model,
+          activeModel: mapperModel,
           query: consolidationOptions.query,
           wing: consolidationOptions.targetWing,
           room: worklistOptions.retryFailedOnly ? worklistOptions.failedRoom : worklistOptions.sourceRoom,
@@ -603,7 +623,7 @@ async function main(): Promise<void> {
   if (includeBasePipeline && hasFlag(argv, "--use-live-auditor") && consolidation && validationMergeReview) {
     auditor = await callSubagentAuditor({
       auditorAgentName: getArg(argv, "--auditor-agent") || "dream-auditor",
-      activeModel: activeRouting.model,
+      activeModel: mapperModel,
       consolidationResult: consolidation,
       validationResult: validationMergeReview,
       runner: subagentRunner!,

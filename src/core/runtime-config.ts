@@ -206,6 +206,12 @@ export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
     kind: "boolean",
     defaultValue: false,
   },
+  // Per-drawer mapper/auditor model. Empty = inherit the calling session's active
+  // model, which is rarely what you want: a thinking-heavy general model burns
+  // minutes per drawer on a judgement that wants a short answer.
+  { envKey: "ESHEPHERD_CONSOLIDATION_MAPPER_MODEL", path: "consolidation.mapperModel", kind: "string", defaultValue: "" },
+  // Which harness runs mapper/auditor passes. Empty = probe opencode, then omp.
+  { envKey: "ESHEPHERD_SUBAGENT_HARNESS", path: "consolidation.subagentHarness", kind: "string", defaultValue: "" },
 
   { envKey: "ESHEPHERD_COMPACT_ARCHIVE", path: "compaction.archiveEnabled", kind: "boolean", defaultValue: true },
   { envKey: "ESHEPHERD_INJECT_INSTRUCTIONS", path: "assets.injectInstructions", kind: "boolean", defaultValue: true },

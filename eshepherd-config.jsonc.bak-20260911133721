@@ -1,0 +1,65 @@
+{
+  "env": {
+    "envFile": "/home/ejaworenko/Cloud-Professional/docker/.env"
+  },
+  "mcp": {
+    // LiteLLM per-server MCP route: full mempalace tool surface (49 tools),
+    // unlike /toolset/thinking/mcp which is a reduced 12-tool set.
+    "url": "http://gondor-pop.hippogriff-pompano.ts.net:4000/mcp/mempalace",
+    "pythonBin": "python3",
+    "toolPrefix": "mempalace-mempalace_",
+    "authHeader": "x-litellm-api-key",
+    "authScheme": "Bearer"
+  },
+  "sourceCapture": {
+    "toolPrefix": "mempalace-mempalace_",
+    "mode": "append",
+    "dedupEnabled": true,
+    "verifyEnabled": true
+  },
+  "memcore": {
+    "reinject": {
+      "enabled": true,
+      "onCompact": false,
+      "onIdle": false,
+      "onStart": false
+    }
+  },
+  "retry": {
+    "enabled": false
+  },
+  "taskWatchdog": {
+    "workedExampleInjection": {
+      "enabled": true,
+      "searchTimeoutMs": 12000
+    },
+    "workedExampleFiling": {
+      "enabled": true
+    }
+  },
+  "consolidation": {
+    "allowedWriters": "dreamer",
+    "auto": {
+      "enabled": true,
+      "onIdle": true,
+      "onCompact": true,
+      "idleDelayMs": 120000,
+      "messageThreshold": 12,
+      "cooldownMs": 600000,
+      "maxTrackedSessions": 512
+    }
+  },
+  "commands": {
+    "sourceCapture": {
+      "command": "",
+      "timeoutMs": 300000
+    },
+    "autoConsolidation": {
+      "command": "",
+      "timeoutMs": 300000
+    },
+    "memcoreLoader": {
+      "timeoutMs": 15000
+    }
+  }
+}

@@ -104,6 +104,15 @@
   "consolidation": {
     "writeGuardEnabled": true,
     "allowedWriters": "dreamer",
+    // Model for the per-drawer mapper/auditor passes. Empty inherits the calling
+    // session's model, which is usually wrong: this is a short per-drawer
+    // judgement, and a thinking-heavy general model spends minutes deliberating
+    // a one-line verdict. Pick a model whose reasoning budget matches the job.
+    "mapperModel": "",
+    // Harness that runs those passes: "omp", "opencode", or empty to probe
+    // opencode then omp. Set it to match the harness you actually run, or a
+    // session in one will spawn the other and load its whole plugin surface.
+    "subagentHarness": "",
     "lock": {
       "disabled": false,
       "nativeCoordinatorDisabled": false,

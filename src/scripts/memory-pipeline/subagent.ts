@@ -252,12 +252,22 @@ export function resolveSubagentRunner(args: {
   explicitBin?: string;
   env: Record<string, string | undefined>;
   home?: string;
+  /** Harness to try first. Without it the probe order is opencode, then omp. */
+  preferKind?: "opencode" | "omp";
 }): SubagentRunner | undefined {
   const explicit = String(args.explicitBin || args.env.ESHEPHERD_SUBAGENT_BIN || "").trim();
   if (explicit) return { kind: kindForBin(explicit), bin: explicit };
 
   const home = args.home || homedir();
-  for (const { kind, relative } of WELL_KNOWN_BINS) {
+  const prefer = args.preferKind || (args.env.ESHEPHERD_SUBAGENT_HARNESS || "").trim().toLowerCase();
+  // A run started under omp must not spawn opencode: that loads the other
+  // harness's whole plugin surface (its loop guard writes .opencode state) and
+  // downgrades extension isolation from `--no-extensions` to an env-var opt-out.
+  const candidates = prefer === "omp" || prefer === "opencode"
+    ? [...WELL_KNOWN_BINS].sort((a, b) => (a.kind === prefer ? -1 : b.kind === prefer ? 1 : 0))
+    : WELL_KNOWN_BINS;
+
+  for (const { kind, relative } of candidates) {
     const onPath = findOnPath(kind, args.env);
     if (onPath) return { kind, bin: onPath };
     const installed = join(home, relative);

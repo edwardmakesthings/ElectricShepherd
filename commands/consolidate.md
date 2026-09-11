@@ -65,6 +65,20 @@ Execution steps:
    - validation status (or skipped reason)
    - mem-core output file path
 
+Progress while it runs:
+
+The script works one drawer at a time (`--batch-size 1`), so a large worklist takes
+many minutes and prints nothing until it exits. It writes progress continuously to
+`.electric-shepherd/consolidation-runs.ndjson`.
+
+- If the shell call returns before the run finishes, or you need to report status
+  mid-pass, call `consolidation_progress` — it returns the current phase, `chunkIndex`/`chunkTotal`, the examined/processed/failed counters, and
+  seconds since the last update.
+- A pass is advancing as long as `stale_seconds` keeps resetting. Do NOT declare it
+  hung under ~120s: a single drawer's mapper pass can legitimately take that long.
+- Report `chunkIndex/chunkTotal` when the user asks how far along it is. Never guess
+  progress from elapsed time.
+
 Lock behavior:
 
 - Do not force `ESHEPHERD_CONSOLIDATION_LOCK_INHERITED` unless it is already set by the parent context.
