@@ -99,11 +99,20 @@ It is optional and nothing here depends on it. If you want it:
 ```bash
 uv tool install graphifyy          # note: package is graphifyy, CLI is graphify
 graphify extract . --code-only     # local tree-sitter AST only, no LLM, nothing leaves the machine
+graphify hook install              # rebuild on commit and checkout
 ```
 
-`--code-only` is not a suggestion — without it, docs and PDFs are sent to a model, which
-breaks the local-first invariant this project holds. Add `graphify-out/` to `.gitignore`
-unless you have decided to share one map across a team.
+`--code-only` keeps the first build local, but it does **not** persist: the rebuild hooks
+call `graphify update`, which has no such flag and will use a model for docs, PDFs and
+images the moment an API key is present in the environment — and this stack configures one
+for LiteLLM. The guard is therefore declarative, in [.graphifyignore](.graphifyignore),
+which every code path honours. Markdown is safe to leave in (graphify reads headings and
+links structurally, `_origin: ast`, no model call); PDFs, images and video have no such
+path and are excluded there. Verified: every node in this repo's graph is `_origin: ast`
+and no `cost.json` is ever written. Community *labelling* is a separate opt-in LLM step
+(`graphify label`) — skipping it leaves `Community N` placeholders and nothing else breaks.
+
+Add `graphify-out/` to `.gitignore` unless you have decided to share one map across a team.
 
 Measured on this repo and on a 754-file mixed Python/TypeScript tree: full build in 15s and
 29s respectively, zero LLM calls, and **0 of 17,158 edges crossed the Python/TypeScript

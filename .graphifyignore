@@ -1,0 +1,23 @@
+# Local-first guard for the graphify code graph.
+#
+# `graphify extract --code-only` keeps everything on-machine, but the auto-rebuild
+# hooks call `graphify update`, which has no --code-only flag. Without this file the
+# rebuild would send PDFs, images and video to a model whenever an API key happens to
+# be present in the environment — and this stack has one configured for LiteLLM.
+#
+# Markdown is safe to index: graphify extracts headings and links structurally
+# (_origin: ast), with no model call. These formats have no such path.
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.mp4
+*.mov
+*.mp3
+*.wav
+
+# Generated / vendored trees that add nodes without adding meaning.
+graphify-out/
+.ast-cache/
