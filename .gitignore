@@ -229,6 +229,9 @@ eshepherd-config.jsonc
 node_modules/
 .serena/
 .ast-cache/
+# Graphify upstream suggests committing this so a team shares one map; ignored
+# here until we decide the code-graph tool actually earns a slot.
+graphify-out/
 
 # Staged into the omp extension root by `npm run omp:assets`; canonical copies
 # live at the repo root.
