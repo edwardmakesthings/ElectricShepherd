@@ -52,12 +52,22 @@ test("agent translation falls back to a description when none is declared", () =
 });
 
 // omp reads only `description` from a command, so `agent:` routing would vanish
-// silently. omp has no in-session agent switch, so it becomes a task delegation.
+// silently. omp has no in-session agent switch, so it becomes a task delegation
+// when the named agent is one ES actually stages into omp.
 test("command translation turns agent routing into a task delegation", () => {
-  const out = translateCommand(ES_COMMAND);
+  const out = translateCommand(ES_COMMAND, new Set(["dreamer"]));
   assert.match(out, /Delegate this entire request to the `dreamer` agent using the `task` tool/);
   assert.match(out, /Take deliberate control of the dream\./);
   assert.ok(!out.includes("subtask:"));
+});
+
+// `build` is OpenCode's own built-in agent, never one ES stages into omp/agents/.
+// Delegating to it would name a task agent that does not exist there, so the
+// command must run inline instead — the same gap that broke /stamp-source-type.
+test("command translation does not delegate to an agent omp never staged", () => {
+  const out = translateCommand("---\ndescription: X\nagent: build\n---\nDo the thing.\n", new Set(["dreamer"]));
+  assert.ok(!out.includes("Delegate this entire request"));
+  assert.match(out, /Do the thing\./);
 });
 
 test("command translation leaves unrouted commands alone", () => {
@@ -67,7 +77,7 @@ test("command translation leaves unrouted commands alone", () => {
 });
 
 test("command translation preserves $ARGUMENTS for omp substitution", () => {
-  const out = translateCommand("---\ndescription: X\nagent: dreamer\n---\nScope: $ARGUMENTS\n");
+  const out = translateCommand("---\ndescription: X\nagent: dreamer\n---\nScope: $ARGUMENTS\n", new Set(["dreamer"]));
   assert.match(out, /Scope: \$ARGUMENTS/);
 });
 

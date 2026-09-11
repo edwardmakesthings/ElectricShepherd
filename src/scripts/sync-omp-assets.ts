@@ -51,11 +51,17 @@ export function translateAgent(name: string, markdown: string): string {
  * omp reads only `description` from a command, so OpenCode's `agent:` routing
  * would silently vanish. omp has no in-session agent switch — agents are `task`
  * subagents — so the routing is re-expressed as an instruction in the body.
+ *
+ * Only delegate when `agent` names an ES-authored agent actually staged into omp
+ * (`knownAgents`, from this repo's `agents/` dir). OpenCode's own built-in agents
+ * (`build`, `plan`, ...) have no omp counterpart to delegate to — the primary omp
+ * agent already carries the same default tool surface, so the command just runs
+ * inline instead of naming a task agent that does not exist.
  */
-export function translateCommand(markdown: string): string {
+export function translateCommand(markdown: string, knownAgents: ReadonlySet<string> = new Set()): string {
   const { fields, body } = splitFrontmatter(markdown);
   const agent = fields.agent || "";
-  const delegation = agent
+  const delegation = agent && knownAgents.has(agent)
     ? `Delegate this entire request to the \`${agent}\` agent using the \`task\` tool, then report its result.\n\n`
     : "";
   return `---\ndescription: ${JSON.stringify(fields.description || "")}\n---\n${delegation}${body.trimStart()}`;
@@ -92,9 +98,18 @@ function stageMarkdownDir(name: string, translate: (content: string, file: strin
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
+  const agentsSource = join(ROOT, "agents");
+  const knownAgents = new Set<string>(
+    existsSync(agentsSource)
+      ? readdirSync(agentsSource, { withFileTypes: true })
+          .filter((entry) => entry.isFile() && extname(entry.name) === ".md")
+          .map((entry) => basename(entry.name, ".md"))
+      : [],
+  );
+
   let staged = 0;
   if (stageMarkdownDir("agents", (content, file) => translateAgent(basename(file, ".md"), content))) staged += 1;
-  if (stageMarkdownDir("commands", (content) => translateCommand(content))) staged += 1;
+  if (stageMarkdownDir("commands", (content) => translateCommand(content, knownAgents))) staged += 1;
   if (stageMarkdownDir("instructions", (content, file) => translateInstruction(basename(file, ".md"), content), "rules")) {
     staged += 1;
   }
