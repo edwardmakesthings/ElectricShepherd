@@ -10,6 +10,7 @@ The correct pattern is: ask what kind of target this is, then act once.
 
 1. **What kind of target is this?**
    - Named code symbol (function/class/method name) → Serena tools
+   - "What calls X", "what does X touch", "how do A and B connect" → graphify (`explain` / `path`), if a graph exists
    - Structural code pattern ("all components that use X") → ast-tools_search
    - Text content in a non-code file → file-reader_search, then text editing tools
    - Line range you already know → line-edit operates on numbers, no matching needed
@@ -252,6 +253,52 @@ subagent's findings" or "the explore agent says" as a substitute for your own
 understanding. Read the result, verify it makes sense, integrate it into your own
 reasoning, and present a synthesized answer you stand behind. If the orchestrator only
 relays messages between specialists, it adds no value — the synthesis IS the value.
+
+## Graphify code graph (optional tool — quirks are mandatory reading)
+
+Graphify is an **optional** local code-graph tool. If `graphify-out/graph.json` exists in the
+repo, prefer it over grep for structural questions. If it does not exist, do not install or
+build one unprompted — say it is missing and carry on with the normal tools.
+
+**Use `explain` and `path`. Do not use `query`.** This is measured, not stylistic:
+
+- `graphify explain "<symbol>"` — callers, callees, imports, each edge tagged `EXTRACTED`
+  (read from source) or `INFERRED` (resolved), with exact file:line. This is the right call
+  for a named symbol.
+- `graphify path "<A>" "<B>"` — how two things connect. "No directed path" is a real answer;
+  do not immediately retry with `--undirected` and present a file-level import hop as if it
+  were a call relationship.
+- `graphify query "<question>"` — natural-language BFS. It fuzzy-matches *several* start
+  nodes, so unrelated symbols enter the result on incidental word matches. Reserve it for
+  genuinely open-ended exploration, never for a question naming a specific symbol.
+
+**Never narrow `query` with `--budget` to clean up a noisy result.** Truncation is not
+relevance-ordered: a smaller budget can drop the correct node and keep the irrelevant ones,
+turning a noisy-but-right answer into a confident wrong one. Narrow by asking `explain`
+about a specific symbol instead.
+
+**Ambiguity is a real answer.** On a name that exists in two files (common in mixed
+Python/TypeScript trees) graphify refuses to guess and lists both candidates with their
+paths and node ids. Pick using the path you actually mean, or ask. Do not pick the first.
+
+**Treat the graph as possibly stale.** It is rebuilt by git hooks on commit and checkout,
+but a `git pull` or merge needs `graphify update .`. If a result contradicts a file you have
+just read, the file wins — the graph is derived data and the source is the authority.
+
+**Two rules that are not negotiable:**
+
+- **Never enable graphify's memory features** (`save-result`, `reflect`, `LESSONS.md`, the
+  `.graphify_learning.json` overlay). They duplicate the `es-source-type` / `es-status` /
+  `es-outcome` axes with different vocabulary, and two systems ranking trust differently is
+  worse than one. MemPalace via Electric Shepherd is the only memory — see "External memory
+  — MemPalace only".
+- **Never file graph output into MemPalace.** `graph.json`, `GRAPH_REPORT.md`, and node
+  listings are derived, high-churn, and regenerable in seconds. Drawers are verbatim and
+  append-only. Filing a symbol dump creates drawers that are stale on the next refactor and
+  cannot be retracted. File the *decision* the graph helped you reach, never the graph.
+
+The division is: **graphify answers what the code is; MemPalace answers why it is that
+way.** One regenerates in seconds, the other cannot be reconstructed at all.
 
 ## Working set vs. long-term store
 

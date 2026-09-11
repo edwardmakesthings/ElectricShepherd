@@ -1,0 +1,3 @@
+# Union-merges the graphify code graph so two commits never leave conflict markers.
+# Inert while graphify-out/ is gitignored; kept so committing the graph later just works.
+graphify-out/graph.json merge=graphify

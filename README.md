@@ -78,6 +78,50 @@ Because every artifact it creates is a *native MemPalace object*, two things fol
 > mem-core loop are all stock-safe. Only read-tracking and deep-lineage queries are
 > affected, and existing data stays valid either way.
 
+### Optional: a code graph alongside the memory
+
+Electric Shepherd deliberately does **not** index your code. Symbols are derived, change
+every commit, and are regenerable in seconds; drawers are verbatim and append-only. Putting
+a symbol index into the palace would create drawers that are stale after the next refactor
+and cannot be retracted.
+
+[Graphify](https://github.com/Graphify-Labs/graphify) fills that other half well, and pairs
+cleanly:
+
+| | Graphify | Electric Shepherd |
+|---|---|---|
+| answers | what the code **is** | why it is **that way** |
+| data | derived, high-churn | verbatim, append-only |
+| if lost | rebuild in seconds | unrecoverable |
+
+It is optional and nothing here depends on it. If you want it:
+
+```bash
+uv tool install graphifyy          # note: package is graphifyy, CLI is graphify
+graphify extract . --code-only     # local tree-sitter AST only, no LLM, nothing leaves the machine
+```
+
+`--code-only` is not a suggestion — without it, docs and PDFs are sent to a model, which
+breaks the local-first invariant this project holds. Add `graphify-out/` to `.gitignore`
+unless you have decided to share one map across a team.
+
+Measured on this repo and on a 754-file mixed Python/TypeScript tree: full build in 15s and
+29s respectively, zero LLM calls, and **0 of 17,158 edges crossed the Python/TypeScript
+boundary** despite 13 genuine name collisions — it lists the candidates and refuses to guess
+rather than binding to the wrong one.
+
+Two things to get right, both documented for agents in
+[instructions/agent-discipline.md](instructions/agent-discipline.md):
+
+- **Use `explain` and `path`, not `query`.** The natural-language `query` path fuzzy-matches
+  several start nodes and pulls in unrelated symbols; worse, narrowing it with `--budget`
+  can drop the correct answer while keeping the noise. Graphify's own generated instruction
+  files recommend `query` — that guidance is wrong for precise questions and should be
+  replaced with the rules above.
+- **Leave its memory features off** (`save-result`, `reflect`, `LESSONS.md`). They duplicate
+  the `es-source-type` / `es-status` / `es-outcome` axes with different vocabulary. Two
+  systems ranking trust differently is worse than one.
+
 ---
 
 ## Layout
