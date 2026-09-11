@@ -61,22 +61,33 @@ export function translateCommand(markdown: string): string {
   return `---\ndescription: ${JSON.stringify(fields.description || "")}\n---\n${delegation}${body.trimStart()}`;
 }
 
-function stageMarkdownDir(name: string, translate: (content: string, file: string) => string): boolean {
+/**
+ * OpenCode injects `instructions/` as absolute paths on `config.instructions`,
+ * which applies them to every agent in the session. omp's equivalent is a rule:
+ * `alwaysApply` with no `agents` filter is the same always-on scope.
+ */
+export function translateInstruction(name: string, markdown: string): string {
+  const { fields, body } = splitFrontmatter(markdown);
+  const description = fields.description || `Electric Shepherd ${name}`;
+  return `---\ndescription: ${JSON.stringify(description)}\nalwaysApply: true\n---\n${body.trimStart()}`;
+}
+
+function stageMarkdownDir(name: string, translate: (content: string, file: string) => string, target = name): boolean {
   const source = join(ROOT, name);
   if (!existsSync(source)) return false;
 
-  const target = join(OMP_ROOT, name);
-  rmSync(target, { recursive: true, force: true });
-  mkdirSync(target, { recursive: true });
+  const targetDir = join(OMP_ROOT, target);
+  rmSync(targetDir, { recursive: true, force: true });
+  mkdirSync(targetDir, { recursive: true });
 
   let count = 0;
   for (const entry of readdirSync(source, { withFileTypes: true })) {
     if (!entry.isFile() || extname(entry.name) !== ".md") continue;
     const content = readFileSync(join(source, entry.name), "utf8");
-    writeFileSync(join(target, entry.name), translate(content, entry.name), "utf8");
+    writeFileSync(join(targetDir, entry.name), translate(content, entry.name), "utf8");
     count += 1;
   }
-  process.stdout.write(`[omp-assets] staged ${name}/ (${count} translated)\n`);
+  process.stdout.write(`[omp-assets] staged ${name}/ -> ${target}/ (${count} translated)\n`);
   return true;
 }
 
@@ -84,6 +95,9 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import
   let staged = 0;
   if (stageMarkdownDir("agents", (content, file) => translateAgent(basename(file, ".md"), content))) staged += 1;
   if (stageMarkdownDir("commands", (content) => translateCommand(content))) staged += 1;
+  if (stageMarkdownDir("instructions", (content, file) => translateInstruction(basename(file, ".md"), content), "rules")) {
+    staged += 1;
+  }
 
   // Skills need no translation: omp reads the same SKILL.md frontmatter shape.
   const skillsSource = join(ROOT, "skills");

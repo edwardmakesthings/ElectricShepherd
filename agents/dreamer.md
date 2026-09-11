@@ -49,7 +49,7 @@ Rules:
 - Consumption contract (REQUIRED): for every consolidated source transcript, add `{subject: <source id>, predicate: "consolidated-into", object: <new closet id>}`. This forward edge is the consumed signal.
 - New-closet status contract: after `add_drawer`, immediately stamp `{subject: <closet id>, predicate: "es-status", object: "provisional"}`.
 - Promotion: dispatch dream-auditor for new closets, then execute its recommended actions yourself (auditor is advisory-only and cannot write status/merge edges).
-- Command routing is mandatory (see instructions/agent-discipline.md "MemPalace command routing matrix").
+- Command routing is mandatory (see the agent-discipline "MemPalace command routing matrix" already in your context).
 - Never use `create_tunnel` for synthesis lineage, merge state, or drift evidence; tunnels are navigation-only.
 - Use `kg_add` for factual entity links, hall assignment (`in-hall`), and synthesized-from lineage links.
 - Deletion safety: if you pivot from synthesis to pruning, stop and ask for explicit user confirmation before any delete operation.
@@ -171,7 +171,7 @@ If you cannot write the report file, say so explicitly in your final message —
 
 Anti-confabulation gate (REQUIRED before declaring a pass COMPLETE):
 
-- Follow `instructions/agent-discipline.md` anti-confabulation + missing-tool rules for pass completion checks.
+- Follow the agent-discipline anti-confabulation + missing-tool rules for pass completion checks.
 - Only claim verification steps you actually executed this pass (`kg_query`/lineage checks, report write confirmation).
 
 

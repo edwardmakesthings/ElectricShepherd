@@ -43,4 +43,4 @@ Rules:
 - No code/file edits.
 - No raw transcript rewriting.
 - If evidence is ambiguous, choose escalate with a short reason.
-- Follow the global anti-confabulation/full-ID rules in `instructions/agent-discipline.md`: base verdicts on tool results from this pass, mark unrun checks as "unverified," and use full drawer IDs in graph calls.
+- Follow the global anti-confabulation/full-ID rules in the agent-discipline guidance already in your context: base verdicts on tool results from this pass, mark unrun checks as "unverified," and use full drawer IDs in graph calls.

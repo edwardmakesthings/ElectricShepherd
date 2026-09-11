@@ -235,4 +235,5 @@ node_modules/
 /src/surface/omp/commands/
 /src/surface/omp/agents/
 /src/surface/omp/skills/
+/src/surface/omp/rules/
 .opencode/

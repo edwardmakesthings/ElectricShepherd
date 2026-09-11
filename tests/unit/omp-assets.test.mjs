@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { translateAgent, translateCommand } from "../../src/scripts/sync-omp-assets.ts";
+import { translateAgent, translateCommand, translateInstruction } from "../../src/scripts/sync-omp-assets.ts";
 
 const ES_AGENT = `---
 description: Memory consolidation orchestrator (map-reduce policy layer)
@@ -69,4 +69,19 @@ test("command translation leaves unrouted commands alone", () => {
 test("command translation preserves $ARGUMENTS for omp substitution", () => {
   const out = translateCommand("---\ndescription: X\nagent: dreamer\n---\nScope: $ARGUMENTS\n");
   assert.match(out, /Scope: \$ARGUMENTS/);
+});
+
+// OpenCode puts instructions/ on config.instructions, which applies to every
+// agent. omp's equivalent is a rule with alwaysApply and no agents filter.
+test("instruction translation becomes an always-on omp rule", () => {
+  const out = translateInstruction("agent-discipline", "# Agent discipline\n\nDo the thing.\n");
+  assert.match(out, /alwaysApply: true/);
+  assert.match(out, /description: "Electric Shepherd agent-discipline"/);
+  assert.match(out, /# Agent discipline/);
+  assert.ok(!out.includes("agents:"), "no agents filter means every agent, matching OpenCode");
+});
+
+test("instruction translation keeps an authored description", () => {
+  const out = translateInstruction("x", "---\ndescription: Custom\n---\nBody\n");
+  assert.match(out, /description: "Custom"/);
 });

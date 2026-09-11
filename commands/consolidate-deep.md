@@ -7,7 +7,7 @@ Take deliberate control of the dream: run a deep consolidation pass.
 
 Scope: $ARGUMENTS (default: the current project's memory if no scope is given)
 
-Tool routing: follow instructions/agent-discipline.md "MemPalace command routing matrix" for every memory operation (especially synthesis vs KG vs tunnel).
+Tool routing: follow the agent-discipline "MemPalace command routing matrix" already in your context for every memory operation (especially synthesis vs KG vs tunnel).
 
 Discovery safety policy:
 - Use the BOUNDED batch discovery from `agents/dreamer.md`: one page, filter, begin.
