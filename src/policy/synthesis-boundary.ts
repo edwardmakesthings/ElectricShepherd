@@ -13,6 +13,8 @@
  * surface enforce it instead of asking.
  */
 
+import { matchesAgentIdentity } from "./agent-identity.ts";
+
 /** Substrate tools that create or mutate derived memory. Matched as name suffixes. */
 export const CONSOLIDATION_WRITE_TOOL_NAMES = [
   "add_drawer",
@@ -35,19 +37,13 @@ export const DEFAULT_ALLOWED_CONSOLIDATION_WRITERS = ["dreamer"];
  *
  * omp's `tool_call` event carries no agent identity, and its session manager
  * does not expose the active agent, so the system prompt is the only signal
- * available. Matching is on the agent's identity sentence rather than a loose
- * keyword, so a transcript that merely discusses the dreamer cannot unlock it.
+ * available.
  */
 export function isAllowedConsolidationWriter(
   systemPrompt: readonly string[],
   allowed: readonly string[] = DEFAULT_ALLOWED_CONSOLIDATION_WRITERS,
 ): boolean {
-  const text = systemPrompt.join("\n").toLowerCase();
-  return allowed.some((name) => {
-    const agent = name.trim().toLowerCase();
-    if (!agent) return false;
-    return text.includes(`you are the ${agent}.`) || text.includes(`you are ${agent}.`);
-  });
+  return matchesAgentIdentity(systemPrompt, allowed);
 }
 
 /** True when a tool name is a derived-memory write, whatever gateway prefix it carries. */

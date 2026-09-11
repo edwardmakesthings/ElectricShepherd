@@ -14,11 +14,20 @@ export interface OmpToolResult {
   content: { type: "text"; text: string }[];
 }
 
+/**
+ * How the current session was launched. `"print"`/`"json"` are `omp -p` —
+ * documented as "process prompt and exit" — so a session_stop continuation
+ * there runs an extra full turn a one-shot invocation has no way to surface
+ * and no reason to expect.
+ */
+export type OmpExtensionMode = "tui" | "rpc" | "json" | "print";
+
 export interface OmpExtensionContext {
   cwd: string;
   sessionManager?: { getSessionId?(): string | undefined };
   /** The turn's effective system prompt; the only signal of which agent is active. */
   getSystemPrompt?(): string[];
+  mode?: OmpExtensionMode;
 }
 
 export interface OmpToolContext extends OmpExtensionContext {}

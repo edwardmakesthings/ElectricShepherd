@@ -139,6 +139,10 @@ export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
   // empty CSV falls back to that built-in list.
   { envKey: "ESHEPHERD_CHECKPOINT_ENABLED", path: "checkpoint.enabled", kind: "boolean", defaultValue: true },
   { envKey: "ESHEPHERD_CHECKPOINT_DISABLED_AGENTS", path: "checkpoint.disabledAgents", kind: "csv", defaultValue: "" },
+  // omp only: "print"/"json" (`omp -p`) is documented as "process prompt and
+  // exit"; a checkpoint continuation there runs a turn the invocation has no
+  // way to read. Restricts checkpointing to interactive ("tui"/"rpc") sessions.
+  { envKey: "ESHEPHERD_CHECKPOINT_INTERACTIVE_ONLY", path: "checkpoint.interactiveOnly", kind: "boolean", defaultValue: true },
 
   { envKey: "ESHEPHERD_LOOPGUARD_ENABLED", path: "loopGuard.enabled", kind: "boolean", defaultValue: true },
   { envKey: "ESHEPHERD_LOOPGUARD_THRESHOLD", path: "loopGuard.repeatThreshold", kind: "number", defaultValue: 3, min: 1 },
