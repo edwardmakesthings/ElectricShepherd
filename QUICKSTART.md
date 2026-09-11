@@ -6,9 +6,14 @@ semantics.
 
 Sections 1–4: setup. 5–7: operation. 8–9: reference.
 
+Electric Shepherd runs on two harnesses. Pick one and follow section 1 for it; everything
+after section 1 is identical.
+
 ---
 
-## 1. Wire into OpenCode
+## 1. Wire into a harness
+
+### 1a. OpenCode
 
 OpenCode merges global config (`~/.config/opencode/opencode.jsonc`) with project config
 (`./opencode.jsonc`) — it does not replace one with the other. Enable the plugin in either:
@@ -27,12 +32,53 @@ need to run OpenCode from inside this repo or copy files into `.opencode/`.
 |---|---|---|
 | plugin | yes | `plugin: ["electric-shepherd"]` |
 | `agents/*.md` | yes | appended to `config.agent` |
-| `command/*.md` | yes | appended to `config.command` |
+| `commands/*.md` | yes | appended to `config.command` |
 | `instructions/agent-discipline.md` | yes | absolute path appended to `config.instructions` (opt out: `assets.injectInstructions=false`) |
 | `skills/eshepherd/SKILL.md` | **no** | OpenCode has no skill config key — copy it to `.opencode/skills/eshepherd/SKILL.md` yourself |
 | `snippets/*.md` | **no** | OpenChamber assets; not an OpenCode auto-load concept |
 
 Your own agents and commands override bundled ones on a name collision.
+
+### 1b. oh-my-pi (omp)
+
+omp has no plugin config key. It loads an **extension package root**, and discovers that
+root's `commands/`, `agents/`, `skills/` and `rules/` subdirectories:
+
+```bash
+npm run omp:assets          # stage + translate the assets into the root
+omp -e ./src/surface/omp    # load it
+```
+
+To make it permanent, add the absolute path to `extensions:` in `~/.omp/agent/config.yml`.
+
+Two things that will silently not work:
+
+- **Point at the directory, not `index.ts`.** omp drops non-directory extension paths from
+  asset discovery ("file entrypoints have no package sub-tree to scan"), so `-e
+  ./src/surface/omp/index.ts` gives you the tools and nothing else.
+- **Don't point at the repo root.** The `index.ts` there is the OpenCode plugin entry, so omp
+  loads the wrong module and registers none of the tools.
+
+`npm run omp:assets` is a staging step, not a copy — the two harnesses do not share a
+frontmatter schema. Re-run it after editing any command, agent, skill or instruction. The
+staged directories are generated and gitignored; the canonical copies stay at the repo root.
+
+| Canonical | Staged as | Translation |
+|---|---|---|
+| `agents/*.md` | `agents/*.md` | adds `name` (omp requires it); drops OpenCode's `tools` glob map, which omp cannot express — agents get omp's default tool surface |
+| `commands/*.md` | `commands/*.md` | keeps `description`; rewrites `agent:` routing as a `task`-tool delegation, since omp has no in-session agent switch |
+| `instructions/*.md` | `rules/*.md` | adds `alwaysApply: true` — omp's equivalent of OpenCode's `config.instructions` |
+| `skills/**` | `skills/**` | none; omp reads the same `SKILL.md` shape |
+
+### What differs between the harnesses
+
+| | OpenCode | omp |
+|---|---|---|
+| Loop guard, stall retry, task watchdog | Electric Shepherd provides them | **omp's own** — ES does not port them, or they double-fire |
+| Compaction archive | ES writes one | omp persists a `CompactionEntry` itself |
+| Memory checkpoint at settle | every session | interactive only (a continuation in `-p` breaks process-and-exit) |
+| Transcript capture | `opencode --pure export` | reads omp's own session JSONL |
+| Agent tool restrictions | enforced by `tools:` globs | **not enforced** — the map is dropped rather than mistranslated |
 
 > `agent-discipline.md` is the single statement of the memory contract. Do not restate it in
 > individual agent prompts; a copy will drift.

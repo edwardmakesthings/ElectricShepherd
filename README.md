@@ -112,7 +112,7 @@ src/
   core/         the only directory that knows MemPalace exists
   tools/        MCP tool modules
   scripts/      operator entrypoints
-agents/ command/ skills/ instructions/ snippets/    assets, resolved by name
+agents/ commands/ skills/ instructions/ snippets/   assets, resolved by name
 docs/ tests/ index.ts
 ```
 
@@ -123,6 +123,9 @@ see the coupling; `verify:structural` link-checks every `.md` path mentioned in 
 ---
 
 ## Install
+
+Electric Shepherd runs on two harnesses. The memory layer is identical on both; only the
+wiring differs.
 
 **In OpenCode** — one line in `opencode.json`:
 
@@ -137,10 +140,22 @@ commands, and instruction rules into your resolved config, so they load in any p
 enables the plugin. You do not need to run OpenCode from inside this repo or copy anything
 into `.opencode/`. Your own agents and commands always win a name collision.
 
-The hook is necessary because OpenCode only auto-discovers `agents/` and `command/` folders
+The hook is necessary because OpenCode only auto-discovers `agents/` and `commands/` folders
 for the active **project** root, and an installed plugin is never the project root.
 
-**The policy runtime** runs headless, outside OpenCode:
+**In oh-my-pi (omp)** — omp has no plugin key. It loads an extension package root and
+discovers that root's `commands/`, `agents/`, `skills/` and `rules/`:
+
+```bash
+npm run omp:assets          # stage + translate the assets into the root
+omp -e ./src/surface/omp    # load it (the DIRECTORY, not index.ts)
+```
+
+omp implements its own loop guard, stall retry, task watchdog and compaction archive, so
+Electric Shepherd does not port those to that surface — running both layers double-fires
+their correctives. See [QUICKSTART.md](QUICKSTART.md) §1b for the full difference table.
+
+**The policy runtime** runs headless, outside either harness:
 
 ```bash
 npm install -g electric-shepherd
@@ -153,18 +168,23 @@ Then see [QUICKSTART.md](QUICKSTART.md) for MemPalace wiring, config, and first 
 
 ### What ships
 
-| Asset | Auto-loads in a consumer project? |
-|---|---|
-| plugin (`src/surface/plugin/session-policy.ts`) | yes — via `plugin: ["electric-shepherd"]` |
-| agents (`agents/*.md`) — `dreamer`, `dream-mapper`, `dream-auditor` | yes — injected into `config.agent` |
-| commands (`command/*.md`) | yes — injected into `config.command` |
-| instructions (`instructions/agent-discipline.md`) | yes — appended to `config.instructions` (opt out: `assets.injectInstructions=false`) |
-| skills (`skills/eshepherd/SKILL.md`) | no — OpenCode has no skill config key; copy it into your own `.opencode/skills/` |
-| snippets (`snippets/memsave.md`, `snippets/memload.md`) | no — OpenChamber assets, not an OpenCode concept |
+| Asset | OpenCode | omp |
+|---|---|---|
+| plugin / extension | yes — `plugin: ["electric-shepherd"]` | yes — `-e ./src/surface/omp` |
+| agents (`agents/*.md`) — `dreamer`, `dream-mapper`, `dream-auditor` | injected into `config.agent` | staged as omp task agents |
+| commands (`commands/*.md`) | injected into `config.command` | staged as omp slash commands |
+| instructions (`instructions/agent-discipline.md`) | appended to `config.instructions` | staged as an `alwaysApply` rule |
+| skills (`skills/eshepherd/SKILL.md`) | no — no skill config key; copy into `.opencode/skills/` | yes — discovered from the extension root |
+| snippets (`snippets/*.md`) | no — OpenChamber assets | no |
 
 **Slash commands:** `/consolidate`, `/consolidate-deep`, `/memory-status`,
 `/memory-refresh`, `/ingest-docs`, `/remind`, `/reminders`, `/promote-skill`. Each has a
 `npm run sheep:*` equivalent for cron or an external scheduler.
+
+> Commands are prompt templates, so they inherit the session's model. Keep their bodies
+> narrow — name one tool and the fields to render. A body that offers a fallback path invites
+> a smaller model to take it, which is how a 36-second aggregate call becomes a 15-minute
+> enumeration.
 
 ---
 
