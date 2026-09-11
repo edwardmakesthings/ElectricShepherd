@@ -31,9 +31,22 @@ export type MemgraphToolMap = {
 };
 
 // The `es-source-type` axis — orthogonal to `es-status`.
-export type ClosetSourceType = "transcript" | "doc" | "synthesis" | "skill";
+// `note` is first-party prose authored DURING work (diary, research writeup) with no
+// `synthesized-from` lineage and no captured-session provenance — above transcript on
+// authority, below synthesis. Lineage wins over room name, so a diary drawer that was
+// actually derived from sources stays `synthesis`.
+export type ClosetSourceType = "transcript" | "note" | "doc" | "synthesis" | "skill";
 
-export const CLOSET_SOURCE_TYPES: readonly string[] = ["transcript", "doc", "synthesis", "skill"];
+export const CLOSET_SOURCE_TYPES: readonly string[] = ["transcript", "note", "doc", "synthesis", "skill"];
+
+/**
+ * Match a raw KG object against the closed vocabulary. MemPalace canonicalizes entity
+ * display names on read ("synthesis" -> "Synthesis"), so values are lowercased first.
+ */
+export function parseClosetSourceType(raw: unknown): ClosetSourceType | null {
+  const value = String(raw ?? "").trim().toLowerCase();
+  return CLOSET_SOURCE_TYPES.includes(value) ? (value as ClosetSourceType) : null;
+}
 
 // The `es-domain` axis on skill drawers — a CLOSED
 // vocabulary so domain drift cannot become room-sprawl wearing different clothes.

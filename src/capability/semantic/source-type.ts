@@ -2,13 +2,13 @@
  * Closet source-type axis — `es-source-type`.
  *
  * The `es-source-type` KG fact records what KIND of material a closet holds
- * (transcript | doc | synthesis | skill). It is stamped at write time, never
+ * (transcript | note | doc | synthesis | skill). It is stamped at write time, never
  * conflated with `es-status` — each setter scopes its kg_invalidate to its own
  * predicate, so the two axes are independently settable by construction.
  */
 
 import type { ClosetSourceType } from "../../core/memgraph-structure.ts";
-import { CLOSET_SOURCE_TYPES } from "../../core/memgraph-structure.ts";
+import { parseClosetSourceType } from "../../core/memgraph-structure.ts";
 import type { MemgraphInternals } from "../../core/memgraph-internals.ts";
 import { vocabValuesFromFacts } from "../../core/memgraph-transport.ts";
 
@@ -24,7 +24,8 @@ export async function getClosetSourceType(core: MemgraphInternals, closetId: str
   }, `getClosetSourceType(${closetId}) read failure degrades to unstamped`);
   const values = vocabValuesFromFacts(result, "outgoing");
   for (const value of values) {
-    if ((CLOSET_SOURCE_TYPES as readonly string[]).includes(value)) return value as ClosetSourceType;
+    const parsed = parseClosetSourceType(value);
+    if (parsed) return parsed;
   }
   return null;
 }

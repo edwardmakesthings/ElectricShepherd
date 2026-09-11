@@ -47,7 +47,7 @@ import { runCheckDuplicate, runCheckpointWrite, runKgAddWrites } from "../core/o
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
 import { SKILLS_ROOM, SKILL_LIKE_STEMS } from "./file_skill.ts";
 import { pickPurposeRoom } from "./ingest_docs.ts";
-import { SKILL_DOMAINS, type SkillDomain } from "../core/memgraph.ts";
+import { SKILL_DOMAINS, parseClosetSourceType, type SkillDomain } from "../core/memgraph.ts";
 
 declare const process: {
   env: Record<string, string | undefined>;
@@ -110,8 +110,8 @@ async function closetSourceType(call: CallTool, id: string): Promise<string | nu
     .then((raw) => {
       for (const fact of parseFacts(raw)) {
         if (fact.current === false) continue;
-        const value = asText(fact.object).trim().toLowerCase();
-        if (value === "transcript" || value === "doc" || value === "synthesis" || value === "skill") return value;
+        const parsed = parseClosetSourceType(fact.object);
+        if (parsed) return parsed;
       }
       return null; // unstamped or read failure — never a default type
     })

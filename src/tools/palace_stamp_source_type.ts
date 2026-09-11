@@ -5,6 +5,7 @@
  * Inference rules:
  *   - transcript-like rooms (isTranscriptLikeRoom) → `transcript` (room name is the signal; no KG call)
  *   - drawers with outgoing `synthesized-from` edges → `synthesis` (one-hop kg_query per drawer)
+ *   - note-like rooms (isNoteLikeRoom) with no such lineage → `note` (diary/research prose)
  *   - everything else → left UNSTAMPED ("unknown authority"), never guessed
  *
  * Bounded by construction: each room is probed for its total, then walked with at
@@ -23,11 +24,13 @@ import {
   asObject,
   asText,
   createPalaceClient,
+  isNoteLikeRoom,
   isTranscriptLikeRoom,
   parseFacts,
   parseRows,
   parseTaxonomy,
 } from "../core/palace-tools.ts";
+import { parseClosetSourceType } from "../core/memgraph.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../core/runtime-config.ts";
 import { normalizeDryRunArg } from "../core/substrate.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
@@ -46,7 +49,7 @@ const MAX_MAX_ROOMS = 200;
 const DEFAULT_CONCURRENCY = 8;
 const MAX_CONCURRENCY = 16;
 
-export type SourceTypeInference = "transcript" | "synthesis" | "unknown";
+export type SourceTypeInference = "transcript" | "note" | "synthesis" | "unknown";
 
 export type StampPlanEntry = {
   drawer_id: string;
@@ -64,6 +67,7 @@ export type RoomStampReport = {
   not_covered_by_page_cap: number;
   inferred_transcript: number;
   inferred_synthesis: number;
+  inferred_note: number;
   unknown: number;
   check_failed: number;
   already_stamped: number;
@@ -78,6 +82,7 @@ export type StampReport = {
     covered: number;
     inferred_transcript: number;
     inferred_synthesis: number;
+    inferred_note: number;
     unknown: number;
     check_failed: number;
     already_stamped: number;
@@ -119,10 +124,8 @@ export async function readCurrentSourceType(call: CallTool, drawerId: string): P
   }
   const values = extractOutgoingObjects(drawerId, facts);
   for (const raw of values) {
-    // MemPalace canonicalizes entity display names on read ("synthesis" -> "Synthesis"),
-    // so vocabulary values must be lowercased before matching the closed set.
-    const value = raw.toLowerCase();
-    if (value === "transcript" || value === "doc" || value === "synthesis" || value === "skill") return value;
+    const parsed = parseClosetSourceType(raw);
+    if (parsed) return parsed;
   }
   return null;
 }
@@ -154,6 +157,8 @@ async function hasOutgoingSynthesizedFrom(call: CallTool, drawerId: string): Pro
 /**
  * Classify one drawer's inferred source type. Transcript-like rooms are the signal
  * (no KG call); everything else gets a one-hop outgoing synthesized-from check.
+ * Lineage outranks the note-room name, so a diary drawer that really was derived
+ * from sources classifies as synthesis rather than note.
  */
 export async function inferSourceType(
   call: CallTool,
@@ -164,6 +169,7 @@ export async function inferSourceType(
   const edge = await hasOutgoingSynthesizedFrom(call, drawerId);
   if (edge === "yes") return { inference: "synthesis", checkFailed: false };
   if (edge === "failed") return { inference: "unknown", checkFailed: true };
+  if (isNoteLikeRoom(room)) return { inference: "note", checkFailed: false };
   return { inference: "unknown", checkFailed: false };
 }
 
@@ -258,12 +264,14 @@ export async function runSourceTypeBackfill(args: {
 
     let inferredTranscript = 0;
     let inferredSynthesis = 0;
+    let inferredNote = 0;
     let unknown = 0;
     let checkFailed = 0;
 
     for (const item of collected.entries) {
       if (item.inference === "transcript") inferredTranscript += 1;
       else if (item.inference === "synthesis") inferredSynthesis += 1;
+      else if (item.inference === "note") inferredNote += 1;
       else unknown += 1;
       if (item.checkFailed) checkFailed += 1;
 
@@ -290,6 +298,7 @@ export async function runSourceTypeBackfill(args: {
       not_covered_by_page_cap: collected.notCovered,
       inferred_transcript: inferredTranscript,
       inferred_synthesis: inferredSynthesis,
+      inferred_note: inferredNote,
       unknown,
       check_failed: checkFailed,
       already_stamped: alreadyStamped,
@@ -302,6 +311,7 @@ export async function runSourceTypeBackfill(args: {
     totals.covered += report.covered;
     totals.inferred_transcript += report.inferred_transcript;
     totals.inferred_synthesis += report.inferred_synthesis;
+    totals.inferred_note += report.inferred_note;
     totals.unknown += report.unknown;
     totals.check_failed += report.check_failed;
     totals.already_stamped += report.already_stamped;
@@ -328,7 +338,6 @@ export async function runSourceTypeBackfill(args: {
             predicate: "es-source-type",
             old_object: entry.current,
             new_object: entry.inferred,
-            source_closet: entry.drawer_id,
           },
         }]);
         if (!result?.ok) throw new Error(result?.error || "kg_supersede failed");
@@ -357,6 +366,7 @@ function emptyTotals(): StampReport["totals"] {
     covered: 0,
     inferred_transcript: 0,
     inferred_synthesis: 0,
+    inferred_note: 0,
     unknown: 0,
     check_failed: 0,
     already_stamped: 0,
@@ -374,7 +384,7 @@ function clampNumber(value: unknown, fallback: number, min: number, max: number)
 export default defineTool({
   name: "palace_stamp_source_type",
   description:
-    "Bounded, dry-run-first backfill of the `es-source-type` KG axis for existing drawers. Infers `transcript` for transcript-like rooms (isTranscriptLikeRoom) and `synthesis` for drawers with outgoing synthesized-from edges; everything else is left unstamped (unknown), never guessed. Each room is probed for its total then walked with at most max_pages pages of page_size drawers — a room can never be paged to exhaustion. Dry-run by default: pass dry_run:false to apply.",
+    "Bounded, dry-run-first backfill of the `es-source-type` KG axis for existing drawers. Infers `transcript` for transcript-like rooms (isTranscriptLikeRoom), `synthesis` for drawers with outgoing synthesized-from edges, and `note` for note-like rooms (isNoteLikeRoom: diary/research prose) that have no such lineage; everything else is left unstamped (unknown), never guessed. Each room is probed for its total then walked with at most max_pages pages of page_size drawers — a room can never be paged to exhaustion. Dry-run by default: pass dry_run:false to apply.",
   args: (s) => ({
     wing: s.string().optional().describe("Wing to backfill. Defaults to this project's wing."),
     rooms: s

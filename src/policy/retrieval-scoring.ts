@@ -167,11 +167,13 @@ export function staleScoreTerm(flagged: boolean, weight: number): number {
 // Magnitudes are secondary to the factual floor below; they only shape ordering
 // within what the floor permits. Spec: factual boosts doc then synthesis with
 // transcript weakest; historical boosts synthesis and transcript; procedural
-// boosts skill then synthesis.
+// boosts skill then synthesis. `note` sits between transcript and synthesis — the
+// separation is real on factual (0 vs -1); on historical it ties transcript, since
+// lifting it to 2 would make it indistinguishable from synthesis.
 export const INTENT_AUTHORITY_BOOSTS: Record<RetrievalIntent, Record<NodeAuthority, number>> = {
-  factual: { doc: 2, synthesis: 1, transcript: -1, skill: 0, unknown: 0 },
-  historical: { doc: 0, synthesis: 2, transcript: 1, skill: 0, unknown: 0 },
-  procedural: { doc: 0, synthesis: 1, transcript: 0, skill: 2, unknown: 0 },
+  factual: { doc: 2, synthesis: 1, note: 0, transcript: -1, skill: 0, unknown: 0 },
+  historical: { doc: 0, synthesis: 2, note: 1, transcript: 1, skill: 0, unknown: 0 },
+  procedural: { doc: 0, synthesis: 1, note: 0, transcript: 0, skill: 2, unknown: 0 },
 };
 
 /**

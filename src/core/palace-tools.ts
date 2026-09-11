@@ -219,6 +219,13 @@ export function isTranscriptLikeRoom(room: unknown): boolean {
   return /transcript|mem[-_]?raw|session|capture/.test(name);
 }
 
+/** Rooms whose names suggest first-party prose authored during work (diary, research). */
+export function isNoteLikeRoom(room: unknown): boolean {
+  const name = asText(room).toLowerCase();
+  if (!name) return false;
+  return /diary|notes?|research|exploration|findings/.test(name);
+}
+
 export function summarizeDrawerRows(
   rows: Record<string, unknown>[],
   previewChars: number,

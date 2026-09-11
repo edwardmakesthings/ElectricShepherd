@@ -18,6 +18,7 @@
  * Classification (unchanged from the tool):
  *   - transcript-like room name (isTranscriptLikeRoom) -> `transcript`, no KG call
  *   - outgoing `synthesized-from` edge -> `synthesis`
+ *   - note-like room with no such lineage -> `note`
  *   - neither -> left UNSTAMPED, never guessed
  *
  * Dry-run by default, like every mutating tool in this project.
@@ -84,6 +85,7 @@ type RoomTotals = {
   total: number;
   inferred_transcript: number;
   inferred_synthesis: number;
+  inferred_note: number;
   unknown: number;
   check_failed: number;
   already_stamped: number;
@@ -97,6 +99,7 @@ export function emptyRoomTotals(room: string): RoomTotals {
     total: 0,
     inferred_transcript: 0,
     inferred_synthesis: 0,
+    inferred_note: 0,
     unknown: 0,
     check_failed: 0,
     already_stamped: 0,
@@ -128,6 +131,7 @@ export async function backfillRoom(args: {
       if (checkFailed) totals.check_failed += 1;
       if (inference === "transcript") totals.inferred_transcript += 1;
       else if (inference === "synthesis") totals.inferred_synthesis += 1;
+      else if (inference === "note") totals.inferred_note += 1;
       else {
         totals.unknown += 1;
         return; // never guessed, never written
@@ -238,13 +242,14 @@ async function main(): Promise<void> {
       total: acc.total + r.total,
       inferred_transcript: acc.inferred_transcript + r.inferred_transcript,
       inferred_synthesis: acc.inferred_synthesis + r.inferred_synthesis,
+      inferred_note: acc.inferred_note + r.inferred_note,
       unknown: acc.unknown + r.unknown,
       check_failed: acc.check_failed + r.check_failed,
       already_stamped: acc.already_stamped + r.already_stamped,
       stamped: acc.stamped + r.stamped,
       stamp_failed: acc.stamp_failed + r.stamp_failed,
     }),
-    { total: 0, inferred_transcript: 0, inferred_synthesis: 0, unknown: 0, check_failed: 0, already_stamped: 0, stamped: 0, stamp_failed: 0 },
+    { total: 0, inferred_transcript: 0, inferred_synthesis: 0, inferred_note: 0, unknown: 0, check_failed: 0, already_stamped: 0, stamped: 0, stamp_failed: 0 },
   );
 
   runtimeProcess.stdout.write(

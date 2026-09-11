@@ -38,7 +38,9 @@ import { getRulesOut, fileDeadEnd } from "../capability/negative/index.ts";
 import { getOutcomeCounts, recordOutcome } from "../capability/evaluative/outcomes.ts";
 
 export {
+  CLOSET_SOURCE_TYPES,
   SKILL_DOMAINS,
+  parseClosetSourceType,
   type ClosetSourceType,
   type JsonMap,
   type MemgraphClientOptions,

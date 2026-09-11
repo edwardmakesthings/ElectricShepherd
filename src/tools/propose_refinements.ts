@@ -42,6 +42,7 @@
 
 import { defineTool } from "./contract.ts";
 import { asObject, asText, createPalaceClient, parseFacts } from "../core/palace-tools.ts";
+import { parseClosetSourceType } from "../core/memgraph.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../core/runtime-config.ts";
 import { runKgAddWrites } from "../core/operation.ts";
 import { normalizeDryRunArg } from "../core/substrate.ts";
@@ -100,8 +101,8 @@ function closetSourceType(call: CallTool, id: string): Promise<string | null> {
     .then((raw) => {
       for (const fact of parseFacts(raw)) {
         if (fact.current === false) continue;
-        const value = asText(fact.object).trim().toLowerCase();
-        if (value === "transcript" || value === "doc" || value === "synthesis" || value === "skill") return value;
+        const parsed = parseClosetSourceType(fact.object);
+        if (parsed) return parsed;
       }
       return null; // unstamped or read failure — never a default type
     })

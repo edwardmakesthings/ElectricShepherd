@@ -75,9 +75,9 @@ test("transcript-like room infers transcript with zero kg_query calls", async ()
 
 test("non-transcript drawer with outgoing synthesized-from infers synthesis", async () => {
   const { call } = makeFakePalace({
-    taxonomy: { [WING]: { notes: 2 } },
+    taxonomy: { [WING]: { analysis: 2 } },
     rooms: {
-      [`${WING}/notes`]: ["synth-drawer", "plain-drawer"],
+      [`${WING}/analysis`]: ["synth-drawer", "plain-drawer"],
       [`__kg__:synth-drawer|synthesized-from`]: () => ({
         facts: [{ current: true, subject: "synth-drawer", predicate: "synthesized-from", object: "src-1" }],
       }),
@@ -86,7 +86,7 @@ test("non-transcript drawer with outgoing synthesized-from infers synthesis", as
 
   const report = await runSourceTypeBackfill({ call, wing: WING, dryRun: true });
 
-  const roomReport = report.rooms.find((r) => r.room === "notes");
+  const roomReport = report.rooms.find((r) => r.room === "analysis");
   assert.equal(roomReport.transcript_like, false);
   assert.equal(roomReport.inferred_synthesis, 1);
   assert.equal(roomReport.unknown, 1); // plain-drawer has no edges → unknown
@@ -94,9 +94,9 @@ test("non-transcript drawer with outgoing synthesized-from infers synthesis", as
 
 test("unknown drawers are left unstamped (no kg_add) in apply mode", async () => {
   const { call, calls } = makeFakePalace({
-    taxonomy: { [WING]: { notes: 2 } },
+    taxonomy: { [WING]: { analysis: 2 } },
     rooms: {
-      [`${WING}/notes`]: ["synth-drawer", "plain-drawer"],
+      [`${WING}/analysis`]: ["synth-drawer", "plain-drawer"],
       [`__kg__:synth-drawer|synthesized-from`]: () => ({
         facts: [{ current: true, subject: "synth-drawer", predicate: "synthesized-from", object: "src-1" }],
       }),
@@ -155,9 +155,9 @@ test("apply skips already-correctly-stamped drawers (no invalidate, no re-add)",
 
 test("apply supersedes a conflicting previous value atomically", async () => {
   const { call, calls } = makeFakePalace({
-    taxonomy: { [WING]: { notes: 1 } },
+    taxonomy: { [WING]: { analysis: 1 } },
     rooms: {
-      [`${WING}/notes`]: ["synth-drawer"],
+      [`${WING}/analysis`]: ["synth-drawer"],
       [`__kg__:synth-drawer|synthesized-from`]: () => ({
         facts: [{ current: true, subject: "synth-drawer", predicate: "synthesized-from", object: "src-1" }],
       }),
@@ -171,12 +171,13 @@ test("apply supersedes a conflicting previous value atomically", async () => {
 
   const supersedes = calls.filter((c) => c.name === "kg_supersede");
   assert.equal(supersedes.length, 1);
+  // kg_supersede declares only subject/predicate/old_object/new_object/at; MemPalace
+  // strict-validates and rejects anything else with -32602, failing the whole call.
   assert.deepEqual(supersedes[0].args, {
     subject: "synth-drawer",
     predicate: "es-source-type",
     old_object: "doc",
     new_object: "synthesis",
-    source_closet: "synth-drawer",
   });
   const adds = calls.filter((c) => c.name === "kg_add");
   assert.equal(adds.length, 0);
@@ -185,9 +186,9 @@ test("apply supersedes a conflicting previous value atomically", async () => {
 
 test("a failed kg_query reads as unknown (unstamped) and is counted as check_failed", async () => {
   const { call } = makeFakePalace({
-    taxonomy: { [WING]: { notes: 1 } },
+    taxonomy: { [WING]: { analysis: 1 } },
     rooms: {
-      [`${WING}/notes`]: ["flaky-drawer"],
+      [`${WING}/analysis`]: ["flaky-drawer"],
       [`__kg__:flaky-drawer|synthesized-from`]: "throw",
     },
   });
@@ -249,13 +250,49 @@ test("inferSourceType classifies by room and edge presence", async () => {
       [`__kg__:x|synthesized-from`]: () => ({ facts: [{ current: true, subject: "x", object: "s" }] }),
     },
   }).call;
-  assert.deepEqual(await inferSourceType(synthCall, "notes", "x"), { inference: "synthesis", checkFailed: false });
+  assert.deepEqual(await inferSourceType(synthCall, "analysis", "x"), { inference: "synthesis", checkFailed: false });
 
   const unknownCall = makeFakePalace({}).call;
-  assert.deepEqual(await inferSourceType(unknownCall, "notes", "y"), { inference: "unknown", checkFailed: false });
+  assert.deepEqual(await inferSourceType(unknownCall, "analysis", "y"), { inference: "unknown", checkFailed: false });
 
   const failedCall = makeFakePalace({
     rooms: { [`__kg__:z|synthesized-from`]: "throw" },
   }).call;
-  assert.deepEqual(await inferSourceType(failedCall, "notes", "z"), { inference: "unknown", checkFailed: true });
+  assert.deepEqual(await inferSourceType(failedCall, "analysis", "z"), { inference: "unknown", checkFailed: true });
+});
+
+test("note-like rooms with no lineage infer note", async () => {
+  const call = makeFakePalace({}).call;
+  for (const room of ["diary", "notes", "research", "exploration", "findings"]) {
+    assert.deepEqual(await inferSourceType(call, room, "d"), { inference: "note", checkFailed: false });
+  }
+});
+
+test("lineage outranks the note-like room name", async () => {
+  const call = makeFakePalace({
+    rooms: {
+      [`__kg__:derived|synthesized-from`]: () => ({ facts: [{ current: true, subject: "derived", object: "s" }] }),
+    },
+  }).call;
+  assert.deepEqual(await inferSourceType(call, "diary", "derived"), { inference: "synthesis", checkFailed: false });
+});
+
+test("a failed lineage check in a note-like room stays unknown, never note", async () => {
+  const call = makeFakePalace({ rooms: { [`__kg__:flaky|synthesized-from`]: "throw" } }).call;
+  assert.deepEqual(await inferSourceType(call, "diary", "flaky"), { inference: "unknown", checkFailed: true });
+});
+
+test("note drawers are stamped in apply mode", async () => {
+  const { call, calls } = makeFakePalace({
+    taxonomy: { [WING]: { diary: 1 } },
+    rooms: { [`${WING}/diary`]: ["diary-1"] },
+  });
+
+  const report = await runSourceTypeBackfill({ call, wing: WING, dryRun: false });
+
+  const kgAdds = calls.filter((c) => c.name === "kg_add");
+  assert.equal(kgAdds.length, 1);
+  assert.equal(kgAdds[0].args.object, "note");
+  assert.equal(report.totals.inferred_note, 1);
+  assert.equal(report.totals.stamped, 1);
 });

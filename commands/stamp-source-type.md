@@ -17,6 +17,7 @@ Execution:
 Inference rules (never guessed):
 
 - Transcript-like rooms (`isTranscriptLikeRoom`) → `transcript` (room name is the signal; no per-drawer KG call).
+- Note-like rooms (`isNoteLikeRoom` — diary, notes, research, exploration, findings) with no `synthesized-from` lineage → `note`. Lineage wins, so a diary drawer that really was derived from sources stays `synthesis`.
 - Drawers with outgoing `synthesized-from` edges → `synthesis`.
 - Everything else → left UNSTAMPED ("unknown authority"). A failed edge check also stays unstamped and is counted as `check_failed`.
 
