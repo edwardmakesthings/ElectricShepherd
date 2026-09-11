@@ -87,7 +87,7 @@ export type StampReport = {
   next_step?: string;
 };
 
-type CallTool = (name: string, payload: Record<string, unknown>) => Promise<unknown>;
+export type CallTool = (name: string, payload: Record<string, unknown>) => Promise<unknown>;
 
 /** One-hop outgoing objects for a predicate; tolerant of failure (reads as "no edges"). */
 function extractOutgoingObjects(entity: string, facts: Record<string, unknown>[]): string[] {
@@ -102,7 +102,7 @@ function extractOutgoingObjects(entity: string, facts: Record<string, unknown>[]
 }
 
 /** Current es-source-type value on a drawer, or null when unstamped/unreadable. */
-async function readCurrentSourceType(call: CallTool, drawerId: string): Promise<string | null> {
+export async function readCurrentSourceType(call: CallTool, drawerId: string): Promise<string | null> {
   let facts: Record<string, unknown>[];
   try {
     facts = parseFacts(

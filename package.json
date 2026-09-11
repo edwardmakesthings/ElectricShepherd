@@ -33,6 +33,7 @@
     "policy:cadence": "node --experimental-strip-types src/scripts/run-memory-consolidation-and-validation.ts --run-cadence --cadence-mode plan",
     "policy:cadence:execute": "node --experimental-strip-types src/scripts/run-memory-consolidation-and-validation.ts --run-cadence --cadence-mode execute",
     "policy:backfill:nontranscript": "node --experimental-strip-types src/scripts/run-nontranscript-backfill.ts",
+    "policy:backfill:source-type": "node --experimental-strip-types src/scripts/run-source-type-backfill.ts",
     "policy:mem-core:load": "node --experimental-strip-types src/scripts/run-mem-core-loader.ts",
     "verify:structural": "node --experimental-strip-types src/scripts/verify-structural.ts",
     "omp:assets": "node --experimental-strip-types src/scripts/sync-omp-assets.ts",
