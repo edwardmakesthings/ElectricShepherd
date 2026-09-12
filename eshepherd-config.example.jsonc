@@ -109,6 +109,13 @@
     // judgement, and a thinking-heavy general model spends minutes deliberating
     // a one-line verdict. Pick a model whose reasoning budget matches the job.
     "mapperModel": "",
+    // Keep each mapper/auditor pass as a readable harness session instead of an
+    // ephemeral one. omp discards the transcript entirely without this; opencode
+    // always persists, so there it only adds a findable title. Off by default:
+    // one session per drawer means a 26-chunk run leaves 26 of them. Note omp
+    // writes the JSONL when a pass EXITS, so this gives you a transcript per
+    // completed pass, not a live feed — use `consolidation_progress` for that.
+    "keepMapperSessions": false,
     // Harness that runs those passes: "omp", "opencode", or empty to probe
     // opencode then omp. Set it to match the harness you actually run, or a
     // session in one will spawn the other and load its whole plugin surface.

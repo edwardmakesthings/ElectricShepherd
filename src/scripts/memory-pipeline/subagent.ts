@@ -291,31 +291,53 @@ function ompAgentPromptFile(agentName: string, esRoot: string): string | undefin
   return target;
 }
 
-export function runSubagent(args: {
+export type SubagentInvocation = {
   runner: SubagentRunner;
   agentName?: string;
   modelArg?: string;
   prompt: string;
-  timeoutMs: number;
   esRoot?: string;
-}): string {
-  const commandArgs: string[] =
-    args.runner.kind === "omp"
-      ? // omp has no --agent for a top-level run (agents are `task` subagents), so
-        // the agent definition rides in as an appended system prompt. Extensions
-        // are disabled so a subagent pass cannot re-enter Electric Shepherd and
-        // recursively trigger capture/consolidation.
-        ["-p", args.prompt, "--no-session", "--no-extensions", "--no-title", "--auto-approve"]
-      : ["run", args.prompt];
+  /** Keep the pass as a readable harness session instead of an ephemeral one. */
+  keepSession?: boolean;
+  /** Session title when kept, so a run's passes are identifiable in a session list. */
+  sessionTitle?: string;
+};
 
+/** Build the harness CLI argv for one subagent pass. Exported for tests. */
+export function buildSubagentArgs(args: SubagentInvocation, promptFile?: string): string[] {
   if (args.runner.kind === "omp") {
-    const promptFile = args.agentName && args.esRoot ? ompAgentPromptFile(args.agentName, args.esRoot) : undefined;
-    if (promptFile) commandArgs.push(`--append-system-prompt=${promptFile}`);
-    if (args.modelArg) commandArgs.push("--model", args.modelArg.replace(",", "/"));
-  } else {
-    if (args.agentName) commandArgs.push("--agent", args.agentName);
-    if (args.modelArg) commandArgs.push("--model", args.modelArg);
+    // omp has no --agent for a top-level run (agents are `task` subagents), so the
+    // agent definition rides in as an appended system prompt. Extensions stay off
+    // so a subagent pass cannot re-enter Electric Shepherd and recursively trigger
+    // capture/consolidation.
+    const argv = ["-p", args.prompt, "--no-extensions", "--auto-approve"];
+    // omp writes the session JSONL when the run exits, not while it streams, so
+    // keeping it buys a transcript per completed pass — not a live feed.
+    if (args.keepSession) {
+      if (args.sessionTitle) argv.push("--title", args.sessionTitle);
+    } else {
+      argv.push("--no-session", "--no-title");
+    }
+    if (promptFile) argv.push(`--append-system-prompt=${promptFile}`);
+    if (args.modelArg) argv.push("--model", args.modelArg.replace(",", "/"));
+    return argv;
   }
+
+  // `opencode run` has no --no-session: it always persists. Only the title is
+  // ours to set, so keepSession just makes the session findable.
+  const argv = ["run", args.prompt];
+  if (args.keepSession && args.sessionTitle) argv.push("--title", args.sessionTitle);
+  if (args.agentName) argv.push("--agent", args.agentName);
+  if (args.modelArg) argv.push("--model", args.modelArg);
+  return argv;
+}
+
+export function runSubagent(args: SubagentInvocation & { timeoutMs: number }): string {
+  const promptFile =
+    args.runner.kind === "omp" && args.agentName && args.esRoot
+      ? ompAgentPromptFile(args.agentName, args.esRoot)
+      : undefined;
+  const commandArgs = buildSubagentArgs(args, promptFile);
 
   return execFileSync(args.runner.bin, commandArgs, {
     encoding: "utf8",
@@ -407,6 +429,8 @@ export async function callSubagentMapper(args: {
   runner: SubagentRunner;
   esRoot?: string;
   timeoutMs: number;
+  keepSession?: boolean;
+  sessionLabel?: string;
 }): Promise<MapperEnvelope> {
   const getDrawerTool = `${args.toolPrefix}get_drawer`;
   const orderedIds = args.worklistIds.filter(Boolean);
@@ -451,6 +475,8 @@ export async function callSubagentMapper(args: {
       modelArg: formatPromptModelArg(args.activeModel),
       prompt: taskPrompt,
       timeoutMs: args.timeoutMs,
+      keepSession: args.keepSession,
+      sessionTitle: args.sessionLabel ? `es-mapper ${args.sessionLabel}` : undefined,
     });
     const parsedJSON = parseEmbeddedJSON(output, (value) => toSummaryFromRaw(value).length > 0);
     if (parsedJSON) {
@@ -498,6 +524,8 @@ export async function callSubagentAuditor(args: {
   runner: SubagentRunner;
   esRoot?: string;
   timeoutMs: number;
+  keepSession?: boolean;
+  sessionLabel?: string;
 }): Promise<AuditorEnvelope> {
   const taskPrompt = [
     "Audit consolidation and validation outputs.",
@@ -525,6 +553,8 @@ export async function callSubagentAuditor(args: {
       modelArg: formatPromptModelArg(args.activeModel),
       prompt: taskPrompt,
       timeoutMs: args.timeoutMs,
+      keepSession: args.keepSession,
+      sessionTitle: args.sessionLabel ? `es-auditor ${args.sessionLabel}` : undefined,
     });
     const parsed = asObject(
       parseEmbeddedJSON(output, (value) => {

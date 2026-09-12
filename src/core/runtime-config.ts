@@ -210,6 +210,15 @@ export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
   // model, which is rarely what you want: a thinking-heavy general model burns
   // minutes per drawer on a judgement that wants a short answer.
   { envKey: "ESHEPHERD_CONSOLIDATION_MAPPER_MODEL", path: "consolidation.mapperModel", kind: "string", defaultValue: "" },
+  // Keep each mapper/auditor pass as a readable harness session instead of an
+  // ephemeral one. omp discards the transcript entirely without this; opencode
+  // always persists, so there it only controls the title.
+  {
+    envKey: "ESHEPHERD_CONSOLIDATION_KEEP_MAPPER_SESSIONS",
+    path: "consolidation.keepMapperSessions",
+    kind: "boolean",
+    defaultValue: false,
+  },
   // Which harness runs mapper/auditor passes. Empty = probe opencode, then omp.
   { envKey: "ESHEPHERD_SUBAGENT_HARNESS", path: "consolidation.subagentHarness", kind: "string", defaultValue: "" },
 

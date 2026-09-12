@@ -278,6 +278,7 @@ async function main(): Promise<void> {
     );
   }
   const subagentTimeoutMs = resolveSubagentTimeoutMs(process.env);
+  const keepMapperSessions = runtimeConfig.valuesByPath.consolidation?.keepMapperSessions === true;
 
   // Construct through the core/ seam (Check A2): owns transport + initialize and
   // resolves headers per effective URL (loopback stays unauthenticated).
@@ -495,6 +496,8 @@ async function main(): Promise<void> {
           runner: subagentRunner!,
           esRoot,
           timeoutMs: subagentTimeoutMs,
+          keepSession: keepMapperSessions,
+          sessionLabel: `${runId} chunk ${chunkIndex + 1}/${worklistChunks.length}`,
         });
         mapperBatches.push(chunkMapper);
       }
@@ -629,6 +632,8 @@ async function main(): Promise<void> {
       runner: subagentRunner!,
       esRoot,
       timeoutMs: subagentTimeoutMs,
+      keepSession: keepMapperSessions,
+      sessionLabel: runId,
     });
   }
   let memCoreApplyResult: Record<string, unknown> | undefined;
