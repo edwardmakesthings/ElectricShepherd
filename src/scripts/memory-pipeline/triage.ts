@@ -38,10 +38,13 @@ import {
   type SubagentVia,
 } from "./subagent.ts";
 import type { PromptModelRouting } from "./runtime-utils.ts";
-import { parseModelSelector } from "./runtime-utils.ts";
-import { asArray, asObject, asString, getArg, hasFlag, parsePositiveInt } from "./cli-options.ts";
-import { getFamilyDrawerIds } from "./worklist-helpers.ts";
-import type { SourceDrawerWorkItem } from "../../core/memgraph.ts";
+import { appendRunEvent, parseModelSelector } from "./runtime-utils.ts";
+import { asArray, asObject, asString, getArg, hasFlag, parsePositiveInt, type WorklistOptions } from "./cli-options.ts";
+import { chunkItems, getFamilyDrawerIds } from "./worklist-helpers.ts";
+import type { MemgraphClient, SourceDrawerWorkItem } from "../../core/memgraph.ts";
+import type { LoadedRuntimeConfig } from "../../core/runtime-config.ts";
+import type { SynthesisConsolidationOptions } from "../../capability/episodic/synthesis-consolidation.ts";
+import type { MCPHttpClient } from "../../core/mcp-transport.ts";
 
 const TRIAGE_DEBUG_DIR = ".electric-shepherd/scratch/subagent-output";
 
@@ -481,4 +484,108 @@ export async function runTriagePhase(args: {
     outcomes,
     errors,
   };
+}
+
+/**
+ * The triage-only phase: run the cheap first pass over the whole backlog and
+ * report the run as completed. Returns true when it handled the run (so the
+ * caller releases its guards and exits); false to continue the base pipeline.
+ */
+type ConsolidationCoordMode = "native-queue" | "lockfile" | "bypassed";
+
+export async function runTriageOnlyPhase(params: {
+  argv: string[];
+  runtimeConfig: LoadedRuntimeConfig;
+  worklistOptions: WorklistOptions;
+  includeBasePipeline: boolean;
+  worklist: SourceDrawerWorkItem[];
+  client: MemgraphClient;
+  toolPrefix: string;
+  readMCP: MCPHttpClient;
+  subagentRunner: SubagentRunner | undefined;
+  esRoot: string;
+  consolidationOptions: SynthesisConsolidationOptions;
+  runId: string;
+  startTime: number;
+  consolidationCoordMode: ConsolidationCoordMode;
+  flushRunProgress: (patch: Record<string, unknown>, counters?: Record<string, number>) => void;
+  runEventLogPath: string;
+}): Promise<boolean> {
+  // Pass 1 of the two-pass backlog strategy, and deliberately a PHASE rather
+  // than a step inside the consolidation loop: alternating a cheap triage model
+  // with a thorough consolidation model per chunk pays a full model load on
+  // every switch, which on a single-GPU host costs far more than the triage
+  // saves. Run this over the whole backlog first, then consolidate survivors.
+  const triageOptions = parseTriageOptions(params.argv, params.runtimeConfig, params.worklistOptions.sourceRoom);
+  let triage: TriagePhaseResult | undefined;
+  if (params.includeBasePipeline && triageOptions.only) {
+    if (!triageOptions.model) {
+      process.stderr.write(
+        "[memory-consolidation-validation] triage model unset: the pass will inherit the calling session's model, " +
+          "which defeats the point of a cheap first pass. Set --triage-model or consolidation.triage.model.\n",
+      );
+    }
+    params.flushRunProgress({ phase: "triage" }, { examinedCount: params.worklist.length });
+
+    triage = await runTriagePhase({
+      client: params.client,
+      chunks: chunkItems(params.worklist, triageOptions.batchSize),
+      options: triageOptions,
+      toolPrefix: params.toolPrefix,
+      readTool: (name, toolArgs) => params.readMCP.callTool(name, toolArgs),
+      runner: params.subagentRunner,
+      esRoot: params.esRoot,
+      targetWing: params.consolidationOptions.targetWing,
+      sourceRoom: params.worklistOptions.sourceRoom,
+      applyWrites: params.consolidationOptions.applyWrites,
+      runId: params.runId,
+      onProgress: (patch, counters) => params.flushRunProgress(patch, counters),
+    });
+
+    const triageDurationMs = Date.now() - params.startTime;
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          trace: {
+            runId: params.runId,
+            startedAt: new Date(params.startTime).toISOString(),
+            completedAt: new Date().toISOString(),
+            durationMs: triageDurationMs,
+            pid: process.pid,
+            examinedCount: triage.examined,
+            consolidationCoordMode: params.consolidationCoordMode,
+          },
+          mode: "triage-only",
+          triage,
+          next_step: triage.applyWrites
+            ? `Triage stamped ${triage.rich} rich / ${triage.noise} noise (min-score ${triage.minScore}). ` +
+              `Noise moved to '${triage.rejectedRoom}' — still queryable, and lowering the bar later is a range query on es-triage-score, not another pass. ` +
+              `Run without --triage-only to consolidate the survivors.`
+            : "Dry run: nothing stamped or moved. Re-run with --apply to persist.",
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    params.flushRunProgress(
+      { status: "completed", phase: "triage-completed", completedAt: new Date().toISOString(), durationMs: triageDurationMs },
+      { examinedCount: triage.examined, triageRichCount: triage.rich, triageNoiseCount: triage.noise },
+    );
+    appendRunEvent(params.runEventLogPath, {
+      ts: new Date().toISOString(),
+      runId: params.runId,
+      event: "finish",
+      status: "completed",
+      mode: "triage-only",
+      durationMs: triageDurationMs,
+      examinedCount: triage.examined,
+      triageRich: triage.rich,
+      triageNoise: triage.noise,
+      triageUnavailable: triage.unavailable,
+    });
+
+    return true;
+  }
+  return false;
 }

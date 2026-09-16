@@ -23,7 +23,7 @@ import { acquireConsolidationLock, releaseConsolidationLock } from "./consolidat
 
 // Extracted modules (criterion 2 decomposition)
 import {
-  getArg, hasFlag, asObject, asArray, asString, parsePositiveInt,
+  getArg, hasFlag, asObject, asString, parsePositiveInt,
   parseConsolidationOptions, parseWorklistOptions, parseValidationOptions,
   parseCadenceOptions, parseMemcoreApply, parseCadenceState, usage,
   type CadenceState,
@@ -36,19 +36,14 @@ import {
   chunkItems, ensureRawEntriesForChunk,
   postConsolidationMoves, moveAllToRoom, partitionChunk,
 } from "./memory-pipeline/worklist-helpers.ts";
-import {
-  parseTriageOptions, runTriagePhase, type TriagePhaseResult,
-} from "./memory-pipeline/triage.ts";
-import {
-  buildMemcoreMarkdown, fetchHighHeightFacts, resolveMemcoreFilePath,
-  fetchPendingReminderLines, fetchDeadEndLines,
-} from "./memory-pipeline/memcore-render.ts";
+import { runTriageOnlyPhase } from "./memory-pipeline/triage.ts";
+import { renderAndApplyMemcore } from "./memory-pipeline/memcore-render.ts";
+import { emitRunCompletion } from "./memory-pipeline/run-report.ts";
 import {
   tryAcquireNativeConsolidationLease, releaseNativeConsolidationLease, discoverLiveMCPConfig,
 } from "./memory-pipeline/coordination.ts";
 import {
   appendRunEvent,
-  appendRunJournalEntry,
   getActivePromptRoutingFromEnv,
   isFalsyFlag,
   isTruthyFlag,
@@ -367,80 +362,24 @@ async function main(): Promise<void> {
         });
   }
 
-  // Pass 1 of the two-pass backlog strategy, and deliberately a PHASE rather
-  // than a step inside the consolidation loop: alternating a cheap triage model
-  // with a thorough consolidation model per chunk pays a full model load on
-  // every switch, which on a single-GPU host costs far more than the triage
-  // saves. Run this over the whole backlog first, then consolidate survivors.
-  const triageOptions = parseTriageOptions(argv, runtimeConfig, worklistOptions.sourceRoom);
-  let triage: TriagePhaseResult | undefined;
-  if (includeBasePipeline && triageOptions.only) {
-    if (!triageOptions.model) {
-      process.stderr.write(
-        "[memory-consolidation-validation] triage model unset: the pass will inherit the calling session's model, " +
-          "which defeats the point of a cheap first pass. Set --triage-model or consolidation.triage.model.\n",
-      );
-    }
-    flushRunProgress({ phase: "triage" }, { examinedCount: worklist.length });
-
-    triage = await runTriagePhase({
-      client,
-      chunks: chunkItems(worklist, triageOptions.batchSize),
-      options: triageOptions,
-      toolPrefix,
-      readTool: (name, toolArgs) => readMCP.callTool(name, toolArgs),
-      runner: subagentRunner,
-      esRoot,
-      targetWing: consolidationOptions.targetWing,
-      sourceRoom: worklistOptions.sourceRoom,
-      applyWrites: consolidationOptions.applyWrites,
-      runId,
-      onProgress: (patch, counters) => flushRunProgress(patch, counters),
-    });
-
-    const triageDurationMs = Date.now() - startTime;
-    process.stdout.write(
-      `${JSON.stringify(
-        {
-          trace: {
-            runId,
-            startedAt: new Date(startTime).toISOString(),
-            completedAt: new Date().toISOString(),
-            durationMs: triageDurationMs,
-            pid: process.pid,
-            examinedCount: triage.examined,
-            consolidationCoordMode,
-          },
-          mode: "triage-only",
-          triage,
-          next_step: triage.applyWrites
-            ? `Triage stamped ${triage.rich} rich / ${triage.noise} noise (min-score ${triage.minScore}). ` +
-              `Noise moved to '${triage.rejectedRoom}' — still queryable, and lowering the bar later is a range query on es-triage-score, not another pass. ` +
-              `Run without --triage-only to consolidate the survivors.`
-            : "Dry run: nothing stamped or moved. Re-run with --apply to persist.",
-        },
-        null,
-        2,
-      )}\n`,
-    );
-
-    flushRunProgress(
-      { status: "completed", phase: "triage-completed", completedAt: new Date().toISOString(), durationMs: triageDurationMs },
-      { examinedCount: triage.examined, triageRichCount: triage.rich, triageNoiseCount: triage.noise },
-    );
-    appendRunEvent(runEventLogPath, {
-      ts: new Date().toISOString(),
-      runId,
-      event: "finish",
-      status: "completed",
-      mode: "triage-only",
-      durationMs: triageDurationMs,
-      examinedCount: triage.examined,
-      triageRich: triage.rich,
-      triageNoise: triage.noise,
-      triageUnavailable: triage.unavailable,
-    });
-
+  if (await runTriageOnlyPhase({
+    argv,
+    runtimeConfig,
+    worklistOptions,
+    includeBasePipeline,
+    worklist,
+    client,
+    toolPrefix,
+    readMCP,
+    subagentRunner,
+    esRoot,
+    consolidationOptions,
+    runId,
+    startTime,
+    consolidationCoordMode,
+    flushRunProgress,
+    runEventLogPath,
+  })) {
     releaseHeldConsolidationGuards();
     activeRunId = "";
     return;
@@ -719,100 +658,20 @@ async function main(): Promise<void> {
     });
   }
   let memCoreApplyResult: Record<string, unknown> | undefined;
-  if (memcoreApply.enabled && includeBasePipeline && consolidation) {
-    flushRunProgress({ phase: "memcore-apply" });
-    const validationForRender: ValidationMergeReviewResult = validationMergeReview || {
-      phase: "validation-merge-review",
-      downwardValidation: [],
-      mergeAdjudications: [],
-      escalations: {
-        reasons: validationSkippedReason ? [validationSkippedReason] : [],
-        nodeIds: [],
-        mergePairs: [],
-        notified: false,
-      },
-    };
-
-    const highHeightFacts = await fetchHighHeightFacts(client, {
-      wing: consolidationOptions.targetWing,
-      room: consolidationOptions.targetRoom,
-      minHeight: memcoreMinFactHeight,
-      limit: Number(runtimeConfig.valuesByPath.memcore?.render?.maxFactsPerSection) || 8,
-    });
-
-  // Pending reminder lines for the [pending] block.
-    const maxPending = Math.max(0, Number(runtimeConfig.valuesByPath.memcore?.render?.maxPendingReminders) || 3);
-    const pendingReminderLines = !isFalsyFlag(String(runtimeConfig.valuesByPath.memcore?.render?.includePending))
-      ? await fetchPendingReminderLines({
-          client,
-          wing: consolidationOptions.targetWing,
-          room: consolidationOptions.targetRoom,
-          query: consolidation.query,
-          scopeDir: memcoreApply.scopeDir,
-          maxPending,
-        })
-      : [];
-
-  // Dead-end lines for the [dead-ends] block.
-    const maxDeadEnds = Math.max(0, Number(runtimeConfig.valuesByPath.memcore?.render?.maxDeadEnds) || 3);
-    const deadEndLines = !isFalsyFlag(String(runtimeConfig.valuesByPath.memcore?.render?.includeDeadEnds))
-      ? await fetchDeadEndLines({
-          client,
-          wing: consolidationOptions.targetWing,
-          room: consolidationOptions.targetRoom,
-          draftDeadEnds: consolidation.consolidationDraft.deadEnds || [],
-          maxDeadEnds,
-        })
-      : [];
-
-    const markdown = buildMemcoreMarkdown({
-      query: consolidation.query,
-      consolidation,
-      validation: validationForRender,
-      auditor,
-      sourceDescriptions: Object.fromEntries(worklist.map((item) => [item.drawer_id, asString(item.desc)])),
-      includeFacts: !isFalsyFlag(String(runtimeConfig.valuesByPath.memcore?.render?.includeFacts)),
-      includePointers: !isFalsyFlag(String(runtimeConfig.valuesByPath.memcore?.render?.includePointers)),
-      maxFactsPerSection: Number(runtimeConfig.valuesByPath.memcore?.render?.maxFactsPerSection) || 8,
-      highHeightFacts,
-      pendingReminderLines,
-      includePending: !isFalsyFlag(String(runtimeConfig.valuesByPath.memcore?.render?.includePending)),
-      deadEndLines,
-      includeDeadEnds: !isFalsyFlag(String(runtimeConfig.valuesByPath.memcore?.render?.includeDeadEnds)),
-      maxDeadEnds: Number(runtimeConfig.valuesByPath.memcore?.render?.maxDeadEnds) || 3,
-    });
-
-    const targetFilePath = resolveMemcoreFilePath({
-      explicitFilePath: memcoreApply.filePath,
-      explicitBaseDir: memcoreApply.baseDir,
-      scopeDir: memcoreApply.scopeDir,
-    });
-
-    tryWriteFile(targetFilePath, markdown, process.pid);
-
-    memCoreApplyResult = {
-      applied: true,
-      mode: "auto",
-      fileWritten: true,
-      filePath: targetFilePath,
-      markdownPreview: markdown.slice(0, 320),
-    };
-  } else if (!memcoreApply.enabled) {
-    memCoreApplyResult = {
-      applied: false,
-      reason: "disabled by --no-mem-core-auto",
-    };
-  } else if (!includeBasePipeline) {
-    memCoreApplyResult = {
-      applied: false,
-      reason: "cadence-only run (use --include-base-pipeline for mem-core render)",
-    };
-  } else {
-    memCoreApplyResult = {
-      applied: false,
-      reason: "missing consolidation outputs",
-    };
-  }
+  memCoreApplyResult = await renderAndApplyMemcore({
+    client,
+    consolidationOptions,
+    runtimeConfig,
+    memcoreApply,
+    memcoreMinFactHeight,
+    consolidation,
+    validationMergeReview,
+    validationSkippedReason,
+    auditor,
+    worklist,
+    includeBasePipeline,
+    onProgress: flushRunProgress,
+  });
 
   let cadence: CadenceOrchestratorResult | undefined;
   let cadenceStateOut: CadenceState | undefined;
@@ -838,91 +697,24 @@ async function main(): Promise<void> {
     cadenceStateOut = next;
   }
 
-  // Trace envelope — wrap output with run metadata
-  const durationMs = Date.now() - startTime;
-  const examinedCount = worklist.length;
-  const createdNodes = consolidationBatches.map((c) => c.createdNodeId).filter(Boolean) as string[];
-
-  // Collect warnings for mapper/auditor fallbacks
-  const traceWarnings: string[] = [];
-  if (mapper && mapper.via === "none") traceWarnings.push("mapper-unavailable");
-  if (auditor && auditor.via === "none") traceWarnings.push("auditor-unavailable");
-
-  const output: Record<string, unknown> = {
-    trace: {
-      runId,
-      startedAt: new Date(startTime).toISOString(),
-      completedAt: new Date().toISOString(),
-      durationMs,
-      pid: process.pid,
-      examinedCount,
-      createdNodeCount: createdNodes.length,
-      createdNodeIds: createdNodes,
-      consolidationBatchCount: consolidationBatches.length,
-      // Why a batch produced no node. Without this the report says only that
-      // createdNodeCount is 0, and the refusal has to be recovered by reading
-      // the guard's source rather than the run's own log.
-      inflationGuardRefusals: consolidationBatches
-        .map((batch, index) => ({ index, reasons: batch?.inflationGuard?.reasons ?? [] }))
-        .filter((entry) => entry.reasons.length > 0),
-      skipped: allSkipped.length > 0 ? allSkipped : undefined,
-      warnings: traceWarnings.length > 0 ? traceWarnings : undefined,
-      consolidationCoordMode,
-      mcpEndpointSource: String(runtimeConfig.valuesByPath.mcp?.url || "").trim()
-        ? "env"
-        : discoveredMCP
-          ? "server-registry"
-          : "default",
-    },
-    mode: includeBasePipeline ? "full-pipeline" : "cadence-only",
-    worklistMode: worklistOptions.mode,
-    worklist: worklistOutput,
-    ...(cadence?.calibration ? { calibration: cadence.calibration } : {}),
-  };
-
-  // Write trace envelope to stdout
-  process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
-  const moveSummary = asObject((worklistOutput as Record<string, unknown>).moves);
-  flushRunProgress(
-    {
-      status: "completed",
-      phase: "completed",
-      completedAt: new Date().toISOString(),
-      durationMs,
-    },
-    {
-      examinedCount,
-      processedCount: asArray(moveSummary.processed).length,
-      failedCount: asArray(moveSummary.failed).length,
-      createdNodeCount: createdNodes.length,
-    },
-  );
-  appendRunEvent(runEventLogPath, {
-    ts: new Date().toISOString(),
+  await emitRunCompletion({
+    startTime,
+    worklist,
+    consolidationBatches,
+    mapper,
+    auditor,
+    allSkipped,
+    consolidationCoordMode,
+    runtimeConfig,
+    discoveredMCP,
+    includeBasePipeline,
+    worklistOptions,
+    cadence,
+    worklistOutput,
+    flushRunProgress,
+    runEventLogPath,
     runId,
-    event: "finish",
-    status: "completed",
-    durationMs,
-    examinedCount,
-    createdNodeCount: createdNodes.length,
   });
-
-  // Append run journal entry for crash-safe resume
-  try {
-    appendRunJournalEntry({
-      env: process.env,
-      cwd: process.cwd(),
-      runId,
-      completedAt: new Date().toISOString(),
-      durationMs,
-      examinedCount,
-      createdNodeIds: createdNodes,
-      consolidationBatchCount: consolidationBatches.length,
-    });
-  } catch (err) {
-    process.stderr.write(`[memory-consolidation-validation] journal append failed: ${String(err)}\n`);
-  }
-
   releaseHeldConsolidationGuards();
   activeRunId = "";
 }

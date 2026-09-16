@@ -4,11 +4,14 @@
  */
 import { existsSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
-import type { SynthesisConsolidationResult } from "../../capability/episodic/synthesis-consolidation.ts";
+import type { SynthesisConsolidationOptions, SynthesisConsolidationResult } from "../../capability/episodic/synthesis-consolidation.ts";
 import type { ValidationMergeReviewResult } from "../../policy/validation-merge-review.ts";
 import type { AuditorEnvelope } from "./subagent.ts";
-import { asObject, asArray, asString } from "./cli-options.ts";
+import { asObject, asArray, asString, type MemcoreApplyOptions } from "./cli-options.ts";
 import { parseDeadEndDrawerContent, renderDeadEndsBlock } from "../../capability/negative/dead-ends.ts";
+import type { MemgraphClient, SourceDrawerWorkItem } from "../../core/memgraph.ts";
+import type { LoadedRuntimeConfig } from "../../core/runtime-config.ts";
+import { isFalsyFlag, tryWriteFile } from "./runtime-utils.ts";
 
 export function findWorkspaceRoot(startDir: string): string {
   let current = resolve(startDir);
@@ -328,5 +331,115 @@ export async function fetchDeadEndLines(args: {
   } catch (err) {
     process.stderr.write(`[memory-consolidation-validation] dead-end fetch failed: ${String(err)}\n`);
     return [];
+  }
+}
+
+export async function renderAndApplyMemcore(params: {
+  client: MemgraphClient;
+  consolidationOptions: SynthesisConsolidationOptions;
+  runtimeConfig: LoadedRuntimeConfig;
+  memcoreApply: MemcoreApplyOptions;
+  memcoreMinFactHeight: number;
+  consolidation: SynthesisConsolidationResult | undefined;
+  validationMergeReview: ValidationMergeReviewResult | undefined;
+  validationSkippedReason: string | undefined;
+  auditor: AuditorEnvelope | undefined;
+  worklist: SourceDrawerWorkItem[];
+  includeBasePipeline: boolean;
+  onProgress: (patch: Record<string, unknown>, counters?: Record<string, number>) => void;
+}): Promise<Record<string, unknown>> {
+  if (params.memcoreApply.enabled && params.includeBasePipeline && params.consolidation) {
+    params.onProgress({ phase: "memcore-apply" });
+    const validationForRender: ValidationMergeReviewResult = params.validationMergeReview || {
+      phase: "validation-merge-review",
+      downwardValidation: [],
+      mergeAdjudications: [],
+      escalations: {
+        reasons: params.validationSkippedReason ? [params.validationSkippedReason] : [],
+        nodeIds: [],
+        mergePairs: [],
+        notified: false,
+      },
+    };
+
+    const highHeightFacts = await fetchHighHeightFacts(params.client, {
+      wing: params.consolidationOptions.targetWing,
+      room: params.consolidationOptions.targetRoom,
+      minHeight: params.memcoreMinFactHeight,
+      limit: Number(params.runtimeConfig.valuesByPath.memcore?.render?.maxFactsPerSection) || 8,
+    });
+
+  // Pending reminder lines for the [pending] block.
+    const maxPending = Math.max(0, Number(params.runtimeConfig.valuesByPath.memcore?.render?.maxPendingReminders) || 3);
+    const pendingReminderLines = !isFalsyFlag(String(params.runtimeConfig.valuesByPath.memcore?.render?.includePending))
+      ? await fetchPendingReminderLines({
+          client: params.client,
+          wing: params.consolidationOptions.targetWing,
+          room: params.consolidationOptions.targetRoom,
+          query: params.consolidation.query,
+          scopeDir: params.memcoreApply.scopeDir,
+          maxPending,
+        })
+      : [];
+
+  // Dead-end lines for the [dead-ends] block.
+    const maxDeadEnds = Math.max(0, Number(params.runtimeConfig.valuesByPath.memcore?.render?.maxDeadEnds) || 3);
+    const deadEndLines = !isFalsyFlag(String(params.runtimeConfig.valuesByPath.memcore?.render?.includeDeadEnds))
+      ? await fetchDeadEndLines({
+          client: params.client,
+          wing: params.consolidationOptions.targetWing,
+          room: params.consolidationOptions.targetRoom,
+          draftDeadEnds: params.consolidation.consolidationDraft.deadEnds || [],
+          maxDeadEnds,
+        })
+      : [];
+
+    const markdown = buildMemcoreMarkdown({
+      query: params.consolidation.query,
+      consolidation: params.consolidation,
+      validation: validationForRender,
+      auditor: params.auditor,
+      sourceDescriptions: Object.fromEntries(params.worklist.map((item) => [item.drawer_id, asString(item.desc)])),
+      includeFacts: !isFalsyFlag(String(params.runtimeConfig.valuesByPath.memcore?.render?.includeFacts)),
+      includePointers: !isFalsyFlag(String(params.runtimeConfig.valuesByPath.memcore?.render?.includePointers)),
+      maxFactsPerSection: Number(params.runtimeConfig.valuesByPath.memcore?.render?.maxFactsPerSection) || 8,
+      highHeightFacts,
+      pendingReminderLines,
+      includePending: !isFalsyFlag(String(params.runtimeConfig.valuesByPath.memcore?.render?.includePending)),
+      deadEndLines,
+      includeDeadEnds: !isFalsyFlag(String(params.runtimeConfig.valuesByPath.memcore?.render?.includeDeadEnds)),
+      maxDeadEnds: Number(params.runtimeConfig.valuesByPath.memcore?.render?.maxDeadEnds) || 3,
+    });
+
+    const targetFilePath = resolveMemcoreFilePath({
+      explicitFilePath: params.memcoreApply.filePath,
+      explicitBaseDir: params.memcoreApply.baseDir,
+      scopeDir: params.memcoreApply.scopeDir,
+    });
+
+    tryWriteFile(targetFilePath, markdown, process.pid);
+
+    return {
+      applied: true,
+      mode: "auto",
+      fileWritten: true,
+      filePath: targetFilePath,
+      markdownPreview: markdown.slice(0, 320),
+    };
+  } else if (!params.memcoreApply.enabled) {
+    return {
+      applied: false,
+      reason: "disabled by --no-mem-core-auto",
+    };
+  } else if (!params.includeBasePipeline) {
+    return {
+      applied: false,
+      reason: "cadence-only run (use --include-base-pipeline for mem-core render)",
+    };
+  } else {
+    return {
+      applied: false,
+      reason: "missing consolidation outputs",
+    };
   }
 }
