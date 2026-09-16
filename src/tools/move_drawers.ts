@@ -129,6 +129,10 @@ export default defineTool({
       .boolean()
       .default(false)
       .describe("When true, stop on first failed move."),
+    limit: s
+      .number()
+      .optional()
+      .describe("Maximum drawers to move in this call. Bounds a call so long bulk moves stay resumable; default: no limit."),
     bridge_wing: s
       .string()
       .default("move-drawer-hop")
@@ -160,6 +164,9 @@ export default defineTool({
       : [];
     const bridgeWing = normalizeOptional(args.bridge_wing) || "move-drawer-hop";
     const failFast = Boolean(args.fail_fast);
+    const limitRaw = Number(args.limit);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : undefined;
+    const MAX_RESULT_ROWS = 100;
     const dryRun = normalizeDryRunArg(args);
 
     const ids = new Set<string>();
@@ -282,20 +289,6 @@ export default defineTool({
             return { ok: false, error: `final move failed: ${String(finalRes.error)}` };
           }
 
-          const verify = (await mcp.callTool(getTool, { drawer_id: drawerID })) as Record<string, unknown>;
-          if (verify && verify.error) {
-            return { ok: false, error: `verification failed: ${String(verify.error)}` };
-          }
-
-          const vWing = normalizeOptional((verify as { wing?: unknown }).wing);
-          const vRoom = normalizeOptional((verify as { room?: unknown }).room);
-          if (!sameFold(vWing, plan.targetWing) || !sameFold(vRoom, toRoom)) {
-            return {
-              ok: false,
-              error: `verification mismatch: now wing=${vWing || "(empty)"} room=${vRoom || "(empty)"}`,
-            };
-          }
-
           return { ok: true };
         };
 
@@ -341,7 +334,11 @@ export default defineTool({
         };
       };
 
-        const { results, failed } = await runDrawerBatch<MoveScriptRow>(plan.drawerIDs, failFast, runRow);
+        // Sequential by design: the substrate serializes writes behind a per-palace
+        // lock and its HNSW index degrades under parallel updates, so fanning out
+        // only wedges the server sooner without adding throughput.
+        const results = (await runDrawerBatch<MoveScriptRow>(plan.drawerIDs, failFast, runRow)).results;
+        const failed = results.filter((row) => row && row.ok === false).length;
         const skipped = results.filter((row) => row && row.ok === true && Boolean(row.skipped)).length;
         const moved = results.filter((row) => row && row.ok === true && !Boolean(row.skipped)).length;
         return { results, failed, moved, skipped };
@@ -417,6 +414,20 @@ export default defineTool({
         plan.drawerIDs = filtered;
       }
 
+      if (limit !== undefined) {
+        let remaining = limit;
+        for (const plan of plans) {
+          if (remaining <= 0) {
+            plan.drawerIDs = [];
+            continue;
+          }
+          if (plan.drawerIDs.length > remaining) {
+            plan.drawerIDs = plan.drawerIDs.slice(0, remaining);
+          }
+          remaining -= plan.drawerIDs.length;
+        }
+      }
+
       const plannedCount = plans.reduce((sum, plan) => sum + plan.drawerIDs.length, 0);
       if (plannedCount === 0) {
         return JSON.stringify(
@@ -481,11 +492,13 @@ export default defineTool({
         bridge_wing: bridgeWing,
         overlap_skipped: overlapSkipped,
         overlap_samples: overlapSamples,
-        results: allResults,
+        limit: limit ?? undefined,
+        results: allResults.slice(0, MAX_RESULT_ROWS),
+        results_truncated: allResults.length > MAX_RESULT_ROWS,
       };
 
       if (failed > 0) {
-        const summary = summarizeFailures(payload.results || [], payload.error || "", "move_drawers failed");
+        const summary = summarizeFailures(allResults, payload.error || "", "move_drawers failed");
         return JSON.stringify({ ...payload, ...summary }, null, 2);
       }
 

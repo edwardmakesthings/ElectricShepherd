@@ -3,6 +3,7 @@ import { asObject, createPalaceClient, parseRows } from "../core/palace-tools.ts
 import { collectDrawerIDsByScope } from "../core/substrate.ts";
 import { applyRuntimeConfigToEnv, loadRuntimeConfig } from "../core/runtime-config.ts";
 import { loadRuntimeEnv } from "../scripts/runtime-env.ts";
+import { mapLimit } from "./palace_flock_status.ts";
 
 declare const process: {
   env: Record<string, string | undefined>;
@@ -51,31 +52,37 @@ export default defineTool({
 
     const drawerIDs = explicitIds.length > 0 ? explicitIds : await collectScopedDrawerIDs(call, wing, room, evalLimit);
 
-    const evaluated: Record<string, unknown>[] = [];
-    const matches: Record<string, unknown>[] = [];
-    let failed = 0;
-
-    for (const drawerID of drawerIDs) {
+    const rows = await mapLimit(drawerIDs, 8, async (drawerID) => {
       try {
         const heightPayload = asObject(await call("get_height", { node_id: drawerID }));
         const height = Number(heightPayload.height) || 0;
 
         const metaPayload = asObject(await call("get_drawer", { drawer_id: drawerID }));
         const meta = asObject(metaPayload.metadata);
-        const row = {
+        return {
           drawer_id: drawerID,
           height,
           wing: String(metaPayload.wing || meta.wing || ""),
           room: String(metaPayload.room || meta.room || ""),
           retrieval_count: Number(meta.retrieval_count) || 0,
           filed_at: String(meta.filed_at || ""),
-        };
-        if (includeZero || height > 0) evaluated.push(row);
-        if (height >= minHeight) matches.push(row);
+        } as Record<string, unknown>;
       } catch (err) {
-        failed += 1;
-        evaluated.push({ drawer_id: drawerID, error: String(err) });
+        return { drawer_id: drawerID, error: String(err) } as Record<string, unknown>;
       }
+    });
+
+    const evaluated: Record<string, unknown>[] = [];
+    const matches: Record<string, unknown>[] = [];
+    let failed = 0;
+    for (const row of rows) {
+      if (row.error) {
+        failed += 1;
+        evaluated.push(row);
+        continue;
+      }
+      if (includeZero || Number(row.height) > 0) evaluated.push(row);
+      if (Number(row.height) >= minHeight) matches.push(row);
     }
 
     return json({

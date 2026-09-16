@@ -3,7 +3,17 @@ import test from "node:test";
 
 import { createMemgraphClient } from "../../src/core/memgraph.ts";
 
-test("memgraph client uses default tool prefix", async () => {
+test("memgraph client uses default tool prefix", async (t) => {
+  // The default is only observable when the ambient env var is absent; the dev
+  // shell exports MEMGRAPH_TOOL_PREFIX from eshepherd-config.jsonc, which would
+  // otherwise make this assert the configured prefix instead of the default.
+  const prior = process.env.MEMGRAPH_TOOL_PREFIX;
+  delete process.env.MEMGRAPH_TOOL_PREFIX;
+  t.after(() => {
+    if (prior === undefined) delete process.env.MEMGRAPH_TOOL_PREFIX;
+    else process.env.MEMGRAPH_TOOL_PREFIX = prior;
+  });
+
   const calls = [];
   const client = createMemgraphClient({
     callTool: async (name, args) => {

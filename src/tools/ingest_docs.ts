@@ -461,7 +461,17 @@ export async function runDocIngest(args: {
 
   let mineResult: unknown;
   try {
-    mineResult = await args.call("mine", { source: path, mode: "projects", wing, dry_run: false });
+    // Pass the room we selected: without it the miner routes every file by its
+    // own folder/filename/content rules and lands the lot in the `general`
+    // fallback, so the snapshot/stamp below would target a room nothing was
+    // ever filed into.
+    mineResult = await args.call("mine", {
+      source: path,
+      mode: "projects",
+      wing,
+      room,
+      dry_run: false,
+    });
   } catch (error) {
     return {
       ok: false,
