@@ -42,7 +42,6 @@ consult this table first.
 | Fetch a single drawer by ID | `mempalace_get_drawer` |
 | List drawers with pagination/filtering | `mempalace_list_drawers` |
 | Check for near-duplicate before filing | `mempalace_check_duplicate` |
-| Get the AAAK dialect specification | `mempalace_get_aaak_spec` |
 
 ### Palace — Write
 

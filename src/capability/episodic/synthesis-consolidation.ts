@@ -530,7 +530,7 @@ export async function runSynthesisConsolidation(
   const included = summaries.filter((summary) => confidenceAllows(summary.confidence, confidenceFloor));
   const dropped = summaries.filter((summary) => !confidenceAllows(summary.confidence, confidenceFloor));
 
-  const sourceDrawerIds = uniqSorted(included.map((summary) => summary.transcriptId));
+  const sourceDrawerIds = uniqSorted([...included.map((summary) => summary.transcriptId), ...(options.rawEntries || []).map((entry) => asString(entry.id).trim()).filter(Boolean)]);
   const consolidationDraft = buildConsolidationDraft({ query, summaries: included });
 
   const inflationGuard = evaluateInflationGuard({

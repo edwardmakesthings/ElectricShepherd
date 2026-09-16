@@ -63,9 +63,25 @@ export async function findUnconsolidatedSourceDrawers(core: MemgraphInternals, a
   const out: SourceDrawerWorkItem[] = [];
 
   for (const item of rawItems) {
-    // isSourceDrawerConsolidated already degrades read failures to "unconsolidated"
-    // (logged), so a broken substrate re-surfaces the drawer rather than dropping it.
-    if (!(await isSourceDrawerConsolidated(core, item.drawer_id))) out.push(item);
+    // Check EVERY family member, not just the representative: collapse groups a
+    // chunked source's drawers under one representative (chosen by root/earliest
+    // filed_at, not consolidation status), so a split family — consolidated root
+    // with an unconsolidated sibling chunk — would be dropped wholesale if we only
+    // checked the representative. Keep the family if ANY member is unconsolidated;
+    // partitionChunk/getConsolidatedIdsForFamily then prune the consolidated members
+    // per-drawer downstream. Degrades read failures to "unconsolidated" (logged) so
+    // a broken substrate re-surfaces the drawer rather than dropping it.
+    const familyIds = (item.family_drawer_ids && item.family_drawer_ids.length > 0
+      ? item.family_drawer_ids
+      : [item.drawer_id]);
+    let anyUnconsolidated = false;
+    for (const memberId of familyIds) {
+      if (!(await isSourceDrawerConsolidated(core, memberId))) {
+        anyUnconsolidated = true;
+        break;
+      }
+    }
+    if (anyUnconsolidated) out.push(item);
   }
 
   return out;

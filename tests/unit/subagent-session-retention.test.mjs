@@ -42,12 +42,13 @@ test("opencode titles the session only when retention is requested", () => {
   assert.ok(buildSubagentArgs({ runner: opencode, prompt: "p", keepSession: true, sessionTitle: "t" }).includes("--title"));
 });
 
-// omp takes provider/model; the internal routing format uses a comma.
-test("omp rewrites the model separator, opencode keeps it", () => {
+// The internal routing format (formatPromptModelArg) is always comma-joined;
+// both CLIs want provider/model, so both harnesses rewrite the separator.
+test("both harnesses rewrite the model separator to provider/model", () => {
   const ompArgs = buildSubagentArgs({ runner: omp, prompt: "p", modelArg: "litellm,implementer-qwen3.8-27b" });
   assert.ok(ompArgs.includes("litellm/implementer-qwen3.8-27b"));
 
-  const ocArgs = buildSubagentArgs({ runner: opencode, prompt: "p", modelArg: "litellm/implementer-qwen3.8-27b" });
+  const ocArgs = buildSubagentArgs({ runner: opencode, prompt: "p", modelArg: "litellm,implementer-qwen3.8-27b" });
   assert.ok(ocArgs.includes("litellm/implementer-qwen3.8-27b"));
 });
 

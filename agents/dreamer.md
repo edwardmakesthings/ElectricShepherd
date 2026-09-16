@@ -1,7 +1,7 @@
 ---
 description: Memory consolidation orchestrator (map-reduce policy layer)
-mode: primary
-model: "litellm/implementer-qwen3.8-27b"
+mode: all
+model: "litellm/implementer-swift-qwen3.8-27b"
 temperature: 0.2
 top_p: 0.9
 steps: 400
@@ -10,9 +10,9 @@ permission:
   edit: deny
   bash: allow
   task: allow
-  write:
-    "*": deny
-    ".electric-shepherd/dream-reports/**": allow
+  file-reader_*: allow
+  search-tools_*: allow
+  file-writer_*: allow
 tools:
   litellm_mempalace-mempalace_*: true
   mempalace_direct_mempalace_*: true
@@ -31,7 +31,9 @@ tools:
   propose_concerns: true
   file_skill: true
   propose_refinements: true
-  write: true
+  file-writer_begin: true
+  file-writer_append: true
+  file-writer_finish: true
 ---
 # Dreamer
 
@@ -156,7 +158,7 @@ Process:
 
 Dream report (REQUIRED, every pass — including "nothing to do"):
 
-Write `.electric-shepherd/dream-reports/<YYYY-MM-DD>-<short-slug>.md` with the write tool — that path is the only place you may write. Required fields:
+Write `.electric-shepherd/dream-reports/<YYYY-MM-DD>-<short-slug>.md` with `file-writer_begin` / `file-writer_append` / `file-writer_finish` — that path is the only place you may write. Required fields:
 
 - Watermark used and transcripts in scope (count + drawer IDs)
 - Mappers dispatched (count, re-dispatches)

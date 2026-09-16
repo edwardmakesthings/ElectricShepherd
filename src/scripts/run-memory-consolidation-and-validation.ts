@@ -37,6 +37,9 @@ import {
   postConsolidationMoves, moveAllToRoom, partitionChunk,
 } from "./memory-pipeline/worklist-helpers.ts";
 import {
+  parseTriageOptions, runTriagePhase, type TriagePhaseResult,
+} from "./memory-pipeline/triage.ts";
+import {
   buildMemcoreMarkdown, fetchHighHeightFacts, resolveMemcoreFilePath,
   fetchPendingReminderLines, fetchDeadEndLines,
 } from "./memory-pipeline/memcore-render.ts";
@@ -362,6 +365,85 @@ async function main(): Promise<void> {
           limit: worklistOptions.limit,
           pageSize: worklistPageSize,
         });
+  }
+
+  // Pass 1 of the two-pass backlog strategy, and deliberately a PHASE rather
+  // than a step inside the consolidation loop: alternating a cheap triage model
+  // with a thorough consolidation model per chunk pays a full model load on
+  // every switch, which on a single-GPU host costs far more than the triage
+  // saves. Run this over the whole backlog first, then consolidate survivors.
+  const triageOptions = parseTriageOptions(argv, runtimeConfig, worklistOptions.sourceRoom);
+  let triage: TriagePhaseResult | undefined;
+  if (includeBasePipeline && triageOptions.only) {
+    if (!triageOptions.model) {
+      process.stderr.write(
+        "[memory-consolidation-validation] triage model unset: the pass will inherit the calling session's model, " +
+          "which defeats the point of a cheap first pass. Set --triage-model or consolidation.triage.model.\n",
+      );
+    }
+    flushRunProgress({ phase: "triage" }, { examinedCount: worklist.length });
+
+    triage = await runTriagePhase({
+      client,
+      chunks: chunkItems(worklist, triageOptions.batchSize),
+      options: triageOptions,
+      toolPrefix,
+      readTool: (name, toolArgs) => readMCP.callTool(name, toolArgs),
+      runner: subagentRunner,
+      esRoot,
+      targetWing: consolidationOptions.targetWing,
+      sourceRoom: worklistOptions.sourceRoom,
+      applyWrites: consolidationOptions.applyWrites,
+      runId,
+      onProgress: (patch, counters) => flushRunProgress(patch, counters),
+    });
+
+    const triageDurationMs = Date.now() - startTime;
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          trace: {
+            runId,
+            startedAt: new Date(startTime).toISOString(),
+            completedAt: new Date().toISOString(),
+            durationMs: triageDurationMs,
+            pid: process.pid,
+            examinedCount: triage.examined,
+            consolidationCoordMode,
+          },
+          mode: "triage-only",
+          triage,
+          next_step: triage.applyWrites
+            ? `Triage stamped ${triage.rich} rich / ${triage.noise} noise (min-score ${triage.minScore}). ` +
+              `Noise moved to '${triage.rejectedRoom}' — still queryable, and lowering the bar later is a range query on es-triage-score, not another pass. ` +
+              `Run without --triage-only to consolidate the survivors.`
+            : "Dry run: nothing stamped or moved. Re-run with --apply to persist.",
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    flushRunProgress(
+      { status: "completed", phase: "triage-completed", completedAt: new Date().toISOString(), durationMs: triageDurationMs },
+      { examinedCount: triage.examined, triageRichCount: triage.rich, triageNoiseCount: triage.noise },
+    );
+    appendRunEvent(runEventLogPath, {
+      ts: new Date().toISOString(),
+      runId,
+      event: "finish",
+      status: "completed",
+      mode: "triage-only",
+      durationMs: triageDurationMs,
+      examinedCount: triage.examined,
+      triageRich: triage.rich,
+      triageNoise: triage.noise,
+      triageUnavailable: triage.unavailable,
+    });
+
+    releaseHeldConsolidationGuards();
+    activeRunId = "";
+    return;
   }
 
   const worklistOutput = {

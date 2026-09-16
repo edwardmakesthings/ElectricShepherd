@@ -328,7 +328,9 @@ export function buildSubagentArgs(args: SubagentInvocation, promptFile?: string)
   const argv = ["run", args.prompt];
   if (args.keepSession && args.sessionTitle) argv.push("--title", args.sessionTitle);
   if (args.agentName) argv.push("--agent", args.agentName);
-  if (args.modelArg) argv.push("--model", args.modelArg);
+  // opencode's --model also wants provider/model, same rewrite as omp above —
+  // the internal routing format (formatPromptModelArg) is comma-joined for both.
+  if (args.modelArg) argv.push("--model", args.modelArg.replace(",", "/"));
   return argv;
 }
 

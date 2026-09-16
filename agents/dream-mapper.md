@@ -1,7 +1,7 @@
 ---
 description: Read-only per-transcript summarizer for Dreamer map phase
 mode: all
-model: "litellm/implementer-qwen3.8-27b"
+model: "litellm/implementer-swift-qwen3.8-27b"
 temperature: 0.1
 top_p: 0.85
 steps: 120

@@ -149,10 +149,10 @@ test("real bundled assets parse into the expected dreamer agents and commands", 
     edit: "deny",
     bash: "allow",
     task: "allow",
-    write: {
-      "*": "deny",
-      ".electric-shepherd/dream-reports/**": "allow",
-    },
+    // The dreamer grants explicit tool families rather than a `write:` glob.
+    "file-reader_*": "allow",
+    "search-tools_*": "allow",
+    "file-writer_*": "allow",
   });
 });
 

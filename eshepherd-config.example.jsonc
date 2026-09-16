@@ -120,6 +120,33 @@
     // opencode then omp. Set it to match the harness you actually run, or a
     // session in one will spawn the other and load its whole plugin surface.
     "subagentHarness": "",
+    // Pass 1 of two-pass consolidation, for working down a large backlog.
+    // A cheap, large-context model runs over everything once to locate WHERE
+    // durable value sits (decisions, root causes, fixes, preferences, dead
+    // ends), so the thorough pass reads marked regions instead of whole
+    // transcripts. Only runs when invoked with --triage-only, which is a PHASE:
+    // on a single-GPU host, alternating a cheap and a thorough model per chunk
+    // pays a model load on every switch. Triage the whole backlog first, then
+    // consolidate the survivors.
+    "triage": {
+      // A DIFFERENT, cheaper model than consolidation.mapperModel — that is the
+      // entire point. Empty inherits the calling session's model.
+      "model": "",
+      "agent": "drawer-triage",
+      // Drawers per triage call. Batch generously: one call per drawer over a
+      // 15k backlog is the cost this pass exists to avoid.
+      "batchSize": 10,
+      // Minimum span count to stay in the source room. Calibrate against a
+      // sample scored by the thorough model rather than guessing. The score is
+      // stamped as `es-triage-score`, so changing this later is a range query,
+      // not another pass over the backlog.
+      "minScore": 1,
+      // Where below-threshold drawers are filed. Empty = "<source room>-triage-rejected".
+      // Deliberately NOT the processed room: both stop a drawer being
+      // re-examined, but only this one keeps a mis-scored drawer recoverable.
+      // Triage never deletes and never marks anything consolidated.
+      "rejectedRoom": ""
+    },
     "lock": {
       "disabled": false,
       "nativeCoordinatorDisabled": false,

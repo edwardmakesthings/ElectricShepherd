@@ -222,6 +222,24 @@ export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
   // Which harness runs mapper/auditor passes. Empty = probe opencode, then omp.
   { envKey: "ESHEPHERD_SUBAGENT_HARNESS", path: "consolidation.subagentHarness", kind: "string", defaultValue: "" },
 
+  // Triage (pass 1 of two-pass consolidation). A cheap, large-context model runs
+  // over the whole backlog to locate WHERE value sits, so the thorough pass reads
+  // marked regions instead of whole transcripts. Left empty by default: triage
+  // only runs when explicitly invoked with --triage-only.
+  { envKey: "ESHEPHERD_CONSOLIDATION_TRIAGE_MODEL", path: "consolidation.triage.model", kind: "string", defaultValue: "" },
+  { envKey: "ESHEPHERD_CONSOLIDATION_TRIAGE_AGENT", path: "consolidation.triage.agent", kind: "string", defaultValue: "drawer-triage" },
+  // Drawers per triage call. A 260k-context triage model should batch generously:
+  // one call per drawer over 15k drawers is the cost this pass exists to avoid.
+  { envKey: "ESHEPHERD_CONSOLIDATION_TRIAGE_BATCH_SIZE", path: "consolidation.triage.batchSize", kind: "number", defaultValue: 10 },
+  // Minimum span count to stay in the source room. Calibrate against a sample
+  // scored by the thorough model rather than guessing — the score is stamped, so
+  // changing this later is a range query, not another pass over the backlog.
+  { envKey: "ESHEPHERD_CONSOLIDATION_TRIAGE_MIN_SCORE", path: "consolidation.triage.minScore", kind: "number", defaultValue: 1 },
+  // Where below-threshold drawers are filed. Empty = "<source room>-triage-rejected".
+  // Deliberately distinct from the processed room: both stop re-examination, but
+  // only this one keeps a mis-scored drawer recoverable.
+  { envKey: "ESHEPHERD_CONSOLIDATION_TRIAGE_REJECTED_ROOM", path: "consolidation.triage.rejectedRoom", kind: "string", defaultValue: "" },
+
   { envKey: "ESHEPHERD_COMPACT_ARCHIVE", path: "compaction.archiveEnabled", kind: "boolean", defaultValue: true },
   { envKey: "ESHEPHERD_INJECT_INSTRUCTIONS", path: "assets.injectInstructions", kind: "boolean", defaultValue: true },
 
