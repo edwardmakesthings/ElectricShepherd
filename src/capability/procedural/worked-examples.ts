@@ -515,7 +515,7 @@ export const FAILURE_PATCH_TEXT_MAX_CHARS = 500;
  * The HEADING is load-bearing: the live hook checks args.prompt against it before
  * appending (idempotency guard — a re-fired hook must not double the block), and
  * tests assert on it. Keep in sync with the INTERVENTION_REPLAY_MAX_PATCHES constant
- * in plugin/session-policy.ts that bounds how many patches are injected.
+ * in plugin/session-policy-v1.ts that bounds how many patches are injected.
  */
 export const INTERVENTION_REPLAY_HEADING = "## Known interventions for this model on this class of task";
 
@@ -605,4 +605,3 @@ export function buildWorkedExampleEntry(params: {
 
   return parts.join("\n").slice(0, WORKED_EXAMPLE_ENTRY_MAX_CHARS);
 }
-

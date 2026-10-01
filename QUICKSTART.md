@@ -26,18 +26,40 @@ One line. On startup the plugin's `config` hook reads its bundled markdown and i
 into your resolved config, so the assets load in any project that enables the plugin — no
 need to run OpenCode from inside this repo or copy files into `.opencode/`.
 
+#### Version selection (OpenCode v1 vs v2)
+
+Default is OpenCode v2 surface. To force OpenCode v1 compatibility mode:
+
+```bash
+export ESHEPHERD_OPENCODE_PLUGIN_API=v1   # accepted: v1 | 1 | opencode-v1
+# unset (or any other value) = v2 surface (default)
+```
+
 **What that injects, and what it can't:**
 
 | Asset | Injected? | Mechanism |
 |---|---|---|
 | plugin | yes | `plugin: ["electric-shepherd"]` |
-| `agents/*.md` | yes | appended to `config.agent` |
-| `commands/*.md` | yes | appended to `config.command` |
-| `instructions/agent-discipline.md` | yes | absolute path appended to `config.instructions` (opt out: `assets.injectInstructions=false`) |
+| `agents/*.md` | yes | v1: appended to `config.agent`; v2: registered via `ctx.agent.transform` |
+| `commands/*.md` | yes | v1: appended to `config.command`; v2: registered via `ctx.command.transform` |
+| `instructions/agent-discipline.md` | yes | v1: absolute path appended to `config.instructions`; v2: appended to the system prompt via `ctx.session.hook("context")` (opt out: `assets.injectInstructions=false`) |
 | `skills/eshepherd/SKILL.md` | **no** | OpenCode has no skill config key — copy it to `.opencode/skills/eshepherd/SKILL.md` yourself |
 | `snippets/*.md` | **no** | OpenChamber assets; not an OpenCode auto-load concept |
 
 Your own agents and commands override bundled ones on a name collision.
+
+**OpenCode v2 differences:**
+
+- **mem-core** — with `memcore.reinject.enabled`, the current mem-core goes into the system prompt of every
+  agent request (session `context` hook) instead of being re-sent as a user prompt, so there are no extra
+  turns and it survives compaction. The `onIdle`/`onStart`/`onCompact` triggers only apply to v1.
+- **Drawer-tool approval** — `delete_drawers`/`move_drawers` default to `ask` via the permission `evaluate`
+  hook. An explicit rule for those tools on an agent wins, and the default never loosens a `deny`.
+- **One server** — v2 clients share one background service. If you run OpenCode under systemd for
+  OpenChamber, make that unit run `opencode serve --service` and set the port with
+  `opencode service set port <port>`, so the CLI and OpenChamber use the same server (and the same plugin state).
+- **Consolidation subagents** run `opencode run --standalone`, so the subagent isolation env reaches the
+  plugin instead of the shared server.
 
 ### 1b. oh-my-pi (omp)
 
@@ -93,7 +115,8 @@ cp .env.example .env
 ```
 
 **`eshepherd-config.jsonc` holds all behaviour. `.env` holds secrets only.** Runtime scripts
-and plugin paths do not read behaviour toggles from the environment.
+and plugin paths do not read behaviour toggles from the environment, except the explicit
+OpenCode surface selector `ESHEPHERD_OPENCODE_PLUGIN_API` (v1 vs v2).
 
 Env files auto-load in this order; no `source .env` step:
 

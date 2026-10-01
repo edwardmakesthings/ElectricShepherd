@@ -1,7 +1,7 @@
 /**
  * oh-my-pi binding for harness-neutral tool definitions.
  *
- * Mirrors `src/surface/opencode/tool-adapter.ts`: same definitions from
+ * Mirrors `src/surface/opencode-v1/tool-adapter.ts`: same definitions from
  * `src/tools/index.ts`, bound to omp's `ExtensionAPI` instead of OpenCode's
  * `tool()`. The `pi` shape it binds to is declared in `./api.ts`.
  */

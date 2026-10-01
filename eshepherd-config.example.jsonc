@@ -82,6 +82,9 @@
   },
 
   "memcore": {
+    // OpenCode v2: `enabled` puts mem-core in the system prompt of every agent
+    // request (session context hook); the on* triggers are ignored there.
+    // OpenCode v1: mem-core is re-sent as a user prompt on the enabled triggers.
     "reinject": {
       "enabled": false,
       "onCompact": false,

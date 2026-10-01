@@ -52,7 +52,7 @@ import { loadRuntimeEnv } from "../../scripts/runtime-env.ts"
 
 
 import { createHookHeadHandlers } from "./session-policy/hook-head.ts"
-import { createToolRegistry } from "./session-policy/registry.ts"
+import { createToolRegistryV1 } from "./session-policy/registry.ts"
 import { buildSourceCaptureEnv, buildConsolidationEnv } from "./session-policy/env.ts"
 import type { MessageWithParts } from "./session-policy/constants.ts"
 import {
@@ -70,7 +70,7 @@ import {
   CHECKPOINT_MODES, DEFAULT_CHECKPOINT_DISABLED_AGENTS, normalizePathForHost, toLowerSet,
 } from "./session-policy/constants.ts"
 import {
-  findProjectRoot,
+  findProjectRoot, loadMemcoreMarkdown,
   writeStatusFile, appendAutoConsolidationLog, appendMemoryUsageLog,
   acquireAutoConsolidationLock, releaseAutoConsolidationLock, killProcessTree,
   getToolNames, classifyMemoryTools, pruneToMax, sortByCreated, unwrapListResult, unwrapMessageResult,
@@ -86,7 +86,7 @@ import type { TurnGuardContext } from "./session-policy/context.ts"
 import { initSessionPolicyState } from "./session-policy/state.ts"
 const ESHEPHERD_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 
-export const TurnGuard = async ({ client, directory }: any) => {
+export const TurnGuard = async ({ client, directory, disableV1ToolRegistry = true, v2Bridge = false }: any) => {
   // A mapper/auditor pass runs `opencode run`, which loads this plugin. Its
   // logging shares stdout with the subagent's answer, and its hooks would
   // re-enter capture/consolidation from inside a consolidation run. Stay out.
@@ -468,6 +468,9 @@ export const TurnGuard = async ({ client, directory }: any) => {
     anchor?: MessageWithParts | null
     force?: boolean
   }): Promise<boolean> {
+    // Under OpenCode v2 mem-core rides in the system prompt via the session
+    // context hook, so the v1 user-prompt reinjection triggers stay off.
+    if (v2Bridge) return false
     return maybeInjectMemcoreWithGating({
       sid: args.sid,
       event: args.event,
@@ -716,12 +719,34 @@ export const TurnGuard = async ({ client, directory }: any) => {
   })
 
 
-  return {
+  const toolRegistry = disableV1ToolRegistry ? {} : await createToolRegistryV1()
+
+  const hooks: any = {
     config: hookHeadHandlers.config,
     event: hookHeadHandlers.event,
     "tool.execute.before": boundToolExecuteBefore,
-    tool: createToolRegistry(),
-  } as any
+    tool: toolRegistry,
+  }
+  if (v2Bridge) {
+    // Internal to the v2 surface (never handed to OpenCode): what it needs to
+    // deliver mem-core through the context hook with this project's config.
+    hooks.memcoreContext = {
+      enabled: memcoreInjectEnabled,
+      maxChars: memcoreMaxChars,
+      scopeDirOverride: cfgRaw("memcore.scopeDir") || undefined,
+      fallbackDir: rootDirectory,
+      load: async (scopeDir: string) => {
+        const { markdown } = await loadMemcoreMarkdown(projectRoot, scopeDir, {
+          maxScopes: cfgNum("memcore.maxScopes", DEFAULT_MEMCORE_MAX_SCOPES),
+          directFileName: cfgRaw("memcore.directFileName") || "memory.md",
+          storeRoots: cfgCSV("memcore.storeRoots").length > 0 ? cfgCSV("memcore.storeRoots") : [".electric-shepherd/memory"],
+          timeoutMs: cfgNum("commands.memcoreLoader.timeoutMs", DEFAULT_MEMCORE_LOADER_TIMEOUT_MS),
+        })
+        return markdown
+      },
+    }
+  }
+  return hooks
 }
 
 export default TurnGuard

@@ -193,6 +193,14 @@ commands, and instruction rules into your resolved config, so they load in any p
 enables the plugin. You do not need to run OpenCode from inside this repo or copy anything
 into `.opencode/`. Your own agents and commands always win a name collision.
 
+#### Version selection (OpenCode v1 vs v2)
+
+Default is OpenCode v2 surface. To force this package's OpenCode **v1** surface, set:
+
+```bash
+export ESHEPHERD_OPENCODE_PLUGIN_API=v1   # accepted: v1 | 1 | opencode-v1
+```
+
 The hook is necessary because OpenCode only auto-discovers `agents/` and `commands/` folders
 for the active **project** root, and an installed plugin is never the project root.
 
@@ -224,8 +232,8 @@ Then see [QUICKSTART.md](QUICKSTART.md) for MemPalace wiring, config, and first 
 | Asset | OpenCode | omp |
 |---|---|---|
 | plugin / extension | yes — `plugin: ["electric-shepherd"]` | yes — `-e ./src/surface/omp` |
-| agents (`agents/*.md`) — `dreamer`, `dream-mapper`, `dream-auditor` | injected into `config.agent` | staged as omp task agents |
-| commands (`commands/*.md`) | injected into `config.command` | staged as omp slash commands |
+| agents (`agents/*.md`) — `dreamer`, `dream-mapper`, `dream-auditor` | injected into `config.agent` (v1) / `ctx.agent.transform` (v2) | staged as omp task agents |
+| commands (`commands/*.md`) | injected into `config.command` (v1) / `ctx.command.transform` (v2) | staged as omp slash commands |
 | instructions (`instructions/agent-discipline.md`) | appended to `config.instructions` | staged as an `alwaysApply` rule |
 | skills (`skills/eshepherd/SKILL.md`) | no — no skill config key; copy into `.opencode/skills/` | yes — discovered from the extension root |
 | snippets (`snippets/*.md`) | no — OpenChamber assets | no |
@@ -277,7 +285,8 @@ thresholds, mem-core scope, command overrides. Allowed keys and defaults are def
 
 `.env` is for secrets only (`MEMPALACE_MCP_API_KEY`, `MEMPALACE_MCP_BEARER_TOKEN`,
 `MEMPALACE_MCP_HEADERS_JSON`). Runtime scripts and plugin paths do not read behaviour
-toggles from the environment.
+toggles from the environment, except the explicit OpenCode surface selector
+`ESHEPHERD_OPENCODE_PLUGIN_API` (v1 vs v2).
 
 Full reference: [QUICKSTART.md](QUICKSTART.md) §2.
 

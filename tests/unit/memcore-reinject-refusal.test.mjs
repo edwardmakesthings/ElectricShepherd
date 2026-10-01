@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const { TurnGuard } = await import("../../src/surface/plugin/session-policy.ts");
+const { TurnGuard } = await import("../../src/surface/plugin/session-policy-v1.ts");
 
 /**
  * Rung 2 (R2-05) — Refusal Transparency.

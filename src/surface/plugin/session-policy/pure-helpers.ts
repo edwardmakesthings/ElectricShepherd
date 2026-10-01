@@ -6,6 +6,7 @@ import { dirname, join } from "node:path"
 import {
   appendFileSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, closeSync,
 } from "node:fs"
+import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 import {
   STATUS_DIR, STATUS_FILE, AUTOCONSOLIDATION_LOG_FILE, MEMCORE_CONTEXT_LOG_FILE, MEMORY_USAGE_LOG_FILE,
@@ -13,6 +14,10 @@ import {
   normalizePathForHost,
 } from "./constants.ts"
 import type { MessageWithParts } from "./constants.ts"
+
+// The mem-core loader ships with Electric Shepherd, not with the consumer
+// project, so it is resolved from this package (src/surface/plugin/session-policy -> repo root).
+const ESHEPHERD_PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..")
 
 
 export function extractPathFromMessageParts(messages: MessageWithParts[]): string | null {
@@ -254,7 +259,12 @@ export async function loadMemcoreMarkdown(
     timeoutMs: number
   },
 ): Promise<{ markdown: string; loaderInfo: Record<string, unknown> }> {
-  const loaderScript = join(projectRoot, "src", "scripts", "run-mem-core-loader.ts")
+  // A project-local loader (Electric Shepherd's own checkout, or a test stub)
+  // wins; any other consumer project uses the one shipped with this package.
+  const localLoader = join(projectRoot, "src", "scripts", "run-mem-core-loader.ts")
+  const loaderScript = existsSync(localLoader)
+    ? localLoader
+    : join(ESHEPHERD_PACKAGE_ROOT, "src", "scripts", "run-mem-core-loader.ts")
   if (!existsSync(loaderScript)) {
     return { markdown: "", loaderInfo: { reason: "loader-script-not-found", loaderScript } }
   }

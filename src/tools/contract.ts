@@ -4,7 +4,8 @@
  * A tool declares its parameter schema through an *injected* builder rather than
  * importing one, so the same definition binds to OpenCode (`tool.schema`) and to
  * oh-my-pi (`pi.zod`) without `src/tools/` depending on either harness. The
- * bindings live in `src/surface/<harness>/tool-adapter.ts`.
+ * bindings live in `src/surface/opencode-v1/tool-adapter.ts`,
+ * `src/surface/opencode-v2/tool-adapter.ts`, and `src/surface/omp/tool-adapter.ts`.
  *
  * Tradeoff: injecting the builder gives up the per-tool argument type inference
  * that `tool({ args })` provided, so `execute` receives a loose args record.

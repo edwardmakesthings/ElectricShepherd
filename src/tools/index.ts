@@ -1,9 +1,10 @@
 /**
  * The tool set, harness-neutral.
  *
- * Both surfaces bind this same list: `src/surface/opencode/tool-adapter.ts` and
- * `src/surface/omp/tool-adapter.ts`. Each definition carries its own `name`, so
- * a registry keyed by name is derived rather than maintained by hand.
+ * All harness surfaces bind this same list: `src/surface/opencode-v1/tool-adapter.ts`,
+ * `src/surface/opencode-v2/tool-adapter.ts`, and `src/surface/omp/tool-adapter.ts`.
+ * Each definition carries its own `name`, so a registry keyed by name is derived
+ * rather than maintained by hand.
  */
 
 import type { EsToolDefinition } from "./contract.ts";
