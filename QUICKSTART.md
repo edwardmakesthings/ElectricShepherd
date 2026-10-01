@@ -22,9 +22,9 @@ OpenCode merges global config (`~/.config/opencode/opencode.jsonc`) with project
 "plugin": ["electric-shepherd"]
 ```
 
-One line. On startup the plugin's `config` hook reads its bundled markdown and injects it
-into your resolved config, so the assets load in any project that enables the plugin — no
-need to run OpenCode from inside this repo or copy files into `.opencode/`.
+One line. On startup the plugin registers its bundled agents, commands, instructions and
+(v2) skills, so they load in any project that enables the plugin — no need to run OpenCode
+from inside this repo or copy files into `.opencode/`. Your own definitions win a name collision.
 
 #### Version selection (OpenCode v1 vs v2)
 
@@ -35,31 +35,16 @@ export ESHEPHERD_OPENCODE_PLUGIN_API=v1   # accepted: v1 | 1 | opencode-v1
 # unset (or any other value) = v2 surface (default)
 ```
 
-**What that injects, and what it can't:**
+What each surface injects, and what it cannot, is in [HARNESSES.md](HARNESSES.md#assets).
 
-| Asset | Injected? | Mechanism |
-|---|---|---|
-| plugin | yes | `plugin: ["electric-shepherd"]` |
-| `agents/*.md` | yes | v1: appended to `config.agent`; v2: registered via `ctx.agent.transform` |
-| `commands/*.md` | yes | v1: appended to `config.command`; v2: registered via `ctx.command.transform` |
-| `instructions/agent-discipline.md` | yes | v1: absolute path appended to `config.instructions`; v2: appended to the system prompt via `ctx.session.hook("context")` (opt out: `assets.injectInstructions=false`) |
-| `skills/eshepherd/SKILL.md` | **no** | OpenCode has no skill config key — copy it to `.opencode/skills/eshepherd/SKILL.md` yourself |
-| `snippets/*.md` | **no** | OpenChamber assets; not an OpenCode auto-load concept |
+**OpenCode v2 setup notes** (details in [HARNESSES.md](HARNESSES.md#opencode-v2-operational-notes)):
 
-Your own agents and commands override bundled ones on a name collision.
-
-**OpenCode v2 differences:**
-
-- **mem-core** — with `memcore.reinject.enabled`, the current mem-core goes into the system prompt of every
-  agent request (session `context` hook) instead of being re-sent as a user prompt, so there are no extra
-  turns and it survives compaction. The `onIdle`/`onStart`/`onCompact` triggers only apply to v1.
-- **Drawer-tool approval** — `delete_drawers`/`move_drawers` default to `ask` via the permission `evaluate`
-  hook. An explicit rule for those tools on an agent wins, and the default never loosens a `deny`.
-- **One server** — v2 clients share one background service. If you run OpenCode under systemd for
-  OpenChamber, make that unit run `opencode serve --service` and set the port with
-  `opencode service set port <port>`, so the CLI and OpenChamber use the same server (and the same plugin state).
-- **Consolidation subagents** run `opencode run --standalone`, so the subagent isolation env reaches the
-  plugin instead of the shared server.
+- v2 clients share one background server. If OpenChamber or another client needs a fixed port,
+  make the service listen there (`opencode service set port 4095`, systemd `ExecStart=… serve --service`)
+  instead of running a second server.
+- HTTP clients such as OpenChamber need the service password from `~/.config/opencode/service.json`
+  (OpenChamber: `OPENCODE_SERVER_PASSWORD`).
+- A local plugin shim must `export default Plugin.define({ id, setup })`.
 
 ### 1b. oh-my-pi (omp)
 
@@ -94,13 +79,8 @@ staged directories are generated and gitignored; the canonical copies stay at th
 
 ### What differs between the harnesses
 
-| | OpenCode | omp |
-|---|---|---|
-| Loop guard, stall retry, task watchdog | Electric Shepherd provides them | **omp's own** — ES does not port them, or they double-fire |
-| Compaction archive | ES writes one | omp persists a `CompactionEntry` itself |
-| Memory checkpoint at settle | every session | interactive only (a continuation in `-p` breaks process-and-exit) |
-| Transcript capture | `opencode --pure export` | reads omp's own session JSONL |
-| Agent tool restrictions | enforced by `tools:` globs | **not enforced** — the map is dropped rather than mistranslated |
+See [HARNESSES.md](HARNESSES.md) for the full OpenCode v1 / OpenCode v2 / omp comparison:
+assets, mem-core delivery, compaction, capture, guards, approvals and commands.
 
 > `agent-discipline.md` is the single statement of the memory contract. Do not restate it in
 > individual agent prompts; a copy will drift.

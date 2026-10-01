@@ -169,16 +169,17 @@ agents/ commands/ skills/ instructions/ snippets/   assets, resolved by name
 docs/ tests/ index.ts
 ```
 
-Assets are markdown, one file per agent or command, injected into the resolved OpenCode
-config at startup. They are coupled to the code **by name only**, so the type-checker cannot
+Assets are markdown, one file per agent, command or skill, registered with the harness at
+startup (see [HARNESSES.md](HARNESSES.md#assets)). They are coupled to the code **by name only**, so the type-checker cannot
 see the coupling; `verify:structural` link-checks every `.md` path mentioned in a comment.
 
 ---
 
 ## Install
 
-Electric Shepherd runs on two harnesses. The memory layer is identical on both; only the
-wiring differs.
+Electric Shepherd runs on three harness surfaces — **OpenCode v2** (the default), **OpenCode
+v1**, and **oh-my-pi (omp)**. The memory layer is identical on all of them; only the wiring
+differs. [HARNESSES.md](HARNESSES.md) records exactly what each surface supports.
 
 **In OpenCode** — one line in `opencode.json`:
 
@@ -188,21 +189,18 @@ wiring differs.
 }
 ```
 
-That is enough. On startup the plugin's `config` hook injects its bundled agents, slash
-commands, and instruction rules into your resolved config, so they load in any project that
-enables the plugin. You do not need to run OpenCode from inside this repo or copy anything
-into `.opencode/`. Your own agents and commands always win a name collision.
+That is enough. On startup the plugin registers its bundled agents, slash commands,
+instruction rules and (v2) skills, so they load in any project that enables the plugin. You
+do not need to run OpenCode from inside this repo or copy anything into `.opencode/`. Your own
+agents, commands and skills always win a name collision. Registration is needed because
+OpenCode only auto-discovers asset folders for the active **project**, and an installed plugin
+is never the project.
 
-#### Version selection (OpenCode v1 vs v2)
-
-Default is OpenCode v2 surface. To force this package's OpenCode **v1** surface, set:
+The plugin targets the OpenCode v2 plugin API. On OpenCode v1, select the v1 surface:
 
 ```bash
 export ESHEPHERD_OPENCODE_PLUGIN_API=v1   # accepted: v1 | 1 | opencode-v1
 ```
-
-The hook is necessary because OpenCode only auto-discovers `agents/` and `commands/` folders
-for the active **project** root, and an installed plugin is never the project root.
 
 **In oh-my-pi (omp)** — omp has no plugin key. It loads an extension package root and
 discovers that root's `commands/`, `agents/`, `skills/` and `rules/`:
@@ -214,9 +212,9 @@ omp -e ./src/surface/omp    # load it (the DIRECTORY, not index.ts)
 
 omp implements its own loop guard, stall retry, task watchdog and compaction archive, so
 Electric Shepherd does not port those to that surface — running both layers double-fires
-their correctives. See [QUICKSTART.md](QUICKSTART.md) §1b for the full difference table.
+their correctives.
 
-**The policy runtime** runs headless, outside either harness:
+**The policy runtime** runs headless, outside any harness:
 
 ```bash
 npm install -g electric-shepherd
@@ -229,14 +227,14 @@ Then see [QUICKSTART.md](QUICKSTART.md) for MemPalace wiring, config, and first 
 
 ### What ships
 
-| Asset | OpenCode | omp |
-|---|---|---|
-| plugin / extension | yes — `plugin: ["electric-shepherd"]` | yes — `-e ./src/surface/omp` |
-| agents (`agents/*.md`) — `dreamer`, `dream-mapper`, `dream-auditor` | injected into `config.agent` (v1) / `ctx.agent.transform` (v2) | staged as omp task agents |
-| commands (`commands/*.md`) | injected into `config.command` (v1) / `ctx.command.transform` (v2) | staged as omp slash commands |
-| instructions (`instructions/agent-discipline.md`) | appended to `config.instructions` | staged as an `alwaysApply` rule |
-| skills (`skills/eshepherd/SKILL.md`) | no — no skill config key; copy into `.opencode/skills/` | yes — discovered from the extension root |
-| snippets (`snippets/*.md`) | no — OpenChamber assets | no |
+- **agents** (`agents/*.md`) — `dreamer`, `dream-mapper`, `dream-auditor`, `drawer-digest`,
+  `drawer-triage`, `palace-guide`
+- **commands** (`commands/*.md`) — the slash commands below
+- **instructions** (`instructions/agent-discipline.md`) — the memory contract, applied to every agent
+- **skills** (`skills/eshepherd/SKILL.md`) — the MemPalace tool reference
+- **snippets** (`snippets/*.md`) — OpenChamber assets, not loaded by any harness
+
+How each harness loads them — and which ones it cannot — is in [HARNESSES.md](HARNESSES.md#assets).
 
 **Slash commands:** `/consolidate`, `/consolidate-deep`, `/memory-status`,
 `/memory-refresh`, `/ingest-docs`, `/remind`, `/reminders`, `/promote-skill`. Each has a
