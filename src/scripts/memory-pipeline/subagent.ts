@@ -12,7 +12,17 @@ import { asObject, asArray, asString, parsePositiveInt } from "./cli-options.ts"
 import type { PromptModelRouting } from "./runtime-utils.ts";
 
 /** Which CLI drives a one-shot subagent, and the absolute binary to invoke. */
-export type SubagentRunner = { kind: "opencode" | "omp"; bin: string };
+export type SubagentRunner = {
+  kind: "opencode" | "omp";
+  bin: string;
+  /**
+   * OpenCode v2 only: run on a private server. v2's CLI otherwise submits to the
+   * shared background server, whose plugin never sees this process's
+   * ESHEPHERD_SUBAGENT_RUN, so memcore reinjection and capture would fire inside
+   * the pass. Resolved from the binary's version when left undefined.
+   */
+  standalone?: boolean;
+};
 
 export type SubagentVia = "opencode-run" | "omp-run" | "none";
 
@@ -326,6 +336,7 @@ export function buildSubagentArgs(args: SubagentInvocation, promptFile?: string)
   // `opencode run` has no --no-session: it always persists. Only the title is
   // ours to set, so keepSession just makes the session findable.
   const argv = ["run", args.prompt];
+  if (args.runner.standalone) argv.push("--standalone");
   if (args.keepSession && args.sessionTitle) argv.push("--title", args.sessionTitle);
   if (args.agentName) argv.push("--agent", args.agentName);
   // opencode's --model also wants provider/model, same rewrite as omp above —
@@ -334,7 +345,30 @@ export function buildSubagentArgs(args: SubagentInvocation, promptFile?: string)
   return argv;
 }
 
+const opencodeMajorByBin = new Map<string, number>();
+
+/** Major version of an OpenCode binary (0 when it cannot be determined). Cached per binary. */
+export function opencodeMajorVersion(bin: string): number {
+  const cached = opencodeMajorByBin.get(bin);
+  if (cached !== undefined) return cached;
+  let major = 0;
+  try {
+    const out = execFileSync(bin, ["--version"], { encoding: "utf8", timeout: 15_000, stdio: ["ignore", "pipe", "ignore"] });
+    major = Number(/(\d+)\.\d+/.exec(out)?.[1] ?? 0);
+  } catch {
+    major = 0;
+  }
+  opencodeMajorByBin.set(bin, major);
+  return major;
+}
+
+function withResolvedStandalone(runner: SubagentRunner): SubagentRunner {
+  if (runner.kind !== "opencode" || runner.standalone !== undefined) return runner;
+  return { ...runner, standalone: opencodeMajorVersion(runner.bin) >= 2 };
+}
+
 export function runSubagent(args: SubagentInvocation & { timeoutMs: number }): string {
+  args = { ...args, runner: withResolvedStandalone(args.runner) };
   const promptFile =
     args.runner.kind === "omp" && args.agentName && args.esRoot
       ? ompAgentPromptFile(args.agentName, args.esRoot)

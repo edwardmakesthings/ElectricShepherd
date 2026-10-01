@@ -61,3 +61,12 @@ test("agent selection differs by harness", () => {
   const ocArgs = buildSubagentArgs({ runner: opencode, prompt: "p", agentName: "dream-mapper" });
   assert.deepEqual(ocArgs.slice(ocArgs.indexOf("--agent"), ocArgs.indexOf("--agent") + 2), ["--agent", "dream-mapper"]);
 });
+
+// OpenCode v2's CLI submits to the shared background server unless told
+// otherwise, which would bypass the subagent isolation env. v1 has no such flag.
+test("opencode runs on a private server only when the runner is marked standalone", () => {
+  assert.ok(buildSubagentArgs({ runner: { ...opencode, standalone: true }, prompt: "p" }).includes("--standalone"));
+  assert.ok(!buildSubagentArgs({ runner: { ...opencode, standalone: false }, prompt: "p" }).includes("--standalone"));
+  assert.ok(!buildSubagentArgs({ runner: opencode, prompt: "p" }).includes("--standalone"));
+  assert.ok(!buildSubagentArgs({ runner: { ...omp, standalone: true }, prompt: "p" }).includes("--standalone"));
+});
