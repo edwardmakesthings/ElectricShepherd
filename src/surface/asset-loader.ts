@@ -157,6 +157,43 @@ export function loadPackagedAssets(root: string = packagedAssetRoot()): {
   }
 }
 
+export interface PackagedSkill {
+  id: string
+  name: string
+  description?: string
+  autoinvoke?: boolean
+  path: string
+  content: string
+}
+
+/**
+ * Load bundled skills: one directory per skill under `skills/`, each with a
+ * `SKILL.md`. The directory name is the skill id. OpenCode v2 can register
+ * these from the plugin; v1 has no skill config key, so they are v2-only.
+ */
+export function loadPackagedSkills(root: string = packagedAssetRoot()): PackagedSkill[] {
+  const dir = join(root, "skills")
+  if (!existsSync(dir)) return []
+  const skills: PackagedSkill[] = []
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const path = join(dir, entry.name, "SKILL.md")
+    if (!existsSync(path)) continue
+    const { frontmatter, body } = splitFrontmatter(readFileSync(path, "utf8"))
+    const fields = parseFrontmatter(frontmatter)
+    const autoinvoke = fields["opencode/autoinvoke"]
+    skills.push({
+      id: entry.name,
+      name: typeof fields.name === "string" && fields.name ? fields.name : entry.name,
+      ...(typeof fields.description === "string" ? { description: fields.description } : {}),
+      ...(typeof autoinvoke === "boolean" ? { autoinvoke } : {}),
+      path,
+      content: body,
+    })
+  }
+  return skills
+}
+
 /**
  * Resolve absolute paths to the plugin's bundled instruction files that exist on
  * disk. Absolute paths are required so they resolve regardless of the consumer

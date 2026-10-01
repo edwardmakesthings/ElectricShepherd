@@ -1,6 +1,7 @@
 import { Plugin } from "@opencode/plugin"
 import { ES_TOOLS } from "../../tools/index.ts"
-import { registerInstructions, registerPackagedAssets, registerPermissionDefaults } from "../opencode-v2/assets.ts"
+import { registerInstructions, registerPackagedAssets, registerPackagedSkills, registerPermissionDefaults } from "../opencode-v2/assets.ts"
+import { registerCompactionArchive } from "../opencode-v2/compaction-archive.ts"
 import { createMemcoreCache, registerMemcoreContext } from "../opencode-v2/memcore-context.ts"
 import { toOpenCodeV2Tool } from "../opencode-v2/tool-adapter.ts"
 import TurnGuardV1 from "./session-policy-v1.ts"
@@ -46,6 +47,22 @@ const SessionPolicyPluginV2 = Plugin.define({
       console.log(`[turn-guard] v2 instructions: ${instructionCount} file(s) via session context hook`)
     } catch (error) {
       console.error("[turn-guard] v2 config port failed:", error)
+    }
+
+    try {
+      const offered = await registerPackagedSkills(ctx)
+      console.log(`[turn-guard] v2 skills offered: ${offered.join(", ") || "none"} (a same-id skill in your skill directories overrides)`)
+    } catch (error) {
+      console.error("[turn-guard] v2 skill registration failed:", error)
+    }
+
+    const archive = legacy?.compactionArchive
+    if (archive?.enabled) {
+      try {
+        await registerCompactionArchive(ctx, archive.dir)
+      } catch (error) {
+        console.error("[turn-guard] v2 compaction archive registration failed:", error)
+      }
     }
 
     const memcore = legacy?.memcoreContext

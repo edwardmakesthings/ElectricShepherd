@@ -32,7 +32,7 @@ export default defineTool({
       .optional()
       .describe("Short free-text reason, recorded in the capture event log (default: manual)."),
   }),
-  async execute(args, { cwd, sessionID }) {
+  async execute(args, { cwd, sessionID, signal }) {
     loadRuntimeEnv({ scriptUrl: import.meta.url, env: process.env });
 
     const sid = String(sessionID || "").trim();
@@ -71,6 +71,7 @@ export default defineTool({
         timeout: timeoutMs,
         killSignal: "SIGKILL",
         env: childEnv,
+        ...(signal ? { signal } : {}),
       });
       const text = String(output?.stdout ?? "").trim() || String(output?.stderr ?? "").trim();
       const lines = text

@@ -325,7 +325,8 @@ export const TurnGuard = async ({ client, directory, disableV1ToolRegistry = tru
     memcoreInjectOnIdle,
     memcoreInjectOnCompacted,
     memcoreInjectOnStart,
-    compactArchiveEnabled,
+    // Under v2 the archive is written from the compaction hook instead.
+    compactArchiveEnabled: compactArchiveEnabled && !v2Bridge,
     memcoreMaxChars,
     injectionCooldownMs,
     retryEnabled,
@@ -728,6 +729,10 @@ export const TurnGuard = async ({ client, directory, disableV1ToolRegistry = tru
     tool: toolRegistry,
   }
   if (v2Bridge) {
+    hooks.compactionArchive = {
+      enabled: compactArchiveEnabled,
+      dir: join(projectRoot, STATUS_DIR, "compaction-archive"),
+    }
     // Internal to the v2 surface (never handed to OpenCode): what it needs to
     // deliver mem-core through the context hook with this project's config.
     hooks.memcoreContext = {

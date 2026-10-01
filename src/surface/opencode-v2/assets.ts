@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs"
-import { loadPackagedAssets, type AssetRecord } from "../asset-loader.ts"
+import { loadPackagedAssets, loadPackagedSkills, type AssetRecord } from "../asset-loader.ts"
 
 /**
  * OpenCode v2 replacement for the v1 `config` hook asset injection.
@@ -289,4 +289,28 @@ export async function registerPermissionDefaults(
     }
     event.effect = fallback
   })
+}
+
+/**
+ * Register bundled skills through `ctx.skill.transform` — something v1 could
+ * not do (it had no skill config key, so users copied SKILL.md by hand).
+ * OpenCode applies the user's skill directories after plugin transforms, so a
+ * same-id skill there overrides the bundled one; the `get` check covers skills
+ * contributed by plugins that loaded earlier. Returns the offered skill ids.
+ */
+export async function registerPackagedSkills(
+  ctx: { skill: { transform(callback: (editor: any) => void): Promise<unknown> } },
+  skills = loadPackagedSkills(),
+): Promise<string[]> {
+  await ctx.skill.transform((editor) => {
+    for (const skill of skills) {
+      if (editor.get(skill.id)) continue
+      try {
+        editor.add(skill)
+      } catch (error) {
+        console.error(`[turn-guard] v2 skill ${skill.id} registration failed:`, error)
+      }
+    }
+  })
+  return skills.map((skill) => skill.id)
 }

@@ -36,6 +36,8 @@ export interface EsToolContext {
   cwd: string;
   /** Only `capture_transcript` needs this, and only a live session supplies it. */
   sessionID?: string;
+  /** Aborted when the session stops the call (OpenCode v2 only). Optional to honor. */
+  signal?: AbortSignal;
 }
 
 export interface EsToolDefinition<A = Record<string, any>> {

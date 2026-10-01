@@ -11,9 +11,11 @@ import {
   readInstructionText,
   registerInstructions,
   registerPackagedAssets,
+  registerPackagedSkills,
   registerPermissionDefaults,
   translateAgent,
 } from "../../src/surface/opencode-v2/assets.ts";
+import { loadPackagedSkills } from "../../src/surface/asset-loader.ts";
 
 test("translateAgent maps v1 frontmatter onto v2 agent fields", () => {
   const out = translateAgent({
@@ -153,4 +155,28 @@ test("registerPermissionDefaults tightens unruled allows and never overrides exp
   assert.equal(await evaluate({ agent: "build", action: "delete_drawers", effect: "deny" }), "deny");
   assert.equal(await evaluate({ agent: "build", action: "read", effect: "allow" }), "allow");
   assert.equal(await evaluate({ action: "delete_drawers", effect: "allow" }), "ask");
+});
+
+test("loadPackagedSkills reads each skills/<id>/SKILL.md with its frontmatter", () => {
+  const skills = loadPackagedSkills();
+  const eshepherd = skills.find((skill) => skill.id === "eshepherd");
+  assert.ok(eshepherd, "the bundled eshepherd skill is found");
+  assert.equal(eshepherd.name, "eshepherd");
+  assert.match(eshepherd.description, /MemPalace/);
+  assert.ok(eshepherd.path.endsWith("skills/eshepherd/SKILL.md"));
+  assert.ok(!eshepherd.content.startsWith("---"), "frontmatter is stripped from the content");
+});
+
+test("registerPackagedSkills adds bundled skills unless an earlier registration owns the id", async () => {
+  const registry = new Map([["mine", { id: "mine", path: "/user/mine/SKILL.md" }]]);
+  const offered = await registerPackagedSkills(
+    { skill: { transform: async (cb) => cb({ get: (id) => registry.get(id), add: (skill) => registry.set(skill.id, skill) }) } },
+    [
+      { id: "mine", name: "mine", path: "/bundled/mine/SKILL.md", content: "x" },
+      { id: "bundled", name: "bundled", path: "/bundled/bundled/SKILL.md", content: "y" },
+    ],
+  );
+  assert.equal(registry.get("mine").path, "/user/mine/SKILL.md");
+  assert.equal(registry.get("bundled").path, "/bundled/bundled/SKILL.md");
+  assert.deepEqual(offered, ["mine", "bundled"]);
 });

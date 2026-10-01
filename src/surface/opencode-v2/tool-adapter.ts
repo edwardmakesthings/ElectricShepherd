@@ -8,10 +8,13 @@ type JsonObjectSchema = JsonSchema.JsonSchema & {
 }
 
 class JsonSchemaNode implements SchemaNode {
-  constructor(
-    readonly schema: JsonSchema.JsonSchema,
-    readonly isOptional: boolean = false,
-  ) {}
+  readonly schema: JsonSchema.JsonSchema
+  readonly isOptional: boolean
+
+  constructor(schema: JsonSchema.JsonSchema, isOptional: boolean = false) {
+    this.schema = schema
+    this.isOptional = isOptional
+  }
 
   optional(): SchemaNode {
     return new JsonSchemaNode(this.schema, true)
@@ -71,6 +74,24 @@ function toObjectSchema(shape: Record<string, SchemaNode>): JsonObjectSchema {
   }
 }
 
+/**
+ * Stop waiting as soon as the session stops the call. Most tools cannot cancel
+ * their MemPalace request mid-flight, so it finishes (or times out) in the
+ * background, but the session no longer hangs on it.
+ */
+export function abortable<T>(run: Promise<T>, signal: AbortSignal | undefined, name: string): Promise<T> {
+  if (!signal) return run
+  if (signal.aborted) return Promise.reject(new Error(`${name} was cancelled`))
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new Error(`${name} was cancelled`))
+    signal.addEventListener("abort", onAbort, { once: true })
+    run.then(
+      (value) => { signal.removeEventListener("abort", onAbort); resolve(value) },
+      (error) => { signal.removeEventListener("abort", onAbort); reject(error) },
+    )
+  })
+}
+
 export function toOpenCodeV2Tool(
   definition: EsToolDefinition,
   cwdResolver: (context: { sessionID: string }) => string,
@@ -80,12 +101,13 @@ export function toOpenCodeV2Tool(
     name: definition.name,
     description: definition.description,
     input: toObjectSchema(shape),
-    async execute(callArgs, context) {
-      const result = await definition.execute(callArgs as Record<string, unknown>, {
+    async execute(callArgs: unknown, context: { sessionID: string; signal?: AbortSignal }) {
+      const run = definition.execute(callArgs as Record<string, unknown>, {
         cwd: cwdResolver(context),
         sessionID: context.sessionID,
+        signal: context.signal,
       })
-      return { content: result }
+      return { content: await abortable(run, context.signal, definition.name) }
     },
   }
 }
