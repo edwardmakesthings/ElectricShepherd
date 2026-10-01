@@ -2,7 +2,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "$script_dir/.." && pwd)"
+repo_root="$(cd "$script_dir/../.." && pwd)"
 consumer_root="${ESHEPHERD_PROJECT_ROOT:-$PWD}"
 
 resolve_env_path() {
@@ -77,7 +77,7 @@ if command -v node >/dev/null 2>&1; then
   preserve_capture_timeout="${ESHEPHERD_SOURCE_CAPTURE_MCP_TIMEOUT_SECONDS+x}"
   preserve_capture_timeout_val="${ESHEPHERD_SOURCE_CAPTURE_MCP_TIMEOUT_SECONDS-}"
 
-  config_exports="$(node --experimental-strip-types "$repo_root/scripts/emit-runtime-config-env.ts" --cwd "${ESHEPHERD_PROJECT_ROOT:-$PWD}" 2>/dev/null || true)"
+  config_exports="$(node --experimental-strip-types "$script_dir/emit-runtime-config-env.ts" --cwd "${ESHEPHERD_PROJECT_ROOT:-$PWD}" 2>/dev/null || true)"
   if [[ -n "$config_exports" ]]; then
     eval "$config_exports"
   fi
@@ -160,8 +160,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# --pure avoids plugin log noise; stderr redirect suppresses export banners.
-opencode --pure export "$sid" > "$tmpfile" 2>/dev/null
+# OpenCode v2 moved export under `session` and dropped `--pure`; fall back to
+# the v1 form so the script works with either CLI. stderr carries banners.
+if ! opencode session export "$sid" > "$tmpfile" 2>/dev/null || [[ ! -s "$tmpfile" ]]; then
+  opencode --pure export "$sid" > "$tmpfile" 2>/dev/null || true
+fi
 
 if [[ ! -s "$tmpfile" ]]; then
   echo "capture-source-transcripts: export produced empty payload for session $sid" >&2

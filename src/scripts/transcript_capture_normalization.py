@@ -18,6 +18,26 @@ def trim_embedded_content(text_value: str) -> str:
     return text_value
 
 
+def _message_role_and_text_parts(message: dict) -> tuple:
+    """Return (role, text parts) for a v1 or v2 OpenCode export message.
+
+    v1 nests the role under ``info.role`` and text under ``parts``; v2 messages
+    are flat: ``type`` is the role, users carry ``text``, and assistants carry a
+    ``content`` list. Other v2 types (idle, synthetic, ...) are not transcript.
+    """
+    if isinstance(message.get("info"), dict):
+        role = str(message["info"].get("role") or "")
+        parts = message.get("parts") if isinstance(message.get("parts"), list) else []
+        return role, parts
+
+    role = str(message.get("type") or "")
+    if role == "user" and isinstance(message.get("text"), str):
+        return role, [{"type": "text", "text": message["text"]}]
+    if role == "assistant" and isinstance(message.get("content"), list):
+        return role, message["content"]
+    return role, []
+
+
 def normalize_capture_content(raw: str) -> str:
     text = raw.strip()
     if not text:
@@ -28,6 +48,8 @@ def normalize_capture_content(raw: str) -> str:
         return text
 
     session_info = parsed.get("info") if isinstance(parsed, dict) else {}
+    if not isinstance(session_info, dict):
+        session_info = {}
     messages = parsed.get("messages") if isinstance(parsed, dict) else []
 
     compact_messages = []
@@ -35,11 +57,7 @@ def normalize_capture_content(raw: str) -> str:
         for message in messages:
             if not isinstance(message, dict):
                 continue
-            info = message.get("info") if isinstance(message.get("info"), dict) else {}
-            role = str(info.get("role") or "")
-            parts = (
-                message.get("parts") if isinstance(message.get("parts"), list) else []
-            )
+            role, parts = _message_role_and_text_parts(message)
 
             text_parts = []
             for part in parts:
@@ -70,7 +88,8 @@ def normalize_capture_content(raw: str) -> str:
         "session": {
             "id": session_info.get("id"),
             "title": session_info.get("title"),
-            "directory": session_info.get("directory"),
+            "directory": session_info.get("directory")
+            or (session_info.get("location") or {}).get("directory"),
         },
         "messages": compact_messages,
     }
