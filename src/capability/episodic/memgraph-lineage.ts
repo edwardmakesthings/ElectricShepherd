@@ -256,7 +256,12 @@ export async function listScopedDerivedDrawers(core: MemgraphInternals, args: {
       content: asString(row.content).trim() || undefined,
       labels,
       height: asNumber(heightRes.height, 0),
-      retrieval_count: asNumber(row.retrieval_count || asObject(row.metadata).retrieval_count, 0),
+      retrieval_count: asNumber(
+        asObject(row.access).retrieval_count ||
+          row.retrieval_count ||
+          asObject(row.metadata).retrieval_count,
+        0,
+      ),
       connection_degree: graphFactCount,
       lineage_match_count: sourceIds.length,
     });

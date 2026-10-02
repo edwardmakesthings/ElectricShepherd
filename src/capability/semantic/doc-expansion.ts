@@ -87,7 +87,11 @@ export async function expandConcernNeighbors(
             room,
             desc: asString(drawer.desc || drawer.title || drawer.summary),
             height: 0, // concerns is not lineage — height stays pure synthesized-from
-            retrieval_count: asNumber(drawer.retrieval_count || asObject(drawer.metadata).retrieval_count),
+            retrieval_count: asNumber(
+              asObject(drawer.access).retrieval_count ||
+                drawer.retrieval_count ||
+                asObject(drawer.metadata).retrieval_count,
+            ),
             connection_degree: 0,
             lineage_match_count: 0,
             source_type: "doc",
@@ -190,7 +194,12 @@ export async function admitDirectDocs(
           room,
           desc: asString(drawer.desc || drawer.title || drawer.summary || row.desc || row.title || row.summary),
           height: 0, // doc is not lineage — height stays pure synthesized-from
-          retrieval_count: asNumber(drawer.retrieval_count || asObject(drawer.metadata).retrieval_count || row.retrieval_count),
+          retrieval_count: asNumber(
+            asObject(drawer.access).retrieval_count ||
+              drawer.retrieval_count ||
+              asObject(drawer.metadata).retrieval_count ||
+              row.retrieval_count,
+          ),
           connection_degree: 0,
           lineage_match_count: 0,
           source_type: "doc",

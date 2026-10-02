@@ -64,7 +64,7 @@ export default defineTool({
           height,
           wing: String(metaPayload.wing || meta.wing || ""),
           room: String(metaPayload.room || meta.room || ""),
-          retrieval_count: Number(meta.retrieval_count) || 0,
+          retrieval_count: Number(asObject(metaPayload.access).retrieval_count) || Number(meta.retrieval_count) || 0,
           filed_at: String(meta.filed_at || ""),
         } as Record<string, unknown>;
       } catch (err) {
