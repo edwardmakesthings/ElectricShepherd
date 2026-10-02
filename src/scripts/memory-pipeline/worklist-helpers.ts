@@ -39,6 +39,20 @@ export function chunkHomogeneousWorklist(items: SourceDrawerWorkItem[], size: nu
   ];
 }
 
+export function mergeUniqueWorklistItemsById(items: SourceDrawerWorkItem[]): SourceDrawerWorkItem[] {
+  const byId = new Map<string, SourceDrawerWorkItem>();
+  for (const item of items) {
+    byId.set(item.drawer_id, item);
+  }
+  return [...byId.values()];
+}
+
+export function buildReconsolidateWorklist(reconParents: SourceDrawerWorkItem[]): SourceDrawerWorkItem[] {
+  return mergeUniqueWorklistItemsById(reconParents);
+}
+
+
+
 export async function splitChunkByLineageConflicts(
   chunk: SourceDrawerWorkItem[],
   hasLineagePath: (sourceId: string, targetId: string) => Promise<boolean>,

@@ -3,8 +3,10 @@ import test from "node:test";
 
 import {
   buildReconsolidationRetirementPlan,
+  buildReconsolidateWorklist,
   chunkHomogeneousWorklist,
   evaluateReconsolidationRetirement,
+  mergeUniqueWorklistItemsById,
   partitionWorklistBySourceClass,
   splitChunkByLineageConflicts,
 } from "../../src/scripts/memory-pipeline/worklist-helpers.ts";
@@ -52,7 +54,6 @@ test("evaluateReconsolidationRetirement requires full covered set and no failed 
 });
 
 
-
 test("partitionWorklistBySourceClass separates raw and layered items", () => {
   const items = [
     { drawer_id: "raw-1", source_class: "raw" },
@@ -78,6 +79,34 @@ test("chunkHomogeneousWorklist never mixes classes in a chunk", () => {
   assert.deepEqual(chunks[0].map((item) => item.drawer_id), ["r1", "r2"]);
   assert.deepEqual(chunks[1].map((item) => item.drawer_id), ["l1", "l2"]);
   assert.ok(chunks.every((chunk) => new Set(chunk.map((item) => item.source_class || "raw")).size === 1));
+});
+
+test("mergeUniqueWorklistItemsById de-duplicates drawer ids", () => {
+  const merged = mergeUniqueWorklistItemsById([
+    { drawer_id: "parent_a", source_class: "raw" },
+    { drawer_id: "parent_b", source_class: "raw" },
+    { drawer_id: "parent_a", source_class: "raw", room: "source-transcripts-processed" },
+  ]);
+  assert.deepEqual(merged.map((item) => item.drawer_id), ["parent_a", "parent_b"]);
+});
+
+test("buildReconsolidateWorklist returns only selected parent drawers", () => {
+  const baseWorklist = [
+    { drawer_id: "unconsolidated_1", source_class: "raw" },
+    { drawer_id: "unconsolidated_2", source_class: "raw" },
+  ];
+  const reconParents = [
+    { drawer_id: "parent_a", source_class: "raw" },
+    { drawer_id: "parent_b", source_class: "raw" },
+    { drawer_id: "parent_a", source_class: "raw", room: "source-transcripts-processed" },
+  ];
+
+  const worklist = buildReconsolidateWorklist(reconParents);
+  assert.deepEqual(worklist.map((item) => item.drawer_id), ["parent_a", "parent_b"]);
+  assert.ok(worklist.every((item) => item.drawer_id.startsWith("parent_")));
+  assert.ok(worklist.every((item) => !item.drawer_id.startsWith("unconsolidated_")));
+
+  void baseWorklist;
 });
 
 test("splitChunkByLineageConflicts separates ancestor/descendant drawers", async () => {

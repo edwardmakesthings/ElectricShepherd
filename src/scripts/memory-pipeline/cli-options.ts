@@ -154,7 +154,7 @@ export function parseWorklistOptions(argv: string[], runtimeConfig: ReturnType<t
     throw new Error("--all-raw cannot be combined with --reconsolidate");
   }
   const limit = Number(getArg(argv, "--worklist-limit") || getArg(argv, "--search-limit") || "200");
-  const batchSize = Math.max(1, Number(getArg(argv, "--batch-size") || "1"));
+  const batchSize = Math.max(1, Number(getArg(argv, "--batch-size") || "10"));
   const defaultSourceRoom =
     String(runtimeConfig.valuesByPath.sourceCapture?.room || "source-transcripts").trim() ||
     "source-transcripts";
@@ -269,7 +269,7 @@ export function usage(): string {
     "  --room <room>                    (source room; default: ESHEPHERD_SOURCE_CAPTURE_ROOM or source-transcripts)",
     "  --retry-failed-only              (source room becomes <room>-failed or --failed-room)",
     "  --reconsolidate <closetId[,closetId...]> (rebuild from specific synthesized closets' parents)",
-    "  --batch-size <n>                 (transcript families per subagent run; default: 1)",
+    "  --batch-size <n>                 (transcript families per subagent run; default: 10)",
     "  --worklist-limit <n>             (max source drawers enumerated; default: 200)",
     "  --processed-room <room>          (default: <room>-processed)",
     "  --failed-room <room>             (default: <room>-failed)",

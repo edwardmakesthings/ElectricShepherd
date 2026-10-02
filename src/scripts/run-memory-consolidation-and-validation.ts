@@ -34,7 +34,7 @@ import {
 } from "./memory-pipeline/subagent.ts";
 import {
   chunkHomogeneousWorklist, ensureRawEntriesForChunk,
-  getFamilyDrawerIds, parseDrawerPayload, postConsolidationMoves, moveAllToRoom, partitionChunk,
+  getFamilyDrawerIds, buildReconsolidateWorklist, parseDrawerPayload, postConsolidationMoves, moveAllToRoom, partitionChunk,
   buildReconsolidationRetirementPlan, evaluateReconsolidationRetirement, splitChunkByLineageConflicts,
   type ReconsolidationRetirementPlan,
 } from "./memory-pipeline/worklist-helpers.ts";
@@ -413,8 +413,14 @@ async function main(): Promise<void> {
     return plan;
   };
   const enumerateAll = worklistOptions.mode === "all" || worklistOptions.mode === "all-raw";
+  const hasReconsolidateMode = reconsolidateClosetIds.length > 0;
+  const hasExplicitBatchSize = hasFlag(argv, "--batch-size");
+  const effectiveBatchSize = hasReconsolidateMode && !hasExplicitBatchSize
+    ? Math.max(10, worklistOptions.batchSize)
+    : worklistOptions.batchSize;
+  const worklistMode = hasReconsolidateMode ? "reconsolidate" : worklistOptions.mode;
   let worklist: SourceDrawerWorkItem[] = [];
-  if (includeBasePipeline) {
+  if (includeBasePipeline && !hasReconsolidateMode) {
     const sourceRoom = worklistOptions.retryFailedOnly ? worklistOptions.failedRoom : worklistOptions.sourceRoom;
     worklist = enumerateAll
       ? await client.listSourceDrawersByScope({
@@ -505,10 +511,7 @@ async function main(): Promise<void> {
         }
       }
 
-      const byRoot = new Map<string, SourceDrawerWorkItem>();
-      for (const item of worklist) byRoot.set(item.drawer_id, item);
-      for (const item of reconParents) byRoot.set(item.drawer_id, item);
-      worklist = [...byRoot.values()];
+      worklist = buildReconsolidateWorklist(reconParents);
     }
   }
 
@@ -537,10 +540,10 @@ async function main(): Promise<void> {
   }
 
   const worklistOutput = {
-    mode: worklistOptions.mode,
+    mode: worklistMode,
     count: worklist.length,
     limit: worklistOptions.limit,
-    batchSize: worklistOptions.batchSize,
+    batchSize: effectiveBatchSize,
     note: includeBasePipeline
       ? reconsolidateClosetIds.length > 0
         ? "reconsolidate mode: selected closets are evaluated for retirement after successful parent replacement"
@@ -573,14 +576,14 @@ async function main(): Promise<void> {
     {
       phase: includeBasePipeline ? "consolidation" : "cadence-only",
       includeBasePipeline,
-      worklistMode: worklistOptions.mode,
+      worklistMode,
     },
     {
       examinedCount: worklist.length,
     },
   );
   if (includeBasePipeline) {
-    const worklistChunks = chunkHomogeneousWorklist(worklist, worklistOptions.batchSize);
+    const worklistChunks = chunkHomogeneousWorklist(worklist, effectiveBatchSize);
     // The keyword fallback splits on sentences and lines, so a captured transcript
     // -- one long single-line JSON blob -- yields too few populated sections to
     // clear the confidence floor, and every drawer scores `low` and is dropped.

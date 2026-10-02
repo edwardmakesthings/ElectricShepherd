@@ -73,7 +73,7 @@ export async function emitRunCompletion(params: {
           : "default",
     },
     mode: params.includeBasePipeline ? "full-pipeline" : "cadence-only",
-    worklistMode: params.worklistOptions.mode,
+    worklistMode: String(params.worklistOutput.mode || params.worklistOptions.mode),
     worklist: params.worklistOutput,
     ...(params.cadence?.calibration ? { calibration: params.cadence.calibration } : {}),
   };
