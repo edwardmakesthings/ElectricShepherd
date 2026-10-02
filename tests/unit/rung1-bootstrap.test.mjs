@@ -677,6 +677,109 @@ async function runBulkToolHermetically(tool, args) {
   }
 }
 
+
+
+function makeManyDrawerIDs(count, prefix = "drawer_bulk") {
+  return Array.from({ length: count }, (_v, i) => `${prefix}_${String(i + 1).padStart(4, "0")}`);
+}
+
+async function runDeleteDrawersApplyHermetically(args, { onDeleteDrawer, onDeleteDrawers } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "rung1-delete-apply-"));
+  writeFileSync(
+    join(dir, "eshepherd-config.jsonc"),
+    `{
+      "mcp": {
+        "url": "http://localhost:8093/mcp",
+        "toolPrefix": "mempalace_",
+        "requestTimeoutMs": 1500,
+        "maxRetries": 0
+      }
+    }`,
+    "utf8"
+  );
+
+  const envKeys = [
+    "MEMPALACE_MCP_URL",
+    "ESHEPHERD_DELETE_MCP_URL",
+    "MEMPALACE_MCP_API_KEY",
+    "MEMPALACE_MCP_BEARER_TOKEN",
+    "MEMPALACE_MCP_AUTH_HEADER",
+    "MEMPALACE_MCP_AUTH_SCHEME",
+    "MEMPALACE_MCP_HEADERS_JSON",
+  ];
+  const envSnapshot = Object.fromEntries(envKeys.map((k) => [k, process.env[k]]));
+  for (const k of envKeys) delete process.env[k];
+
+  const toolCalls = [];
+  const fetchFn = async (_input, init) => {
+    const payload = JSON.parse(String(init?.body || "{}"));
+    if (payload.method === "initialize" || payload.method === "notifications/initialized") {
+      return new Response(
+        JSON.stringify({ jsonrpc: "2.0", id: payload.id, result: {} }),
+        { status: 200, headers: { "Content-Type": "application/json", "Mcp-Session-Id": "rung1-delete-apply" } }
+      );
+    }
+    if (payload.method === "tools/call") {
+      const name = payload?.params?.name;
+      const callArgs = payload?.params?.arguments || {};
+      toolCalls.push({ name, args: callArgs });
+
+      if (name === "mempalace_delete_drawers") {
+        if (onDeleteDrawers) {
+          const body = onDeleteDrawers(callArgs);
+          return new Response(
+            JSON.stringify({ jsonrpc: "2.0", id: payload.id, result: { content: [{ type: "text", text: JSON.stringify(body) }] } }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        const ids = Array.isArray(callArgs.drawer_ids) ? callArgs.drawer_ids : [];
+        const body = {
+          results: ids.map((id) => ({ drawer_id: id, deleted_ids: [id], chunks_deleted: 1, closets_deleted: 0 })),
+          count: ids.length,
+          deleted: ids.length,
+          errors: 0,
+        };
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: payload.id, result: { content: [{ type: "text", text: JSON.stringify(body) }] } }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+
+      if (name === "mempalace_delete_drawer") {
+        const body = onDeleteDrawer ? onDeleteDrawer(callArgs) : { success: true, chunks_deleted: 1 };
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: payload.id, result: { content: [{ type: "text", text: JSON.stringify(body) }] } }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+
+      return new Response(
+        JSON.stringify({ jsonrpc: "2.0", id: payload.id, result: { content: [{ type: "text", text: "{}" }] } }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: payload.id, result: {} }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = fetchFn;
+
+  try {
+    const raw = await deleteDrawersTool.execute({ ...args, dry_run: false }, { cwd: dir });
+    return { report: JSON.parse(raw), toolCalls };
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const [k, v] of Object.entries(envSnapshot)) {
+      if (typeof v === "undefined") delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 const BULK_DRAWERS = {
   drawer_wingA_roomX_a1: { drawer_id: "drawer_wingA_roomX_a1", wing: "wingA", room: "roomX" },
   drawer_wingA_roomX_b2: { drawer_id: "drawer_wingA_roomX_b2", wing: "wingA", room: "roomX" },
@@ -695,7 +798,7 @@ const BULK_LISTINGS = {
   ],
 };
 
-test("rung1: dry-run move_drawers writes nothing (explicit IDs + wing scope)", async () => {
+test("rung1: dry-run es_move_drawers writes nothing (explicit IDs + wing scope)", async () => {
   // Explicit IDs: read-only preview of each planned move.
   const byIds = await runBulkToolHermetically(moveDrawersTool, {
     drawer_ids: ["drawer_wingA_roomX_a1"],
@@ -711,7 +814,7 @@ test("rung1: dry-run move_drawers writes nothing (explicit IDs + wing scope)", a
   const movedRow = byIds.report.results[0];
   assert.equal(movedRow.from_wing, "wingA");
   assert.equal(movedRow.to_wing, "wingB");
-  assert.equal(bulkWriteCallsOf(byIds.toolCalls).length, 0, `move_drawers dry-run produced write calls: ${JSON.stringify(bulkWriteCallsOf(byIds.toolCalls))}`);
+  assert.equal(bulkWriteCallsOf(byIds.toolCalls).length, 0, `es_move_drawers dry-run produced write calls: ${JSON.stringify(bulkWriteCallsOf(byIds.toolCalls))}`);
 
   // Wing scope: list_drawers pages the room read-only; no update_drawer.
   const byScope = await runBulkToolHermetically(moveDrawersTool, {
@@ -728,10 +831,10 @@ test("rung1: dry-run move_drawers writes nothing (explicit IDs + wing scope)", a
     byScope.toolCalls.some((c) => c.name === "mempalace_list_drawers"),
     "scoped dry-run must page the room via list_drawers"
   );
-  assert.equal(bulkWriteCallsOf(byScope.toolCalls).length, 0, `move_drawers scoped dry-run produced write calls: ${JSON.stringify(bulkWriteCallsOf(byScope.toolCalls))}`);
+  assert.equal(bulkWriteCallsOf(byScope.toolCalls).length, 0, `es_move_drawers scoped dry-run produced write calls: ${JSON.stringify(bulkWriteCallsOf(byScope.toolCalls))}`);
 });
 
-test("rung1: dry-run delete_drawers writes nothing (explicit IDs + wing scope)", async () => {
+test("rung1: dry-run es_delete_drawers writes nothing (explicit IDs + wing scope)", async () => {
   const byIds = await runBulkToolHermetically(deleteDrawersTool, {
     drawer_ids: ["drawer_wingA_roomX_a1", "drawer_wingA_roomX_b2"],
     dry_run: true,
@@ -740,7 +843,7 @@ test("rung1: dry-run delete_drawers writes nothing (explicit IDs + wing scope)",
   assert.equal(byIds.report.dry_run, true);
   assert.equal(byIds.report.requested, 2);
   assert.deepEqual(byIds.report.drawer_ids, ["drawer_wingA_roomX_a1", "drawer_wingA_roomX_b2"]);
-  assert.equal(bulkWriteCallsOf(byIds.toolCalls).length, 0, `delete_drawers dry-run produced write calls: ${JSON.stringify(bulkWriteCallsOf(byIds.toolCalls))}`);
+  assert.equal(bulkWriteCallsOf(byIds.toolCalls).length, 0, `es_delete_drawers dry-run produced write calls: ${JSON.stringify(bulkWriteCallsOf(byIds.toolCalls))}`);
 
   const byScope = await runBulkToolHermetically(deleteDrawersTool, {
     source_wing: "wingA",
@@ -754,7 +857,7 @@ test("rung1: dry-run delete_drawers writes nothing (explicit IDs + wing scope)",
     byScope.toolCalls.some((c) => c.name === "mempalace_list_drawers"),
     "scoped dry-run must page the room via list_drawers"
   );
-  assert.equal(bulkWriteCallsOf(byScope.toolCalls).length, 0, `delete_drawers scoped dry-run produced write calls: ${JSON.stringify(bulkWriteCallsOf(byScope.toolCalls))}`);
+  assert.equal(bulkWriteCallsOf(byScope.toolCalls).length, 0, `es_delete_drawers scoped dry-run produced write calls: ${JSON.stringify(bulkWriteCallsOf(byScope.toolCalls))}`);
 });
 
 test("rung1: dry-run relocate_memory writes nothing (move + excerpt modes)", async () => {
@@ -806,4 +909,64 @@ test("rung1: apply relocate_memory excerpt files via checkpoint (no direct add_d
   assert.equal(checkpointCalls.length, 1, `expected one checkpoint call, saw ${JSON.stringify(checkpointCalls)}`);
   assert.equal(applied.toolCalls.filter((c) => c.name === "mempalace_add_drawer").length, 0, "excerpt apply must not call add_drawer directly");
   assert.equal(applied.toolCalls.filter((c) => c.name === "mempalace_kg_add").length, 1, "excerpt apply should attempt one lineage edge");
+});
+
+
+test("rung1: apply es_delete_drawers chunks bulk calls at 500 IDs", async () => {
+  const ids = makeManyDrawerIDs(1001);
+  const applied = await runDeleteDrawersApplyHermetically({ drawer_ids: ids });
+
+  assert.equal(applied.report.ok, true);
+  assert.equal(applied.report.requested, 1001);
+  assert.equal(applied.report.deleted, 1001);
+
+  const bulkCalls = applied.toolCalls.filter((c) => c.name === "mempalace_delete_drawers");
+  assert.equal(bulkCalls.length, 3);
+  assert.equal(bulkCalls[0].args.drawer_ids.length, 500);
+  assert.equal(bulkCalls[1].args.drawer_ids.length, 500);
+  assert.equal(bulkCalls[2].args.drawer_ids.length, 1);
+});
+
+test("rung1: apply es_delete_drawers maps per-id error rows from bulk response", async () => {
+  const ids = ["drawer_a", "drawer_b", "drawer_c"];
+  const applied = await runDeleteDrawersApplyHermetically(
+    { drawer_ids: ids },
+    {
+      onDeleteDrawers: ({ drawer_ids: callIDs }) => ({
+        results: [
+          { drawer_id: callIDs[0], deleted_ids: [callIDs[0]], chunks_deleted: 2, closets_deleted: 0 },
+          { drawer_id: callIDs[1], error: "permission denied" },
+          { drawer_id: callIDs[2], deleted_ids: [callIDs[2]], chunks_deleted: 1, closets_deleted: 0 },
+        ],
+        count: 3,
+        deleted: 2,
+        errors: 1,
+      }),
+    }
+  );
+
+  assert.equal(applied.report.ok, false);
+  assert.equal(applied.report.failed, 1);
+  assert.equal(applied.report.deleted, 2);
+  assert.equal(applied.report.results.length, 3);
+  assert.equal(applied.report.results[1].drawer_id, "drawer_b");
+  assert.equal(applied.report.results[1].ok, false);
+  assert.equal(applied.report.results[1].error, "permission denied");
+});
+
+test("rung1: apply es_delete_drawers falls back to per-id delete when bulk tool is unknown", async () => {
+  const ids = ["drawer_x", "drawer_y"];
+  const applied = await runDeleteDrawersApplyHermetically(
+    { drawer_ids: ids },
+    {
+      onDeleteDrawers: () => ({ error: "Unknown tool: mempalace_delete_drawers" }),
+      onDeleteDrawer: ({ drawer_id }) => ({ success: true, chunks_deleted: drawer_id === "drawer_x" ? 1 : 2 }),
+    }
+  );
+
+  assert.equal(applied.report.ok, true);
+  assert.equal(applied.report.deleted, 2);
+  assert.equal(applied.report.chunks_deleted_total, 3);
+  assert.equal(applied.toolCalls.filter((c) => c.name === "mempalace_delete_drawers").length, 1);
+  assert.equal(applied.toolCalls.filter((c) => c.name === "mempalace_delete_drawer").length, 2);
 });

@@ -52,7 +52,7 @@ type DeleteScriptResult = {
 
 
 export default defineTool({
-  name: "delete_drawers",
+  name: "es_delete_drawers",
   description:
     "Delete MemPalace drawers by ID with structured failure reporting.",
   args: (s) => ({
@@ -122,6 +122,7 @@ export default defineTool({
     const toolPrefix = String(args.tool_prefix || runtimeConfig.valuesByPath.mcp?.toolPrefix || DEFAULT_MCP_TOOL_PREFIX).trim();
     const listTool = `${toolPrefix}list_drawers`;
     const deleteTool = `${toolPrefix}delete_drawer`;
+    const bulkDeleteTool = `${toolPrefix}delete_drawers`;
 
     let drawerIDs = [...ids];
 
@@ -195,29 +196,89 @@ export default defineTool({
       const failFast = Boolean(args.fail_fast);
 
       let chunksDeletedTotal = 0;
-      const { results, failed } = await runDrawerBatch<DeleteScriptRow & BatchResultRow>(
-        drawerIDs,
-        failFast,
-        async (drawerID) => {
-          const res = (await mcp.callTool(deleteTool, { drawer_id: drawerID })) as Record<string, unknown>;
-          if (res && res.success === true) {
-            const chunksDeleted = Number(res.chunks_deleted ?? 0);
-            if (Number.isFinite(chunksDeleted)) chunksDeletedTotal += chunksDeleted;
+      let results: (DeleteScriptRow & BatchResultRow)[] = [];
+      let failed = 0;
+
+      const deleteOneByOne = async () => {
+        const batch = await runDrawerBatch<DeleteScriptRow & BatchResultRow>(
+          drawerIDs,
+          failFast,
+          async (drawerID) => {
+            const res = (await mcp.callTool(deleteTool, { drawer_id: drawerID })) as Record<string, unknown>;
+            if (res && res.success === true) {
+              const chunksDeleted = Number(res.chunks_deleted ?? 0);
+              if (Number.isFinite(chunksDeleted)) chunksDeletedTotal += chunksDeleted;
+              return {
+                drawer_id: drawerID,
+                ok: true,
+                chunks_deleted: Number.isFinite(chunksDeleted) ? chunksDeleted : 0,
+              };
+            }
+            const errorText = String((res && res.error) || "delete_drawer returned success=false");
             return {
+              drawer_id: drawerID,
+              ok: false,
+              error: errorText,
+              error_kind: classifyErrorKind(errorText),
+            };
+          },
+        );
+        results = batch.results;
+        failed = batch.failed;
+      };
+
+      const isUnknownToolError = (errorText: string, toolName: string): boolean => {
+        const lower = errorText.toLowerCase();
+        return (
+          (lower.includes("unknown tool") || lower.includes("tool not found") || lower.includes("unrecognized tool")) &&
+          lower.includes(toolName.toLowerCase())
+        );
+      };
+
+      try {
+        for (let i = 0; i < drawerIDs.length; i += 500) {
+          const chunk = drawerIDs.slice(i, i + 500);
+          const res = (await mcp.callTool(bulkDeleteTool, { drawer_ids: chunk })) as Record<string, unknown>;
+          const invalidError = typeof res.error === "string" && res.error.length > 0 ? res.error : "";
+          if (invalidError) {
+            throw new Error(invalidError);
+          }
+          const rows = Array.isArray(res.results) ? res.results as Record<string, unknown>[] : [];
+          if (rows.length !== chunk.length) {
+            throw new Error(`es_delete_drawers returned ${rows.length} results for ${chunk.length} requested IDs`);
+          }
+
+          for (const row of rows) {
+            const drawerID = String(row.drawer_id || "");
+            const errorText = typeof row.error === "string" ? row.error : "";
+            if (errorText) {
+              results.push({
+                drawer_id: drawerID,
+                ok: false,
+                error: errorText,
+                error_kind: classifyErrorKind(errorText),
+              });
+              failed += 1;
+              if (failFast) break;
+              continue;
+            }
+
+            const chunksDeleted = Number(row.chunks_deleted ?? 0);
+            if (Number.isFinite(chunksDeleted)) chunksDeletedTotal += chunksDeleted;
+            results.push({
               drawer_id: drawerID,
               ok: true,
               chunks_deleted: Number.isFinite(chunksDeleted) ? chunksDeleted : 0,
-            };
+            });
           }
-          const errorText = String((res && res.error) || "delete_drawer returned success=false");
-          return {
-            drawer_id: drawerID,
-            ok: false,
-            error: errorText,
-            error_kind: classifyErrorKind(errorText),
-          };
-        },
-      );
+
+          if (failFast && failed > 0) break;
+        }
+      } catch (error) {
+        const errorText = String(error);
+        if (!isUnknownToolError(errorText, bulkDeleteTool)) throw error;
+        await deleteOneByOne();
+      }
 
       const payload: DeleteScriptResult = {
         ok: failed === 0,
@@ -235,7 +296,7 @@ export default defineTool({
       };
 
       if (failed > 0) {
-        const summary = summarizeFailures(payload.results || [], payload.error || "", "delete_drawers failed");
+        const summary = summarizeFailures(payload.results || [], payload.error || "", "es_delete_drawers failed");
         return JSON.stringify({ ...payload, ...summary }, null, 2);
       }
 
@@ -254,7 +315,7 @@ export default defineTool({
         error_kind: kind,
         failure_kinds: { [kind]: 1 },
       };
-      const summary = summarizeFailures(payload.results || [], payload.error || "", "delete_drawers failed");
+      const summary = summarizeFailures(payload.results || [], payload.error || "", "es_delete_drawers failed");
       return JSON.stringify({ ...payload, ...summary }, null, 2);
     }
   },

@@ -20,16 +20,16 @@ export function createHookHeadHandlers(deps: any) {
       if (typeof permission === "string") {
         config.permission = {
           "*": permission,
-          delete_drawers: "ask",
-          move_drawers: "ask",
+          es_delete_drawers: "ask",
+          es_move_drawers: "ask",
         }
       } else {
         const currentPermission = permission && typeof permission === "object" ? permission : {}
-        if (!Object.prototype.hasOwnProperty.call(currentPermission, "delete_drawers")) {
-          currentPermission.delete_drawers = "ask"
+        if (!Object.prototype.hasOwnProperty.call(currentPermission, "es_delete_drawers")) {
+          currentPermission.es_delete_drawers = "ask"
         }
-        if (!Object.prototype.hasOwnProperty.call(currentPermission, "move_drawers")) {
-          currentPermission.move_drawers = "ask"
+        if (!Object.prototype.hasOwnProperty.call(currentPermission, "es_move_drawers")) {
+          currentPermission.es_move_drawers = "ask"
         }
         config.permission = currentPermission
       }

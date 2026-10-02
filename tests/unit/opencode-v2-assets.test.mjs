@@ -27,7 +27,7 @@ test("translateAgent maps v1 frontmatter onto v2 agent fields", () => {
     top_p: 0.9,
     steps: 60,
     permission: { read: "allow", bash: "deny", task: "allow", write: { "*": "deny" } },
-    tools: { "palace_report": true, delete_drawers: false },
+    tools: { "palace_report": true, es_delete_drawers: false },
   });
 
   assert.equal(out.system, "You are a guide.");
@@ -40,7 +40,7 @@ test("translateAgent maps v1 frontmatter onto v2 agent fields", () => {
     { action: "subagent", resource: "*", effect: "allow" },
     { action: "edit", resource: "*", effect: "deny" },
     { action: "palace_report", resource: "*", effect: "allow" },
-    { action: "delete_drawers", resource: "*", effect: "deny" },
+    { action: "es_delete_drawers", resource: "*", effect: "deny" },
   ]);
 });
 
@@ -138,7 +138,7 @@ test("registerInstructions registers nothing when no instruction text exists", a
 test("registerPermissionDefaults tightens unruled allows and never overrides explicit rules", async () => {
   const agents = {
     build: { permissions: [{ action: "*", resource: "*", effect: "allow" }] },
-    trusted: { data: { permissions: [{ action: "delete_drawers", resource: "*", effect: "allow" }] } },
+    trusted: { data: { permissions: [{ action: "es_delete_drawers", resource: "*", effect: "allow" }] } },
   };
   let hook;
   await registerPermissionDefaults(
@@ -146,15 +146,15 @@ test("registerPermissionDefaults tightens unruled allows and never overrides exp
       agent: { get: async ({ agentID }) => agents[agentID] },
       permission: { hook: async (name, cb) => { assert.equal(name, "evaluate"); hook = cb; } },
     },
-    { delete_drawers: "ask", bogus: "maybe" },
+    { es_delete_drawers: "ask", bogus: "maybe" },
   );
 
   const evaluate = async (event) => { await hook(event); return event.effect; };
-  assert.equal(await evaluate({ agent: "build", action: "delete_drawers", effect: "allow" }), "ask");
-  assert.equal(await evaluate({ agent: "trusted", action: "delete_drawers", effect: "allow" }), "allow");
-  assert.equal(await evaluate({ agent: "build", action: "delete_drawers", effect: "deny" }), "deny");
+  assert.equal(await evaluate({ agent: "build", action: "es_delete_drawers", effect: "allow" }), "ask");
+  assert.equal(await evaluate({ agent: "trusted", action: "es_delete_drawers", effect: "allow" }), "allow");
+  assert.equal(await evaluate({ agent: "build", action: "es_delete_drawers", effect: "deny" }), "deny");
   assert.equal(await evaluate({ agent: "build", action: "read", effect: "allow" }), "allow");
-  assert.equal(await evaluate({ action: "delete_drawers", effect: "allow" }), "ask");
+  assert.equal(await evaluate({ action: "es_delete_drawers", effect: "allow" }), "ask");
 });
 
 test("loadPackagedSkills reads each skills/<id>/SKILL.md with its frontmatter", () => {

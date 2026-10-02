@@ -78,7 +78,7 @@ function sameIgnoreCase(a: string, b: string): boolean {
 }
 
 export default defineTool({
-  name: "move_drawers",
+  name: "es_move_drawers",
   description:
     "Move MemPalace drawers in bulk via update_drawer. Supports explicit IDs, source wing scopes (single or list), or a list of source→target mappings, with optional dry-run and case-only bridge moves.",
   args: (s) => ({
@@ -184,16 +184,16 @@ export default defineTool({
     if (hasMappings) {
       if (ids.size > 0 || useScope || sourceRoom || targetWing || targetRoomOverride) {
         throw new Error(
-          "move_drawers: moves[] cannot be combined with drawer_ids/ids_file/source_wing/source_wings/source_room/target_wing/target_room.",
+          "es_move_drawers: moves[] cannot be combined with drawer_ids/ids_file/source_wing/source_wings/source_room/target_wing/target_room.",
         );
       }
     } else {
-      if (!targetWing) throw new Error("move_drawers: target_wing is required unless using moves[].");
+      if (!targetWing) throw new Error("es_move_drawers: target_wing is required unless using moves[].");
       if (!useScope && ids.size === 0) {
-        throw new Error("move_drawers: provide drawer_ids/ids_file or source_wing/source_wings.");
+        throw new Error("es_move_drawers: provide drawer_ids/ids_file or source_wing/source_wings.");
       }
       if (useScope && ids.size > 0) {
-        throw new Error("move_drawers: use either explicit IDs OR source_wing/source_wings/source_room, not both.");
+        throw new Error("es_move_drawers: use either explicit IDs OR source_wing/source_wings/source_room, not both.");
       }
     }
 
@@ -498,7 +498,7 @@ export default defineTool({
       };
 
       if (failed > 0) {
-        const summary = summarizeFailures(allResults, payload.error || "", "move_drawers failed");
+        const summary = summarizeFailures(allResults, payload.error || "", "es_move_drawers failed");
         return JSON.stringify({ ...payload, ...summary }, null, 2);
       }
 
@@ -520,7 +520,7 @@ export default defineTool({
         error_kind: kind,
         failure_kinds: { [kind]: 1 },
       };
-      const summary = summarizeFailures(payload.results || [], payload.error || "", "move_drawers failed");
+      const summary = summarizeFailures(payload.results || [], payload.error || "", "es_move_drawers failed");
       return JSON.stringify({ ...payload, ...summary }, null, 2);
     }
   },

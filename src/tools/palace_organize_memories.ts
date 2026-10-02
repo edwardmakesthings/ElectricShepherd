@@ -145,7 +145,7 @@ export default defineTool({
       recommendations,
       samples_by_room: includeSamples ? samplesByRoom : undefined,
       next_step:
-        "Apply approved moves with move_drawers/relocate_memory using dry_run first; keep naming conventions in dreamer room-selection contract.",
+        "Apply approved moves with es_move_drawers/relocate_memory using dry_run first; keep naming conventions in dreamer room-selection contract.",
     });
   },
 });
