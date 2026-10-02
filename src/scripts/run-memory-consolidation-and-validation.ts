@@ -416,7 +416,7 @@ async function main(): Promise<void> {
   const hasReconsolidateMode = reconsolidateClosetIds.length > 0;
   const hasExplicitBatchSize = hasFlag(argv, "--batch-size");
   const effectiveBatchSize = hasReconsolidateMode && !hasExplicitBatchSize
-    ? Math.max(10, worklistOptions.batchSize)
+    ? Math.max(1, worklistOptions.batchSize)
     : worklistOptions.batchSize;
   const worklistMode = hasReconsolidateMode ? "reconsolidate" : worklistOptions.mode;
   let worklist: SourceDrawerWorkItem[] = [];
