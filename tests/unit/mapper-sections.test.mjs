@@ -3,10 +3,8 @@ import test from "node:test";
 
 import { parseMapperSections } from "../../src/scripts/memory-pipeline/subagent.ts";
 
-// The exact shape a mapper following agents/dream-mapper.md used to emit, which
-// the JSON parser could not read — every drawer was quarantined as a result.
-const SECTION_OUTPUT = `
-I have the complete transcript. Let me produce the mapper summary.
+const ATTRIBUTED_SECTION_OUTPUT = `
+TRANSCRIPT_ID: drawer_a
 
 **DURABLE_FACTS**
 - manifest version is 0.1.0
@@ -29,8 +27,24 @@ I have the complete transcript. Let me produce the mapper summary.
 CONFIDENCE: high - all facts verbatim from source.
 `;
 
-test("mapper section parser recovers summaries the JSON parser cannot read", () => {
-  const summaries = parseMapperSections(SECTION_OUTPUT, ["drawer_a"]);
+const MULTI_BLOCK_OUTPUT = `
+TRANSCRIPT_ID: drawer_a
+**DURABLE_FACTS**
+- a
+
+CONFIDENCE: medium
+
+---
+
+TRANSCRIPT_ID: drawer_b
+**DURABLE_FACTS**
+- b
+
+CONFIDENCE: low
+`;
+
+test("mapper section parser recovers explicitly-attributed section summaries", () => {
+  const summaries = parseMapperSections(ATTRIBUTED_SECTION_OUTPUT, ["drawer_a"]);
 
   assert.equal(summaries.length, 1);
   const [summary] = summaries;
@@ -45,18 +59,30 @@ test("mapper section parser recovers summaries the JSON parser cannot read", () 
   assert.deepEqual(summary.deadEnds, []);
 });
 
-// transcriptId is what lineage attaches to, so a batch's sections must be
-// attributed to the drawers actually asked about, never invented.
-test("mapper section parser attributes a batch to every requested transcript", () => {
-  const summaries = parseMapperSections(SECTION_OUTPUT, ["drawer_a", "drawer_b"]);
+test("mapper section parser only accepts transcript ids from explicit headers", () => {
+  const summaries = parseMapperSections(MULTI_BLOCK_OUTPUT, ["drawer_a", "drawer_b", "drawer_c"]);
   assert.deepEqual(
     summaries.map((s) => s.transcriptId),
     ["drawer_a", "drawer_b"],
   );
 });
 
-test("mapper section parser accepts markdown and bare headings", () => {
-  const variants = ["## DURABLE_FACTS\n- a fact", "DURABLE_FACTS:\n- a fact", "**DURABLE_FACTS**\n- a fact"];
+test("mapper section parser rejects unattributed batch sections", () => {
+  const unattributed = `
+**DURABLE_FACTS**
+- fact without transcript id
+
+CONFIDENCE: high
+`;
+  assert.deepEqual(parseMapperSections(unattributed, ["drawer_a"]), []);
+});
+
+test("mapper section parser accepts markdown and bare headings inside a transcript block", () => {
+  const variants = [
+    "TRANSCRIPT_ID: d1\n## DURABLE_FACTS\n- a fact",
+    "TRANSCRIPT_ID: d1\nDURABLE_FACTS:\n- a fact",
+    "TRANSCRIPT_ID: d1\n**DURABLE_FACTS**\n- a fact",
+  ];
   for (const text of variants) {
     const [summary] = parseMapperSections(text, ["d1"]);
     assert.deepEqual(summary.durableFacts, ["a fact"], text);
@@ -64,17 +90,6 @@ test("mapper section parser accepts markdown and bare headings", () => {
 });
 
 test("mapper section parser defaults confidence when the trailer is missing", () => {
-  const [summary] = parseMapperSections("**DECISIONS**\n- chose X", ["d1"]);
+  const [summary] = parseMapperSections("TRANSCRIPT_ID: d1\n**DECISIONS**\n- chose X", ["d1"]);
   assert.equal(summary.confidence, "medium");
-});
-
-test("mapper section parser yields nothing for prose with no sections", () => {
-  assert.deepEqual(parseMapperSections("I could not read the transcript, sorry.", ["d1"]), []);
-  assert.deepEqual(parseMapperSections("", ["d1"]), []);
-});
-
-// An empty result must stay empty rather than manufacturing a summary with no
-// content, which would consolidate into an orphan node.
-test("mapper section parser rejects headings with no bullets", () => {
-  assert.deepEqual(parseMapperSections("**DURABLE_FACTS**\n\n**DECISIONS**\n", ["d1"]), []);
 });

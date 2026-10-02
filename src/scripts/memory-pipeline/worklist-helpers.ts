@@ -2,7 +2,7 @@
  * Worklist drawer helpers for the consolidation pipeline.
  * Extracted from run-memory-consolidation-and-validation.ts (criterion 2).
  */
-import type { SourceDrawerWorkItem } from "../../core/memgraph.ts";
+import type { SourceDrawerClass, SourceDrawerWorkItem } from "../../core/memgraph.ts";
 import { asObject, asArray, asString } from "./cli-options.ts";
 
 export function chunkItems<T>(items: T[], size: number): T[][] {
@@ -13,6 +13,65 @@ export function chunkItems<T>(items: T[], size: number): T[][] {
   }
   return out;
 }
+
+function normalizeSourceClass(sourceClass: SourceDrawerClass | undefined): SourceDrawerClass {
+  return sourceClass === "layered" ? "layered" : "raw";
+}
+
+export function partitionWorklistBySourceClass(items: SourceDrawerWorkItem[]): {
+  raw: SourceDrawerWorkItem[];
+  layered: SourceDrawerWorkItem[];
+} {
+  const raw: SourceDrawerWorkItem[] = [];
+  const layered: SourceDrawerWorkItem[] = [];
+  for (const item of items) {
+    if (normalizeSourceClass(item.source_class) === "layered") layered.push(item);
+    else raw.push(item);
+  }
+  return { raw, layered };
+}
+
+export function chunkHomogeneousWorklist(items: SourceDrawerWorkItem[], size: number): SourceDrawerWorkItem[][] {
+  const groups = partitionWorklistBySourceClass(items);
+  return [
+    ...chunkItems(groups.raw, size),
+    ...chunkItems(groups.layered, size),
+  ];
+}
+
+export async function splitChunkByLineageConflicts(
+  chunk: SourceDrawerWorkItem[],
+  hasLineagePath: (sourceId: string, targetId: string) => Promise<boolean>,
+): Promise<SourceDrawerWorkItem[][]> {
+  if (chunk.length <= 1) return chunk.length === 0 ? [] : [chunk];
+
+  const buckets: SourceDrawerWorkItem[][] = [];
+  for (const item of chunk) {
+    let placed = false;
+    for (const bucket of buckets) {
+      let conflicts = false;
+      for (const existing of bucket) {
+        if (
+          await hasLineagePath(item.drawer_id, existing.drawer_id)
+          || await hasLineagePath(existing.drawer_id, item.drawer_id)
+        ) {
+          conflicts = true;
+          break;
+        }
+      }
+      if (!conflicts) {
+        bucket.push(item);
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) buckets.push([item]);
+  }
+
+  return buckets;
+}
+
+
 
 export function parseDrawerPayload(raw: unknown): SourceDrawerWorkItem | null {
   const root = asObject(raw);
@@ -43,6 +102,53 @@ export function getFamilyDrawerIds(item: SourceDrawerWorkItem): string[] {
     .filter(Boolean);
   if (family.length > 0) return [...new Set(family)];
   return [item.drawer_id];
+}
+
+
+export type ReconsolidationRetireEdge = {
+  subject: string;
+  predicate: "synthesized-from" | "consolidated-into";
+  object: string;
+};
+
+export type ReconsolidationRetirementPlan = {
+  closetId: string;
+  parentIds: string[];
+  retireEdges: ReconsolidationRetireEdge[];
+};
+
+export function buildReconsolidationRetirementPlan(closetId: string, parentIds: readonly string[]): ReconsolidationRetirementPlan | null {
+  const normalizedClosetId = asString(closetId).trim();
+  if (!normalizedClosetId) return null;
+  const normalizedParents = [...new Set(parentIds.map((id) => asString(id).trim()).filter(Boolean))];
+  if (normalizedParents.length === 0) return null;
+  const retireEdges: ReconsolidationRetireEdge[] = [];
+  for (const parentId of normalizedParents) {
+    retireEdges.push({ subject: normalizedClosetId, predicate: "synthesized-from", object: parentId });
+    retireEdges.push({ subject: parentId, predicate: "consolidated-into", object: normalizedClosetId });
+  }
+  return {
+    closetId: normalizedClosetId,
+    parentIds: normalizedParents,
+    retireEdges,
+  };
+}
+
+export function evaluateReconsolidationRetirement(plan: ReconsolidationRetirementPlan, args: {
+  coveredParentIds: ReadonlySet<string>;
+  failedParentIds: ReadonlySet<string>;
+}): {
+  canRetire: boolean;
+  missingParentIds: string[];
+  failedParentIds: string[];
+} {
+  const failedParentIds = plan.parentIds.filter((parentId) => args.failedParentIds.has(parentId));
+  const missingParentIds = plan.parentIds.filter((parentId) => !args.coveredParentIds.has(parentId));
+  return {
+    canRetire: failedParentIds.length === 0 && missingParentIds.length === 0,
+    missingParentIds,
+    failedParentIds,
+  };
 }
 
 type MemgraphClientLike = {
@@ -229,12 +335,22 @@ export async function partitionChunk(args: {
   targetWing: string;
   applyWrites: boolean;
   moveAlreadyConsolidated: boolean;
+  forceActionableIds?: Set<string>;
 }): Promise<{ actionable: SourceDrawerWorkItem[]; movedToProcessed: Array<{ drawer_id: string; family_drawer_ids: string[]; reason: string }>; moveErrors: Array<{ drawer_id: string; phase: "processed" | "failed"; error: string }> }> {
   const actionable: SourceDrawerWorkItem[] = [];
   const movedToProcessed: Array<{ drawer_id: string; family_drawer_ids: string[]; reason: string }> = [];
   const moveErrors: Array<{ drawer_id: string; phase: "processed" | "failed"; error: string }> = [];
 
   for (const item of args.chunk) {
+    const familyIds = getFamilyDrawerIds(item);
+    const forced = familyIds.some((drawerId) => args.forceActionableIds?.has(drawerId));
+    if (forced) {
+      actionable.push({
+        ...item,
+        family_drawer_ids: familyIds,
+      });
+      continue;
+    }
     const consolidated = await getConsolidatedIdsForFamily(args.client, item);
     if (consolidated.unconsolidated.length === 0) {
       if (args.moveAlreadyConsolidated) {

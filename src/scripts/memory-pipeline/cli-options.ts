@@ -9,7 +9,7 @@ import type { ValidationMergeReviewOptions } from "../../policy/validation-merge
 import type { CadenceArea, CadenceOrchestratorOptions } from "../../policy/cadence-orchestrator.ts";
 import { loadRuntimeConfig } from "../../core/runtime-config.ts";
 
-export type WorklistMode = "unconsolidated" | "all";
+export type WorklistMode = "unconsolidated" | "all" | "all-raw";
 
 export type WorklistOptions = {
   mode: WorklistMode;
@@ -20,6 +20,7 @@ export type WorklistOptions = {
   failedRoom: string;
   retryFailedOnly: boolean;
   moveAlreadyConsolidated: boolean;
+  reconsolidateClosetIds: string[];
 };
 
 export type MemcoreApplyOptions = {
@@ -144,6 +145,14 @@ export function parseConsolidationOptions(argv: string[], runtimeConfig: ReturnT
 
 export function parseWorklistOptions(argv: string[], runtimeConfig: ReturnType<typeof loadRuntimeConfig>): WorklistOptions {
   const allMode = hasFlag(argv, "--all") || hasFlag(argv, "--full-scope") || hasFlag(argv, "--reprocess-all");
+  const allRawMode = hasFlag(argv, "--all-raw");
+  const reconsolidateClosetIds = parseCSV(getArg(argv, "--reconsolidate"));
+  if (allRawMode && allMode) {
+    throw new Error("--all-raw cannot be combined with --all/--full-scope/--reprocess-all");
+  }
+  if (allRawMode && reconsolidateClosetIds.length > 0) {
+    throw new Error("--all-raw cannot be combined with --reconsolidate");
+  }
   const limit = Number(getArg(argv, "--worklist-limit") || getArg(argv, "--search-limit") || "200");
   const batchSize = Math.max(1, Number(getArg(argv, "--batch-size") || "1"));
   const defaultSourceRoom =
@@ -155,7 +164,7 @@ export function parseWorklistOptions(argv: string[], runtimeConfig: ReturnType<t
   const retryFailedOnly = hasFlag(argv, "--retry-failed-only");
   const moveAlreadyConsolidated = !hasFlag(argv, "--no-move-already-consolidated");
   return {
-    mode: allMode ? "all" : "unconsolidated",
+    mode: allRawMode ? "all-raw" : allMode ? "all" : "unconsolidated",
     limit: Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 200,
     batchSize,
     sourceRoom: scopeRoom,
@@ -163,6 +172,7 @@ export function parseWorklistOptions(argv: string[], runtimeConfig: ReturnType<t
     failedRoom,
     retryFailedOnly,
     moveAlreadyConsolidated,
+    reconsolidateClosetIds,
   };
 }
 
@@ -255,8 +265,10 @@ export function usage(): string {
     "  --use-live-mapper                (invoke dream-mapper via opencode run)",
     "  --mapper-agent <name>            (default: dream-mapper)",
     "  --all | --full-scope             (worklist mode: reprocess all source drawers in scope)",
+    "  --all-raw                        (worklist mode: reprocess only raw/transcript-class source drawers in scope)",
     "  --room <room>                    (source room; default: ESHEPHERD_SOURCE_CAPTURE_ROOM or source-transcripts)",
     "  --retry-failed-only              (source room becomes <room>-failed or --failed-room)",
+    "  --reconsolidate <closetId[,closetId...]> (rebuild from specific synthesized closets' parents)",
     "  --batch-size <n>                 (transcript families per subagent run; default: 1)",
     "  --worklist-limit <n>             (max source drawers enumerated; default: 200)",
     "  --processed-room <room>          (default: <room>-processed)",

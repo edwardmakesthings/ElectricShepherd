@@ -12,7 +12,7 @@
  */
 
 import type { JsonMap } from "../../core/memgraph-structure.ts";
-import { asArray, asBoolean, asNumber, asObject, asString, parseDrawerRows, parseKgFacts, uniq, uniqueFromFactsByDirection, vocabValuesFromFacts } from "../../core/memgraph-transport.ts";
+import { asArray, asBoolean, asNumber, asObject, asString, classifySourceDrawer, parseDrawerRows, parseKgFacts, sourceTypeFromFacts, uniq, uniqueFromFactsByDirection, vocabValuesFromFacts } from "../../core/memgraph-transport.ts";
 import type { MemgraphInternals } from "../../core/memgraph-internals.ts";
 
 export async function getOutgoingObjects(core: MemgraphInternals, entity: string, predicate: string): Promise<string[]> {
@@ -46,6 +46,89 @@ export async function isSourceDrawerConsolidated(core: MemgraphInternals, drawer
   const incomingSynth = uniqueFromFactsByDirection(parseKgFacts(incoming), "incoming");
   return incomingSynth.length > 0;
 }
+
+function chunkIds(ids: string[], size: number): string[][] {
+  if (ids.length === 0) return [];
+  const out: string[][] = [];
+  for (let i = 0; i < ids.length; i += size) out.push(ids.slice(i, i + size));
+  return out;
+}
+
+export async function getConsolidationStateForDrawers(core: MemgraphInternals, drawerIds: string[]): Promise<Map<string, boolean>> {
+  const normalized = [...new Set(drawerIds.map((id) => asString(id).trim()).filter(Boolean))];
+  const consolidated = new Map<string, boolean>();
+  if (normalized.length === 0) return consolidated;
+
+  for (const chunk of chunkIds(normalized, 500)) {
+    const forward = await core.kgQueryMany({
+      entities: chunk,
+      direction: "outgoing",
+      predicate: "consolidated-into",
+      recurse: false,
+      max_depth: 1,
+    });
+    const incoming = await core.kgQueryMany({
+      entities: chunk,
+      direction: "incoming",
+      predicate: "synthesized-from",
+      recurse: false,
+      max_depth: 1,
+    });
+
+    for (const drawerId of chunk) {
+      const hasForward = uniqueFromFactsByDirection(parseKgFacts(forward[drawerId] || {}), "outgoing").length > 0;
+      if (hasForward) {
+        consolidated.set(drawerId, true);
+        continue;
+      }
+      const hasIncomingSynth = uniqueFromFactsByDirection(parseKgFacts(incoming[drawerId] || {}), "incoming").length > 0;
+      consolidated.set(drawerId, hasIncomingSynth);
+    }
+  }
+
+  return consolidated;
+}
+
+
+export async function getSourceDrawerClass(core: MemgraphInternals, drawerId: string): Promise<"raw" | "layered"> {
+  const sourceTypePayload = await core.kgQueryIgnoringFailure({
+    entity: drawerId,
+    direction: "outgoing",
+    predicate: "es-source-type",
+    recurse: false,
+    max_depth: 1,
+  }, `getSourceDrawerClass(${drawerId}) source-type read failure degrades to raw`);
+  const sourceType = sourceTypeFromFacts(sourceTypePayload);
+
+  const lineagePayload = await core.kgQueryIgnoringFailure({
+    entity: drawerId,
+    direction: "outgoing",
+    predicate: "synthesized-from",
+    recurse: false,
+    max_depth: 1,
+  }, `getSourceDrawerClass(${drawerId}) lineage read failure degrades to raw`);
+  const outgoing = uniqueFromFactsByDirection(parseKgFacts(lineagePayload), "outgoing");
+
+  const classification = classifySourceDrawer({
+    sourceType,
+    hasOutgoingSynthesizedFrom: outgoing.length > 0,
+  });
+
+  if (classification.invariantViolation) {
+    console.warn(`[memory-consolidation-validation] source-class invariant violation drawer=${drawerId} sourceType=${classification.sourceType || "unknown"} outgoingSynthesizedFrom=true`);
+    return "raw";
+  }
+
+  return classification.sourceClass;
+}
+
+export async function hasLineagePath(core: MemgraphInternals, sourceId: string, targetId: string, maxDepth = 20): Promise<boolean> {
+  if (!sourceId || !targetId) return false;
+  if (sourceId === targetId) return true;
+  const lineage = await getLineageSources(core, targetId, maxDepth);
+  return asArray((lineage as JsonMap).ancestors).some((entry) => asString(asObject(entry).node_id).trim() === sourceId);
+}
+
 
 export async function getLineageSources(core: MemgraphInternals, nodeId: string, maxDepth = 20) {
   const result = await core.kgQuery({

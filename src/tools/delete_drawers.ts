@@ -230,8 +230,13 @@ export default defineTool({
       const isUnknownToolError = (errorText: string, toolName: string): boolean => {
         const lower = errorText.toLowerCase();
         return (
-          (lower.includes("unknown tool") || lower.includes("tool not found") || lower.includes("unrecognized tool")) &&
-          lower.includes(toolName.toLowerCase())
+          (lower.includes("unknown tool")
+            || lower.includes("tool not found")
+            || lower.includes("unrecognized tool")
+            || lower.includes("no such tool")
+            || lower.includes("method not found")
+            || lower.includes("not allowed"))
+          && lower.includes(toolName.toLowerCase())
         );
       };
 

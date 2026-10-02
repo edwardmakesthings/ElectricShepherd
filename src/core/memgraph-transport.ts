@@ -12,7 +12,8 @@
  */
 
 import type { SubstrateResult } from "./mcp-http-client.ts";
-import type { JsonMap, MemgraphToolMap, SourceDrawerWorkItem, ToolCaller } from "./memgraph-structure.ts";
+import { parseClosetSourceType, type ClosetSourceType } from "./memgraph-structure.ts";
+import type { JsonMap, MemgraphToolMap, SourceDrawerClass, SourceDrawerWorkItem, ToolCaller } from "./memgraph-structure.ts";
 
 /**
  * Normalize a ToolCaller result to a `SubstrateResult`. Real callers (turn-guard,
@@ -168,6 +169,41 @@ export function uniqueFromFactsByDirection(facts: JsonMap[], direction: "incomin
  */
 export function vocabValuesFromFacts(payload: unknown, direction: "incoming" | "outgoing"): string[] {
   return uniqueFromFactsByDirection(parseKgFacts(payload), direction).map((value) => value.toLowerCase());
+}
+
+export type SourceDrawerClassification = {
+  sourceClass: SourceDrawerClass;
+  sourceType: ClosetSourceType | null;
+  hasOutgoingSynthesizedFrom: boolean;
+  invariantViolation: boolean;
+};
+
+const RAW_SOURCE_TYPES = new Set<ClosetSourceType>(["transcript"]);
+const LAYERED_SOURCE_TYPES = new Set<ClosetSourceType>(["note", "doc", "synthesis"]);
+
+export function classifySourceDrawer(args: {
+  sourceType: ClosetSourceType | null;
+  hasOutgoingSynthesizedFrom: boolean;
+}): SourceDrawerClassification {
+  const categoryRaw = args.sourceType ? RAW_SOURCE_TYPES.has(args.sourceType) : false;
+  const categoryLayered = args.sourceType ? LAYERED_SOURCE_TYPES.has(args.sourceType) : false;
+  const invariantViolation = categoryRaw && args.hasOutgoingSynthesizedFrom;
+  const sourceClass: SourceDrawerClass = args.hasOutgoingSynthesizedFrom || categoryLayered ? "layered" : "raw";
+  return {
+    sourceClass,
+    sourceType: args.sourceType,
+    hasOutgoingSynthesizedFrom: args.hasOutgoingSynthesizedFrom,
+    invariantViolation,
+  };
+}
+
+export function sourceTypeFromFacts(payload: unknown): ClosetSourceType | null {
+  const values = vocabValuesFromFacts(payload, "outgoing");
+  for (const value of values) {
+    const parsed = parseClosetSourceType(value);
+    if (parsed) return parsed;
+  }
+  return null;
 }
 
 

@@ -16,10 +16,12 @@ export type MemgraphToolMap = {
   applyMerge: string;
   resolveCanonical: string;
   kgQuery: string;
+  kgQueryMany: string;
   getHeight: string;
   findMergeCandidates: string;
   findClosetLineageIssues: string;
   addDrawer: string;
+  addDrawers: string;
   checkpoint: string;
   updateDrawer: string;
   kgAdd: string;
@@ -28,6 +30,10 @@ export type MemgraphToolMap = {
   search: string;
   listDrawers: string;
   getDrawer: string;
+  getDrawers: string;
+  moveDrawers: string;
+  deleteDrawer: string;
+  deleteDrawers: string;
 };
 
 // The `es-source-type` axis — orthogonal to `es-status`.
@@ -54,9 +60,12 @@ export type SkillDomain = "code" | "writing" | "infra" | "research" | "general";
 
 export const SKILL_DOMAINS: readonly string[] = ["code", "writing", "infra", "research", "general"];
 
+export type SourceDrawerClass = "raw" | "layered";
+
 export type SourceDrawerWorkItem = {
   drawer_id: string;
   family_drawer_ids?: string[];
+  source_class?: SourceDrawerClass;
   wing?: string;
   room?: string;
   desc?: string;
@@ -75,10 +84,12 @@ const TOOL_BASE_NAMES: MemgraphToolMap = {
   applyMerge: "apply_merge",
   resolveCanonical: "resolve_canonical",
   kgQuery: "kg_query",
+  kgQueryMany: "kg_query_many",
   getHeight: "get_height",
   findMergeCandidates: "find_merge_candidates",
   findClosetLineageIssues: "find_closet_lineage_issues",
   addDrawer: "add_drawer",
+  addDrawers: "add_drawers",
   checkpoint: "checkpoint",
   updateDrawer: "update_drawer",
   kgAdd: "kg_add",
@@ -87,6 +98,10 @@ const TOOL_BASE_NAMES: MemgraphToolMap = {
   search: "search",
   listDrawers: "list_drawers",
   getDrawer: "get_drawer",
+  getDrawers: "get_drawers",
+  deleteDrawer: "delete_drawer",
+  moveDrawers: "move_drawers",
+  deleteDrawers: "delete_drawers",
 };
 
 export function resolveToolPrefix(explicit?: string): string {

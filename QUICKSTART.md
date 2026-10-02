@@ -185,7 +185,7 @@ to watch). `subtask: false` runs in-session.
 
 | Command | Does | Isolation | Scheduler equivalent |
 |---|---|---|---|
-| `/consolidate` | Promote unconsolidated source drawers into closets + KG facts. Additive only. Args: `apply`, `all`, `retry-failed`, `live`, `room=…` | subagent | `npm run sheep:count` |
+| `/consolidate` | Promote unconsolidated source drawers into closets + KG facts. Additive by default; can reconsolidate from specific closets. Args: `apply`, `all`, `all-raw`, `retry-failed`, `reconsolidate=<ids>`, `live`, `room=…` | subagent | `npm run sheep:count` |
 | `/consolidate-deep` | Consolidate **plus** merge/dedupe existing closets and run a drift audit | subagent | `npm run sheep:consolidate-deep` |
 | `/memory-status` | Read-only: pending vs derived counts, provisional backlog, re-synthesis and promotion candidates | subagent | `npm run sheep:memory-status` |
 | `/memory-refresh` | Report the mem-core scope ladder and staleness for the current directory | in-session | `npm run sheep:memory-refresh` |
@@ -256,6 +256,17 @@ merge review, with optional escalation notification.
 | `--use-live-auditor` / `--auditor-agent <n>` | request an auditor verdict over the output |
 | `--mem-core-dir` / `--mem-core-scope-dir` / `--mem-core-file` | control the render target |
 | `--no-mem-core-auto` | skip the mem-core render (on by default, to `./.electric-shepherd/memory`) |
+| `--retry-failed-only` | build worklist from `<room>-failed` (or `--failed-room`) instead of source room |
+| `--reconsolidate <closetId[,closetId...]>` | re-queue each listed closet's `synthesized-from` parents; on apply, invalidate old lineage and retire old closet |
+| `--all-raw` | full-scope intake like `--all`, but process only raw/transcript-class sources (skips layered) |
+| `--no-move-already-consolidated` | keep already-consolidated items in place instead of auto-moving to processed |
+
+Mapper contract notes:
+- Live mapper output must be explicitly attributed per drawer (`transcriptId` per object).
+- Unmapped drawer IDs are excluded from synthesis input for that chunk and reported as `mapper-unmapped` (dry-run: skipped; apply: moved to failed for retry).
+- Empty worklists do not run an empty consolidation write pass; mem-core render still runs.
+
+Source-class intake rule: the pipeline classifies each source from `es-source-type` + outgoing `synthesized-from`: only `transcript` is raw; `note|doc|synthesis` are layered; any outgoing `synthesized-from` classifies as layered. `skill` and unknown types are excluded. Transcript drawers must never have outgoing `synthesized-from` (if found, they are excluded as invariant violations), raw drawers terminate via `consolidated-into`, and worklist chunks are homogeneous (raw-only or layered-only).
 
 ### 6.3 Cadence
 

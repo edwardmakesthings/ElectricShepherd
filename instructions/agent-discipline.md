@@ -205,12 +205,17 @@ Containerized MemPalace caveat: if the MCP server runs in Docker, host-local sql
 
 Deep-consolidation sequence (must follow in order):
 
-1. Discover/search: `search`, `list_drawers`, `get_drawer` as needed.
+1. Discover/search: `search`, `list_drawers`, and `get_drawers` for >1 ID (use `get_drawer` only for one ID).
   Discovery guardrails: keep `list_drawers` room-scoped and paginated (`limit` + `offset`), avoid broad wing-only scans on high-cardinality wings, and on repeated timeout move to a narrower room or deterministic script fallback instead of retry loops.
-2. Synthesize: `add_drawer` + `kg_add` (`synthesized-from`) for each accepted synthesis.
+2. Synthesize: `add_drawer`/`add_drawers` + `kg_add` (`synthesized-from`) for each accepted synthesis.
 3. Merge review: `find_merge_candidates` then `apply_merge` for high-confidence merges.
-4. Drift evidence: lineage queries (`kg_query` recurse) + `find_closet_lineage_issues`.
-5. Diary: `diary_write` final consolidation log.
+4. Drift evidence + repair plan: `kg_query_many` for batch edge checks, recursive `kg_query` for lineage walks, then `find_closet_lineage_issues` (read-only).
+5. Repair execution (after review): run `/consolidate --reconsolidate <closetIds>` dry-run first, then apply; use `kg_invalidate`/`kg_supersede` for edge/fact retirement as needed.
+6. Diary: `diary_write` final consolidation log.
+
+Raw-vs-layered intake rule for consolidation:
+- `--all-raw` = full-scope intake like `--all`, but process only raw/transcript-class sources.
+- `--reconsolidate <ids>` = rebuild from listed closets' `synthesized-from` parents; not a full-scope intake mode.
 
 ## Matching/replace escalation (non-code files) — no blind retries
 

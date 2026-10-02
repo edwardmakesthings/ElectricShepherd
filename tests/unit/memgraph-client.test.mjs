@@ -97,8 +97,20 @@ test("listSourceDrawersByScope collapses chunk families and preserves family ids
           ],
         };
       }
-      if (name.endsWith("kg_query")) {
-        return { facts: [] };
+      if (name.endsWith("kg_query_many")) {
+        const entities = Array.isArray(args?.entities) ? args.entities : [];
+        if (args?.predicate === "es-source-type") {
+          return {
+            results: Object.fromEntries(entities.map((id) => [String(id), {
+              facts: [{ current: true, subject: String(id), predicate: "es-source-type", object: "transcript" }],
+            }])),
+          };
+        }
+        if (args?.predicate === "synthesized-from") {
+          return {
+            results: Object.fromEntries(entities.map((id) => [String(id), { facts: [] }])),
+          };
+        }
       }
       return {};
     },
@@ -236,8 +248,20 @@ test("listSourceDrawersByScope paginates list_drawers calls", async () => {
         }
         return { drawers: [] };
       }
-      if (name.endsWith("kg_query")) {
-        return { facts: [] };
+      if (name.endsWith("kg_query_many")) {
+        const entities = Array.isArray(args?.entities) ? args.entities : [];
+        if (args?.predicate === "es-source-type") {
+          return {
+            results: Object.fromEntries(entities.map((id) => [String(id), {
+              facts: [{ current: true, subject: String(id), predicate: "es-source-type", object: "transcript" }],
+            }])),
+          };
+        }
+        if (args?.predicate === "synthesized-from") {
+          return {
+            results: Object.fromEntries(entities.map((id) => [String(id), { facts: [] }])),
+          };
+        }
       }
       return {};
     },
@@ -257,6 +281,162 @@ test("listSourceDrawersByScope paginates list_drawers calls", async () => {
   assert.deepEqual(listCalls.map((call) => call.args.offset), [0, 2]);
   assert.deepEqual(listCalls.map((call) => call.args.limit), [2, 1]);
 });
+
+test("listSourceDrawersByScope classifies transcript as raw and synthesis as layered", async () => {
+  const client = createMemgraphClient({
+    callTool: async (name, args) => {
+      if (name.endsWith("list_drawers")) {
+        return {
+          drawers: [
+            { drawer_id: "source-1", room: "source-transcripts", source_file: "s1.json" },
+            { drawer_id: "closet-synth", room: "source-transcripts", source_file: "s2.json" },
+          ],
+        };
+      }
+      if (name.endsWith("kg_query_many")) {
+        const entities = Array.isArray(args?.entities) ? args.entities : [];
+        if (args?.predicate === "es-source-type") {
+          return {
+            results: Object.fromEntries(entities.map((id) => {
+              if (id === "closet-synth") {
+                return [String(id), { facts: [{ current: true, subject: "closet-synth", predicate: "es-source-type", object: "synthesis" }] }];
+              }
+              if (id === "source-1") {
+                return [String(id), { facts: [{ current: true, subject: "source-1", predicate: "es-source-type", object: "transcript" }] }];
+              }
+              return [String(id), { facts: [] }];
+            })),
+          };
+        }
+        if (args?.predicate === "synthesized-from") {
+          return {
+            results: Object.fromEntries(entities.map((id) => [String(id), { facts: [] }])),
+          };
+        }
+      }
+      return { facts: [] };
+    },
+  });
+
+  const worklist = await client.listSourceDrawersByScope({
+    wing: "opencode",
+    room: "source-transcripts",
+    limit: 10,
+  });
+
+  assert.deepEqual(worklist.map((item) => ({ id: item.drawer_id, class: item.source_class || "raw" })), [
+    { id: "source-1", class: "raw" },
+    { id: "closet-synth", class: "layered" },
+  ]);
+});
+
+
+test("listSourceDrawersByScope excludes raw-category drawers that incorrectly have outgoing synthesized-from", async () => {
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (msg) => warnings.push(String(msg));
+  try {
+    const client = createMemgraphClient({
+      callTool: async (name, args) => {
+        if (name.endsWith("list_drawers")) {
+          return {
+            drawers: [
+              { drawer_id: "source-1", room: "source-transcripts", source_file: "s1.json" },
+              { drawer_id: "bad-raw", room: "source-transcripts", source_file: "s2.json" },
+            ],
+          };
+        }
+        if (name.endsWith("kg_query_many")) {
+          const entities = Array.isArray(args?.entities) ? args.entities : [];
+          if (args?.predicate === "es-source-type") {
+            return {
+              results: Object.fromEntries(entities.map((id) => {
+                if (id === "bad-raw") {
+                  return [String(id), { facts: [{ current: true, subject: "bad-raw", predicate: "es-source-type", object: "transcript" }] }];
+                }
+                if (id === "source-1") {
+                  return [String(id), { facts: [{ current: true, subject: "source-1", predicate: "es-source-type", object: "transcript" }] }];
+                }
+                return [String(id), { facts: [] }];
+              })),
+            };
+          }
+          if (args?.predicate === "synthesized-from") {
+            return {
+              results: Object.fromEntries(entities.map((id) => {
+                if (id === "bad-raw") {
+                  return [String(id), { facts: [{ current: true, subject: "bad-raw", predicate: "synthesized-from", object: "ancestor-1" }] }];
+                }
+                return [String(id), { facts: [] }];
+              })),
+            };
+          }
+        }
+        return { facts: [] };
+      },
+    });
+
+    const worklist = await client.listSourceDrawersByScope({
+      wing: "opencode",
+      room: "source-transcripts",
+      limit: 10,
+    });
+
+    assert.deepEqual(worklist.map((item) => item.drawer_id), ["source-1"]);
+    assert.ok(warnings.some((msg) => msg.includes("excluding source drawer bad-raw") && msg.includes("transcript category")));
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("listSourceDrawersByScope excludes skill and unknown source types", async () => {
+  const client = createMemgraphClient({
+    callTool: async (name, args) => {
+      if (name.endsWith("list_drawers")) {
+        return {
+          drawers: [
+            { drawer_id: "skill-1", room: "source-transcripts", source_file: "s1.json" },
+            { drawer_id: "unknown-1", room: "source-transcripts", source_file: "s2.json" },
+            { drawer_id: "doc-1", room: "source-transcripts", source_file: "s3.json" },
+          ],
+        };
+      }
+      if (name.endsWith("kg_query_many")) {
+        const entities = Array.isArray(args?.entities) ? args.entities : [];
+        if (args?.predicate === "es-source-type") {
+          return {
+            results: Object.fromEntries(entities.map((id) => {
+              if (id === "skill-1") {
+                return [String(id), { facts: [{ current: true, subject: "skill-1", predicate: "es-source-type", object: "skill" }] }];
+              }
+              if (id === "doc-1") {
+                return [String(id), { facts: [{ current: true, subject: "doc-1", predicate: "es-source-type", object: "doc" }] }];
+              }
+              return [String(id), { facts: [] }];
+            })),
+          };
+        }
+        if (args?.predicate === "synthesized-from") {
+          return {
+            results: Object.fromEntries(entities.map((id) => [String(id), { facts: [] }])),
+          };
+        }
+      }
+      return { facts: [] };
+    },
+  });
+
+  const worklist = await client.listSourceDrawersByScope({
+    wing: "opencode",
+    room: "source-transcripts",
+    limit: 10,
+  });
+
+  assert.deepEqual(worklist.map((item) => ({ id: item.drawer_id, class: item.source_class || "raw" })), [
+    { id: "doc-1", class: "layered" },
+  ]);
+});
+
 
 // ── Phase 1: es-source-type axis (orthogonal to es-status) ───────────────────
 
@@ -414,6 +594,37 @@ test("createDerivedDrawer rejects self source id without calling kg_add", async 
     (call) => call.name.endsWith("kg_add") && (call.args.predicate === "synthesized-from" || call.args.predicate === "consolidated-into"),
   );
   assert.equal(lineageKgAdds.length, 0, "must not attempt lineage writes for self-loop source ids");
+});
+
+
+test("createDerivedDrawer rejects synthesized-from lineage when created drawer is stamped raw", async () => {
+  const { client, calls } = makeRecordingClient({
+    add_drawer: () => ({ drawer_id: "drawer-new" }),
+    kg_query: (args) => {
+      if (args.entity === "drawer-new" && args.predicate === "es-source-type") {
+        return { facts: [{ current: true, subject: "drawer-new", predicate: "es-source-type", object: "transcript" }] };
+      }
+      return { facts: [] };
+    },
+  });
+
+  const result = await client.createDerivedDrawer({
+    wing: "w",
+    room: "synthesis",
+    content: "c",
+    source_drawer_ids: ["drawer-a"],
+    desc: "d",
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.drawer_id, "drawer-new");
+  assert.equal(result.lineage_edges_added, 0);
+  assert.ok(result.lineage_errors.some((msg) => msg.includes("rejected: subject raw/source-type=transcript")));
+
+  const lineageKgAdds = calls.filter(
+    (call) => call.name.endsWith("kg_add") && (call.args.predicate === "synthesized-from" || call.args.predicate === "consolidated-into"),
+  );
+  assert.equal(lineageKgAdds.length, 0, "must not attempt lineage writes when drawer category is raw");
 });
 
 test("getClosetSourceType reads the stamped value and returns null when unstamped", async () => {
@@ -754,4 +965,75 @@ test("setStalenessFlag returns false for an empty node id without any writes", a
 
   assert.equal(await client.setStalenessFlag("   ", "source-changed"), false);
   assert.equal(calls.length, 0);
+});
+
+
+
+test("deleteDrawers falls back to singular delete_drawer when delete_drawers is unavailable", async () => {
+  const calls = [];
+  const client = createMemgraphClient({
+    callTool: async (name, args) => {
+      calls.push({ name, args });
+      if (name.endsWith("delete_drawers")) {
+        throw new Error("unknown tool mempalace_delete_drawers");
+      }
+      if (name.endsWith("delete_drawer")) {
+        return {
+          success: true,
+          deleted_ids: [String(args?.drawer_id || "")],
+          chunks_deleted: 1,
+          closets_deleted: 0,
+        };
+      }
+      return {};
+    },
+  });
+
+  const result = await client.deleteDrawers({ drawer_ids: ["drawer-a", "drawer-b"] });
+  assert.equal(result.deleted, 2);
+  assert.equal(result.errors, 0);
+  assert.equal(Array.isArray(result.results), true);
+  assert.equal(calls.filter((call) => call.name.endsWith("delete_drawers")).length, 1);
+  assert.equal(calls.filter((call) => call.name.endsWith("delete_drawer")).length, 2);
+});
+
+
+test("moveDrawers falls back to singular get/update path when move_drawers is unavailable", async () => {
+  const calls = [];
+  const client = createMemgraphClient({
+    callTool: async (name, args) => {
+      calls.push({ name, args });
+      if (name.endsWith("move_drawers")) {
+        throw new Error("tool not found: mempalace_move_drawers");
+      }
+      if (name.endsWith("get_drawer")) {
+        return {
+          drawer_id: String(args?.drawer_id || ""),
+          wing: "source-wing",
+          room: "source-room",
+        };
+      }
+      if (name.endsWith("update_drawer")) {
+        return {
+          drawer_id: String(args?.drawer_id || ""),
+          wing: String(args?.wing || ""),
+          room: String(args?.room || ""),
+          chunk_ids: [String(args?.drawer_id || "")],
+        };
+      }
+      return {};
+    },
+  });
+
+  const result = await client.moveDrawers({
+    drawer_ids: ["drawer-a"],
+    target_wing: "target-wing",
+    target_room: "target-room",
+  });
+
+  assert.equal(result.moved, 1);
+  assert.equal(result.errors, 0);
+  assert.equal(calls.filter((call) => call.name.endsWith("move_drawers")).length, 1);
+  assert.equal(calls.filter((call) => call.name.endsWith("get_drawer")).length, 1);
+  assert.equal(calls.filter((call) => call.name.endsWith("update_drawer")).length, 1);
 });

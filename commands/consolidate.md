@@ -15,8 +15,12 @@ Argument modes:
 - `/consolidate apply` -> commit unsynthesized worklist (`--apply --apply-merges`).
 - `/consolidate all` -> dry run, full-scope reprocess (`--all`).
 - `/consolidate all apply` -> commit full-scope reprocess (`--all --apply --apply-merges`).
+- `/consolidate all-raw` -> dry run, full-scope raw/transcript-only reprocess (`--all-raw`).
+- `/consolidate all-raw apply` -> commit full-scope raw/transcript-only reprocess (`--all-raw --apply --apply-merges`).
 - `/consolidate retry-failed` -> dry run from failed room only (`--retry-failed-only`).
 - `/consolidate retry-failed apply` -> commit retries from failed room (`--retry-failed-only --apply --apply-merges`).
+- `/consolidate reconsolidate=<closetId[,closetId...]>` -> dry run reconsolidation from those closets' parents (`--reconsolidate <ids>`).
+- `/consolidate reconsolidate=<closetId[,closetId...]> apply` -> retire listed closets + rebuild from their parents (`--reconsolidate <ids> --apply --apply-merges`).
 - `/consolidate fast` -> skip the mapper subagent, use the keyword heuristic (`--no-live-mapper`).
 
 Scope defaults:
@@ -34,6 +38,7 @@ Optional flags you can pass in `$ARGUMENTS`:
 
 - `apply` -> `--apply --apply-merges`
 - `all` -> `--all`
+- `all-raw` -> `--all-raw` (cannot be combined with `all` or `reconsolidate=...`)
 - `retry-failed` -> `--retry-failed-only`
 - `fast` -> `--no-live-mapper` (the mapper subagent runs by DEFAULT; this opts out to the
   keyword heuristic, which only suits plain-text drawers — it cannot read a single-line
@@ -44,6 +49,7 @@ Optional flags you can pass in `$ARGUMENTS`:
 - `wing=<wing>` -> `--wing <wing>`
 - `processed-room=<room>` -> `--processed-room <room>`
 - `failed-room=<room>` -> `--failed-room <room>`
+- `reconsolidate=<closetId[,closetId...]>` -> `--reconsolidate <ids>`
 - `no-move-already-consolidated` -> `--no-move-already-consolidated`
 
 Examples:
@@ -56,8 +62,8 @@ Examples:
 
 Execution steps:
 
-1. Parse `$ARGUMENTS` for mode/flags (`all`, `apply`, `retry-failed`, `fast`, and optional scope/room overrides).
-2. Build this command from repo root: `node --experimental-strip-types src/scripts/run-memory-consolidation-and-validation.ts --query "memory consolidation candidates" --batch-size 1 [--wing "<wing>"] [--room "<room>"] [--processed-room "<room>"] [--failed-room "<room>"] [--all] [--retry-failed-only] [--no-live-mapper] [--no-move-already-consolidated] [--apply --apply-merges]`
+1. Parse `$ARGUMENTS` for mode/flags (`all`, `all-raw`, `apply`, `retry-failed`, `reconsolidate=<ids>`, `fast`, and optional scope/room overrides).
+2. Build this command from repo root: `node --experimental-strip-types src/scripts/run-memory-consolidation-and-validation.ts --query "memory consolidation candidates" --batch-size 1 [--wing "<wing>"] [--room "<room>"] [--processed-room "<room>"] [--failed-room "<room>"] [--all|--all-raw] [--retry-failed-only] [--reconsolidate "<ids>"] [--no-live-mapper] [--no-move-already-consolidated] [--apply --apply-merges]`
 3. Run it via shell and capture stdout JSON.
 4. Summarize result for the user with:
    - `worklistMode`, `worklist.count`

@@ -28,6 +28,9 @@ export type SubagentVia = "opencode-run" | "omp-run" | "none";
 
 export type MapperEnvelope = {
   summaries: TranscriptInsightSummary[];
+  // Requested transcript ids that produced no explicit summary in this mapper pass.
+  // Callers treat these as unmapped (retryable), never as implicitly summarized.
+  unmappedTranscriptIds: string[];
   raw: unknown;
   via: SubagentVia;
 };
@@ -103,6 +106,9 @@ export function parseEmbeddedJSON(text: string, accept: (value: unknown) => bool
  */
 export function parseMapperSections(text: string, transcriptIds: readonly string[]): TranscriptInsightSummary[] {
   const clean = text.replace(ANSI_ESCAPE_PATTERN, "");
+  const idSet = new Set(transcriptIds.map((id) => id.trim()).filter(Boolean));
+  if (idSet.size === 0) return [];
+
   const SECTIONS: Array<[keyof TranscriptInsightSummary, string]> = [
     ["durableFacts", "DURABLE_FACTS"],
     ["decisions", "DECISIONS"],
@@ -112,55 +118,73 @@ export function parseMapperSections(text: string, transcriptIds: readonly string
     ["deadEnds", "DEAD_ENDS"],
   ];
 
-  // Headings appear as `**NAME**`, `## NAME`, or bare `NAME`, optionally colon-terminated.
-  // Both edges are tracked: content starts after a heading, but a section ends at
-  // the START of the next one, or the next heading's own text lands in the bullets.
-  const found = SECTIONS.map(([key, name]) => {
-    const match = new RegExp(`^[\\s>#*]*${name}\\s*:?[\\s*]*$`, "im").exec(clean);
-    return match
-      ? { key, start: match.index, contentStart: match.index + match[0].length }
-      : { key, start: -1, contentStart: -1 };
+  const BLOCK_HEADER = /^(?:[\s>#*]*)(?:TRANSCRIPT|DRAWER|ID|TRANSCRIPT_ID|DRAWER_ID)(?:\s+ID)?\s*[:#-]?\s*([A-Za-z0-9._:-]+)\s*$/im;
+  const quotedHeader = /^(?:[\s>#*]*)['"]([A-Za-z0-9._:-]+)['"]\s*:?\s*[\s*]*$/im;
+
+  const blocks = clean
+    .split(/\n(?=(?:\s*(?:---|___|\*\*\*))+\s*\n?)/g)
+    .map((block) => block.trim())
+    .filter(Boolean);
+  if (blocks.length === 0) blocks.push(clean.trim());
+
+  const summaries: TranscriptInsightSummary[] = [];
+
+  for (const block of blocks) {
+    const headerMatch = BLOCK_HEADER.exec(block) ?? quotedHeader.exec(block);
+    const transcriptId = asString(headerMatch?.[1]).trim();
+    if (!transcriptId || !idSet.has(transcriptId)) continue;
+
+    // Headings appear as bold, markdown h2, or bare heading names, optionally with colons.
+    const found = SECTIONS.map(([key, name]) => {
+      const match = new RegExp(`^[\\s>#*]*${name}\\s*:?[\\s*]*$`, "im").exec(block);
+      return match
+        ? { key, start: match.index, contentStart: match.index + match[0].length }
+        : { key, start: -1, contentStart: -1 };
+    });
+    const headingStarts = found.filter((entry) => entry.start >= 0).map((entry) => entry.start);
+    if (headingStarts.length === 0) continue;
+
+    const confidenceMatch = /^[\s>#*]*CONFIDENCE\s*:?\s*\**\s*(high|medium|low)/im.exec(block);
+    const boundaries = confidenceMatch ? [...headingStarts, confidenceMatch.index] : headingStarts;
+
+    const bulletsFor = (contentStart: number): string[] => {
+      if (contentStart < 0) return [];
+      const laterStarts = boundaries.filter((index) => index >= contentStart);
+      const end = laterStarts.length > 0 ? Math.min(...laterStarts) : block.length;
+      return block
+        .slice(contentStart, end)
+        .split("\n")
+        .map((line) => line.replace(/^[\s>]*[-*]\s+/, "").trim())
+        .filter((line) => line && !/^\**[A-Z_]{4,}\**\s*:?$/.test(line));
+    };
+
+    const sections = Object.fromEntries(
+      found.map((entry) => [entry.key, bulletsFor(entry.contentStart)]),
+    ) as Record<string, string[]>;
+
+    const populated = Object.values(sections).filter((list) => list.length > 0).length;
+    if (populated === 0) continue;
+
+    const confidence = (confidenceMatch?.[1]?.toLowerCase() ?? "medium") as "high" | "medium" | "low";
+    summaries.push({
+      transcriptId,
+      confidence,
+      durableFacts: sections.durableFacts,
+      decisions: sections.decisions,
+      rootCausesAndWorkedExamples: sections.rootCausesAndWorkedExamples,
+      subsystemsAndFiles: sections.subsystemsAndFiles,
+      openItems: sections.openItems,
+      deadEnds: sections.deadEnds,
+    });
+  }
+
+  const seen = new Set<string>();
+  return summaries.filter((summary) => {
+    const id = summary.transcriptId.trim();
+    if (!id || seen.has(id)) return false;
+    seen.add(id);
+    return true;
   });
-  const headingStarts = found.filter((entry) => entry.start >= 0).map((entry) => entry.start);
-  if (headingStarts.length === 0) return [];
-
-  // The CONFIDENCE trailer terminates the last section; without it that section
-  // swallows the trailer as a bullet.
-  const confidenceMatch = /^[\s>#*]*CONFIDENCE\s*:?\s*\**\s*(high|medium|low)/im.exec(clean);
-  const boundaries = confidenceMatch ? [...headingStarts, confidenceMatch.index] : headingStarts;
-
-  const bulletsFor = (contentStart: number): string[] => {
-    if (contentStart < 0) return [];
-    const laterStarts = boundaries.filter((index) => index >= contentStart);
-    const end = laterStarts.length > 0 ? Math.min(...laterStarts) : clean.length;
-    return clean
-      .slice(contentStart, end)
-      .split("\n")
-      .map((line) => line.replace(/^[\s>]*[-*]\s+/, "").trim())
-      .filter((line) => line && !/^\**[A-Z_]{4,}\**\s*:?$/.test(line));
-  };
-
-  const sections = Object.fromEntries(
-    found.map((entry) => [entry.key, bulletsFor(entry.contentStart)]),
-  ) as Record<string, string[]>;
-
-  const confidence = (confidenceMatch?.[1]?.toLowerCase() ?? "medium") as "high" | "medium" | "low";
-
-  const populated = Object.values(sections).filter((list) => list.length > 0).length;
-  if (populated === 0) return [];
-
-  // One section set describes the whole batch; attribute it to every transcript
-  // the batch asked about so lineage still points at real sources.
-  return transcriptIds.filter(Boolean).map((transcriptId) => ({
-    transcriptId,
-    confidence,
-    durableFacts: sections.durableFacts,
-    decisions: sections.decisions,
-    rootCausesAndWorkedExamples: sections.rootCausesAndWorkedExamples,
-    subsystemsAndFiles: sections.subsystemsAndFiles,
-    openItems: sections.openItems,
-    deadEnds: sections.deadEnds,
-  }));
 }
 
 export function toSummaryFromRaw(raw: unknown): TranscriptInsightSummary[] {
@@ -514,14 +538,37 @@ export async function callSubagentMapper(args: {
       keepSession: args.keepSession,
       sessionTitle: args.sessionLabel ? `es-mapper ${args.sessionLabel}` : undefined,
     });
+    const requestedSet = new Set(orderedIds);
+    const mappedIdsFrom = (summaries: TranscriptInsightSummary[]): string[] => {
+      const seen = new Set<string>();
+      const mapped: string[] = [];
+      for (const summary of summaries) {
+        const id = asString(summary.transcriptId).trim();
+        if (!id || !requestedSet.has(id) || seen.has(id)) continue;
+        seen.add(id);
+        mapped.push(id);
+      }
+      return mapped;
+    };
+    const unmappedFrom = (mappedIds: readonly string[]): string[] => {
+      const mappedSet = new Set(mappedIds);
+      return orderedIds.filter((id) => !mappedSet.has(id));
+    };
+
     const parsedJSON = parseEmbeddedJSON(output, (value) => toSummaryFromRaw(value).length > 0);
     if (parsedJSON) {
-      const summaries = toSummaryFromRaw(parsedJSON);
+      const summaries = toSummaryFromRaw(parsedJSON)
+        .filter((summary) => requestedSet.has(asString(summary.transcriptId).trim()));
       if (summaries.length > 0) {
         process.stderr.write(
           `[memory-consolidation-validation] mapper ${args.runner.kind}-run done summaries=${summaries.length} durationMs=${Date.now() - startedAt}\n`,
         );
-        return { summaries, raw: output, via: `${args.runner.kind}-run` as SubagentVia };
+        return {
+          summaries,
+          unmappedTranscriptIds: unmappedFrom(mappedIdsFrom(summaries)),
+          raw: output,
+          via: `${args.runner.kind}-run` as SubagentVia,
+        };
       }
     }
     const sectionSummaries = parseMapperSections(output, orderedIds);
@@ -529,7 +576,12 @@ export async function callSubagentMapper(args: {
       process.stderr.write(
         `[memory-consolidation-validation] mapper ${args.runner.kind}-run done summaries=${sectionSummaries.length} format=sections durationMs=${Date.now() - startedAt}\n`,
       );
-      return { summaries: sectionSummaries, raw: output, via: `${args.runner.kind}-run` as SubagentVia };
+      return {
+        summaries: sectionSummaries,
+        unmappedTranscriptIds: unmappedFrom(mappedIdsFrom(sectionSummaries)),
+        raw: output,
+        via: `${args.runner.kind}-run` as SubagentVia,
+      };
     }
     const debugPath = `${SUBAGENT_DEBUG_DIR}/mapper-${Date.now()}.txt`;
     try {
@@ -549,7 +601,7 @@ export async function callSubagentMapper(args: {
 
   process.stderr.write("[memory-consolidation-validation] mapper unavailable (no parseable opencode output)\n");
 
-  return { summaries: [], raw: null, via: "none" };
+  return { summaries: [], unmappedTranscriptIds: orderedIds, raw: null, via: "none" };
 }
 
 export async function callSubagentAuditor(args: {

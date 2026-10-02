@@ -200,8 +200,22 @@ export default defineTool({
     const toolPrefix = String(args.tool_prefix || runtimeConfig.valuesByPath.mcp?.toolPrefix || DEFAULT_MCP_TOOL_PREFIX).trim();
     const listTool = `${toolPrefix}list_drawers`;
     const getTool = `${toolPrefix}get_drawer`;
+    const bulkGetTool = `${toolPrefix}get_drawers`;
     const updateTool = `${toolPrefix}update_drawer`;
+    const moveTool = `${toolPrefix}move_drawers`;
 
+    const isUnknownToolError = (errorText: string, toolName: string): boolean => {
+      const lower = String(errorText).toLowerCase();
+      return (
+        (lower.includes("unknown tool")
+          || lower.includes("tool not found")
+          || lower.includes("unrecognized tool")
+          || lower.includes("no such tool")
+          || lower.includes("method not found")
+          || lower.includes("not allowed"))
+        && lower.includes(toolName.toLowerCase())
+      );
+    };
     try {
       const mcpURL = resolveMemPalaceMCPUrl(process.env, "ESHEPHERD_MOVE_MCP_URL", String(runtimeConfig.valuesByPath.mcp?.url || DEFAULT_MCP_URL));
       // Construct through the core/ seam (Check A2): it owns transport + initialize
@@ -223,76 +237,126 @@ export default defineTool({
         targetWing: string;
         targetRoomOverride?: string;
       }) => {
-        const runRow = async (drawerID: string): Promise<MoveScriptRow> => {
-        const got = (await mcp.callTool(getTool, { drawer_id: drawerID })) as Record<string, unknown>;
-        if (got && got.error) {
-          const errorText = `get_drawer failed: ${String(got.error)}`;
-          return {
-            drawer_id: drawerID,
-            ok: false,
-            error: errorText,
-            error_kind: classifyErrorKind(errorText),
-          };
-        }
+        const preloaded = new Map<string, Record<string, unknown>>();
 
-        const fromWing = normalizeOptional((got as { wing?: unknown }).wing);
-        const fromRoom = normalizeOptional((got as { room?: unknown }).room);
-        const toRoom = plan.targetRoomOverride || fromRoom;
-        if (!fromWing || !toRoom) {
-          const errorText = "missing source wing/room on drawer";
-          return {
-            drawer_id: drawerID,
-            ok: false,
-            from_wing: fromWing || undefined,
-            from_room: fromRoom || undefined,
-            to_wing: plan.targetWing,
-            to_room: toRoom || undefined,
-            error: errorText,
-            error_kind: classifyErrorKind(errorText),
-          };
-        }
+        const preloadViaBulkGet = async (): Promise<boolean> => {
+          try {
+            for (let i = 0; i < plan.drawerIDs.length; i += 500) {
+              const chunk = plan.drawerIDs.slice(i, i + 500);
+              const res = (await mcp.callTool(bulkGetTool, { drawer_ids: chunk })) as Record<string, unknown>;
+              if (res && res.error) throw new Error(String(res.error));
+              const rows = Array.isArray(res.results) ? (res.results as Record<string, unknown>[]) : [];
+              for (const row of rows) {
+                const rowId = String(row.drawer_id || "").trim();
+                if (rowId) preloaded.set(rowId, row);
+              }
+            }
+            return true;
+          } catch (error) {
+            const errorText = String(error);
+            if (!isUnknownToolError(errorText, bulkGetTool)) throw error;
+            return false;
+          }
+        };
 
-        if (sameFold(fromWing, plan.targetWing) && sameFold(fromRoom, toRoom)) {
-          return {
-            drawer_id: drawerID,
-            ok: true,
-            from_wing: fromWing,
-            from_room: fromRoom,
-            to_wing: plan.targetWing,
-            to_room: toRoom,
-            skipped: true,
-          };
-        }
-
-        const needsBridge = sameIgnoreCase(fromWing, plan.targetWing) && !sameFold(fromWing, plan.targetWing);
-        const applyMove = async (): Promise<{ ok: true } | { ok: false; error: string }> => {
-          const doUpdate = async (wing: string, room: string) => {
-            return (await mcp.callTool(updateTool, {
+        const runRowWithRecord = async (drawerID: string, got: Record<string, unknown>): Promise<MoveScriptRow> => {
+          if (got && got.error) {
+            const errorText = "get_drawer failed: " + String(got.error);
+            return {
               drawer_id: drawerID,
-              wing,
-              room,
-            })) as Record<string, unknown>;
+              ok: false,
+              error: errorText,
+              error_kind: classifyErrorKind(errorText),
+            };
+          }
+
+          const fromWing = normalizeOptional((got as { wing?: unknown }).wing);
+          const fromRoom = normalizeOptional((got as { room?: unknown }).room);
+          const toRoom = plan.targetRoomOverride || fromRoom;
+          if (!fromWing || !toRoom) {
+            const errorText = "missing source wing/room on drawer";
+            return {
+              drawer_id: drawerID,
+              ok: false,
+              from_wing: fromWing || undefined,
+              from_room: fromRoom || undefined,
+              to_wing: plan.targetWing,
+              to_room: toRoom || undefined,
+              error: errorText,
+              error_kind: classifyErrorKind(errorText),
+            };
+          }
+
+          if (sameFold(fromWing, plan.targetWing) && sameFold(fromRoom, toRoom)) {
+            return {
+              drawer_id: drawerID,
+              ok: true,
+              from_wing: fromWing,
+              from_room: fromRoom,
+              to_wing: plan.targetWing,
+              to_room: toRoom,
+              skipped: true,
+            };
+          }
+
+          const needsBridge = sameIgnoreCase(fromWing, plan.targetWing) && !sameFold(fromWing, plan.targetWing);
+          const applyMove = async (): Promise<{ ok: true } | { ok: false; error: string }> => {
+            const doUpdate = async (wing: string, room: string) => {
+              return (await mcp.callTool(updateTool, {
+                drawer_id: drawerID,
+                wing,
+                room,
+              })) as Record<string, unknown>;
+            };
+
+            if (needsBridge) {
+              if (sameIgnoreCase(bridgeWing, plan.targetWing)) {
+                return { ok: false, error: "bridge_wing must differ from target_wing when using case-change bridge" };
+              }
+              const bridgeRes = await doUpdate(bridgeWing, toRoom);
+              if (bridgeRes && bridgeRes.error) {
+                return { ok: false, error: "bridge move failed: " + String(bridgeRes.error) };
+              }
+            }
+
+            const finalRes = await doUpdate(plan.targetWing, toRoom);
+            if (finalRes && finalRes.error) {
+              return { ok: false, error: "final move failed: " + String(finalRes.error) };
+            }
+
+            return { ok: true };
           };
 
-          if (needsBridge) {
-            if (sameIgnoreCase(bridgeWing, plan.targetWing)) {
-              return { ok: false, error: "bridge_wing must differ from target_wing when using case-change bridge" };
-            }
-            const bridgeRes = await doUpdate(bridgeWing, toRoom);
-            if (bridgeRes && bridgeRes.error) {
-              return { ok: false, error: `bridge move failed: ${String(bridgeRes.error)}` };
-            }
+          if (dryRun) {
+            return {
+              drawer_id: drawerID,
+              ok: true,
+              from_wing: fromWing,
+              from_room: fromRoom,
+              to_wing: plan.targetWing,
+              to_room: toRoom,
+              via_bridge: needsBridge,
+              bridge_wing: needsBridge ? bridgeWing : undefined,
+            };
           }
 
-          const finalRes = await doUpdate(plan.targetWing, toRoom);
-          if (finalRes && finalRes.error) {
-            return { ok: false, error: `final move failed: ${String(finalRes.error)}` };
+          const moved = await applyMove();
+          if (moved.ok === false) {
+            const moveError = moved.error;
+            return {
+              drawer_id: drawerID,
+              ok: false,
+              from_wing: fromWing,
+              from_room: fromRoom,
+              to_wing: plan.targetWing,
+              to_room: toRoom,
+              via_bridge: needsBridge,
+              bridge_wing: needsBridge ? bridgeWing : undefined,
+              error: moveError,
+              error_kind: classifyErrorKind(moveError),
+            };
           }
 
-          return { ok: true };
-        };
-
-        if (dryRun) {
           return {
             drawer_id: drawerID,
             ok: true,
@@ -303,36 +367,94 @@ export default defineTool({
             via_bridge: needsBridge,
             bridge_wing: needsBridge ? bridgeWing : undefined,
           };
-        }
-
-        const moved = await applyMove();
-        if (moved.ok === false) {
-          const moveError: string = moved.error;
-          return {
-            drawer_id: drawerID,
-            ok: false,
-            from_wing: fromWing,
-            from_room: fromRoom,
-            to_wing: plan.targetWing,
-            to_room: toRoom,
-            via_bridge: needsBridge,
-            bridge_wing: needsBridge ? bridgeWing : undefined,
-            error: moveError,
-            error_kind: classifyErrorKind(moveError),
-          };
-        }
-
-        return {
-          drawer_id: drawerID,
-          ok: true,
-          from_wing: fromWing,
-          from_room: fromRoom,
-          to_wing: plan.targetWing,
-          to_room: toRoom,
-          via_bridge: needsBridge,
-          bridge_wing: needsBridge ? bridgeWing : undefined,
         };
-      };
+
+        const runRow = async (drawerID: string): Promise<MoveScriptRow> => {
+          const got = preloaded.get(drawerID)
+            || ((await mcp.callTool(getTool, { drawer_id: drawerID })) as Record<string, unknown>);
+          return runRowWithRecord(drawerID, got);
+        };
+
+        if (!dryRun) {
+          const bulkReady = await preloadViaBulkGet();
+          if (bulkReady) {
+            try {
+              const bulkResults: MoveScriptRow[] = [];
+              let stop = false;
+              for (let i = 0; i < plan.drawerIDs.length && !stop; i += 500) {
+                const chunk = plan.drawerIDs.slice(i, i + 500);
+                const res = (await mcp.callTool(moveTool, {
+                  drawer_ids: chunk,
+                  target_wing: plan.targetWing,
+                  target_room: plan.targetRoomOverride,
+                })) as Record<string, unknown>;
+                if (res && res.error) throw new Error(String(res.error));
+                const rows = Array.isArray(res.results) ? (res.results as Record<string, unknown>[]) : [];
+                const byId = new Map<string, Record<string, unknown>>();
+                for (const row of rows) {
+                  const rowId = String(row.drawer_id || "").trim();
+                  if (rowId) byId.set(rowId, row);
+                }
+
+                for (const drawerID of chunk) {
+                  const row = byId.get(drawerID);
+                  if (!row) {
+                    const errorText = "move_drawers missing result";
+                    bulkResults.push({
+                      drawer_id: drawerID,
+                      ok: false,
+                      error: errorText,
+                      error_kind: classifyErrorKind(errorText),
+                    });
+                    if (failFast) {
+                      stop = true;
+                      break;
+                    }
+                    continue;
+                  }
+
+                  const errorText = typeof row.error === "string" ? row.error : "";
+                  if (errorText) {
+                    bulkResults.push({
+                      drawer_id: drawerID,
+                      ok: false,
+                      error: errorText,
+                      error_kind: classifyErrorKind(errorText),
+                    });
+                    if (failFast) {
+                      stop = true;
+                      break;
+                    }
+                    continue;
+                  }
+
+                  const original = preloaded.get(drawerID) || {};
+                  const fromWing = normalizeOptional((original as { wing?: unknown }).wing);
+                  const fromRoom = normalizeOptional((original as { room?: unknown }).room);
+                  const toRoom = plan.targetRoomOverride || normalizeOptional((row as { room?: unknown }).room) || fromRoom;
+                  const toWing = normalizeOptional((row as { wing?: unknown }).wing) || plan.targetWing;
+                  bulkResults.push({
+                    drawer_id: drawerID,
+                    ok: true,
+                    from_wing: fromWing || undefined,
+                    from_room: fromRoom || undefined,
+                    to_wing: toWing || undefined,
+                    to_room: toRoom || undefined,
+                    via_bridge: false,
+                  });
+                }
+              }
+
+              const failed = bulkResults.filter((row) => row && row.ok === false).length;
+              const skipped = bulkResults.filter((row) => row && row.ok === true && Boolean(row.skipped)).length;
+              const moved = bulkResults.filter((row) => row && row.ok === true && !Boolean(row.skipped)).length;
+              return { results: bulkResults, failed, moved, skipped };
+            } catch (error) {
+              const errorText = String(error);
+              if (!isUnknownToolError(errorText, moveTool)) throw error;
+            }
+          }
+        }
 
         // Sequential by design: the substrate serializes writes behind a per-palace
         // lock and its HNSW index degrades under parallel updates, so fanning out

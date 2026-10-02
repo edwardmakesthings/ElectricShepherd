@@ -23,7 +23,7 @@ import { acquireConsolidationLock, releaseConsolidationLock } from "./consolidat
 
 // Extracted modules (criterion 2 decomposition)
 import {
-  getArg, hasFlag, asObject, asString, parsePositiveInt,
+  getArg, hasFlag, asArray, asObject, asString, parsePositiveInt,
   parseConsolidationOptions, parseWorklistOptions, parseValidationOptions,
   parseCadenceOptions, parseMemcoreApply, parseCadenceState, usage,
   type CadenceState,
@@ -33,8 +33,10 @@ import {
   type MapperEnvelope, type AuditorEnvelope,
 } from "./memory-pipeline/subagent.ts";
 import {
-  chunkItems, ensureRawEntriesForChunk,
-  postConsolidationMoves, moveAllToRoom, partitionChunk,
+  chunkHomogeneousWorklist, ensureRawEntriesForChunk,
+  getFamilyDrawerIds, parseDrawerPayload, postConsolidationMoves, moveAllToRoom, partitionChunk,
+  buildReconsolidationRetirementPlan, evaluateReconsolidationRetirement, splitChunkByLineageConflicts,
+  type ReconsolidationRetirementPlan,
 } from "./memory-pipeline/worklist-helpers.ts";
 import { runTriageOnlyPhase } from "./memory-pipeline/triage.ts";
 import { renderAndApplyMemcore } from "./memory-pipeline/memcore-render.ts";
@@ -343,7 +345,74 @@ async function main(): Promise<void> {
   let validationMergeReview: ValidationMergeReviewResult | undefined;
   let validationSkippedReason: string | undefined;
 
-  const enumerateAll = worklistOptions.mode === "all";
+  const collectCurrentObjects = (kgRaw: unknown, predicate: string, subject?: string): string[] => {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    const rows = asArray(asObject(kgRaw).facts);
+    for (const raw of rows) {
+      const fact = asObject(raw);
+      if (fact.current === false) continue;
+      const factPredicate = asString(fact.predicate || fact.relation || fact.type).trim();
+      if (factPredicate !== predicate) continue;
+      const factSubject = asString(fact.subject || fact.source || fact.from || fact.head || fact.entity).trim();
+      if (subject && factSubject && factSubject !== subject) continue;
+      const factObject = asString(fact.object || fact.target || fact.to || fact.tail).trim();
+      if (!factObject || seen.has(factObject)) continue;
+      seen.add(factObject);
+      out.push(factObject);
+    }
+    return out;
+  };
+
+  const listCurrentOutgoingObjects = async (subject: string, predicate: string): Promise<string[]> => {
+    const query = await client.kgQuery({
+      entity: subject,
+      direction: "outgoing",
+      predicate,
+      recurse: false,
+      max_depth: 1,
+    });
+    return collectCurrentObjects(query, predicate, subject);
+  };
+
+  const listCurrentOutgoingObjectsMany = async (subjects: string[], predicate: string): Promise<Record<string, string[]>> => {
+    const normalized = [...new Set(subjects.map((id) => id.trim()).filter(Boolean))];
+    if (normalized.length === 0) return {};
+    const results = await client.kgQueryMany({
+      entities: normalized,
+      direction: "outgoing",
+      predicate,
+      recurse: false,
+      max_depth: 1,
+    });
+    const out: Record<string, string[]> = {};
+    for (const subject of normalized) {
+      out[subject] = collectCurrentObjects(results[subject], predicate, subject);
+    }
+    return out;
+  };
+
+  const reconsolidateClosetIds = [...new Set(worklistOptions.reconsolidateClosetIds.map((id) => id.trim()).filter(Boolean))];
+  const reconsolidationParentIds = new Set<string>();
+  const reconsolidationParentsByCloset: Record<string, string[]> = {};
+  const reconsolidationPlansByCloset = new Map<string, ReconsolidationRetirementPlan>();
+
+  const collectReconsolidationParents = async (closetId: string, parentMap?: Record<string, string[]>): Promise<ReconsolidationRetirementPlan | null> => {
+    const normalized = closetId.trim();
+    if (!normalized) return null;
+
+    const parents = parentMap ? (parentMap[normalized] || []) : await listCurrentOutgoingObjects(normalized, "synthesized-from");
+    const plan = buildReconsolidationRetirementPlan(normalized, parents);
+    if (!plan) {
+      process.stderr.write(
+        "[memory-consolidation-validation] reconsolidate " + normalized + " has no synthesized-from parents; skipping\n",
+      );
+      return null;
+    }
+
+    return plan;
+  };
+  const enumerateAll = worklistOptions.mode === "all" || worklistOptions.mode === "all-raw";
   let worklist: SourceDrawerWorkItem[] = [];
   if (includeBasePipeline) {
     const sourceRoom = worklistOptions.retryFailedOnly ? worklistOptions.failedRoom : worklistOptions.sourceRoom;
@@ -360,7 +429,89 @@ async function main(): Promise<void> {
           limit: worklistOptions.limit,
           pageSize: worklistPageSize,
         });
+    if (worklistOptions.mode === "all-raw") {
+      worklist = worklist.filter((item) => (item.source_class || "raw") === "raw");
+    }
   }
+
+  if (includeBasePipeline && reconsolidateClosetIds.length > 0) {
+    const parentMap = await listCurrentOutgoingObjectsMany(reconsolidateClosetIds, "synthesized-from");
+    for (const closetId of reconsolidateClosetIds) {
+      const plan = await collectReconsolidationParents(closetId, parentMap);
+      const parentIds = plan?.parentIds || [];
+      reconsolidationParentsByCloset[closetId] = parentIds;
+      if (plan) reconsolidationPlansByCloset.set(plan.closetId, plan);
+      for (const parentId of parentIds) reconsolidationParentIds.add(parentId);
+    }
+
+    if (reconsolidationParentIds.size > 0) {
+      const reconParents: SourceDrawerWorkItem[] = [];
+      const parentIds = [...reconsolidationParentIds];
+      for (let i = 0; i < parentIds.length; i += 500) {
+        const chunk = parentIds.slice(i, i + 500);
+        try {
+          const fetched = await client.getDrawers({ drawer_ids: chunk });
+          const rows = Array.isArray((fetched as { results?: unknown[] }).results)
+            ? ((fetched as { results?: unknown[] }).results as unknown[])
+            : [];
+          const byId = new Map<string, unknown>();
+          for (const row of rows) {
+            const rowObj = row && typeof row === "object" ? (row as Record<string, unknown>) : {};
+            const rowId = asString(rowObj.drawer_id).trim();
+            if (rowId) byId.set(rowId, row);
+          }
+
+          for (const parentId of chunk) {
+            const raw = byId.get(parentId);
+            if (!raw) {
+              allSkipped.push({ drawer_id: parentId, reason: "reconsolidate-parent-fetch-failed" });
+              process.stderr.write(
+                "[memory-consolidation-validation] reconsolidate parent fetch failed parent=" + parentId + " err=missing bulk result\n",
+              );
+              continue;
+            }
+
+            const rowObj = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+            if (rowObj.error) {
+              allSkipped.push({ drawer_id: parentId, reason: "reconsolidate-parent-fetch-failed" });
+              process.stderr.write(
+                "[memory-consolidation-validation] reconsolidate parent fetch failed parent=" + parentId + " err=" + String(rowObj.error) + "\n",
+              );
+              continue;
+            }
+
+            const parsed = parseDrawerPayload(raw);
+            const drawerId = asString(parsed?.drawer_id || parentId).trim() || parentId;
+            const familyIds = getFamilyDrawerIds(parsed ?? { drawer_id: drawerId });
+            reconParents.push({
+              drawer_id: drawerId,
+              wing: asString(parsed?.wing).trim() || consolidationOptions.targetWing,
+              room: asString(parsed?.room).trim() || worklistOptions.sourceRoom,
+              desc: parsed?.desc,
+              filed_at: parsed?.filed_at,
+              source_file: asString((parsed as Record<string, unknown> | null)?.source_file).trim() || undefined,
+              added_by: asString((parsed as Record<string, unknown> | null)?.added_by).trim() || undefined,
+              content: parsed?.content,
+              family_drawer_ids: familyIds,
+            });
+          }
+        } catch (err) {
+          for (const parentId of chunk) {
+            allSkipped.push({ drawer_id: parentId, reason: "reconsolidate-parent-fetch-failed" });
+            process.stderr.write(
+              "[memory-consolidation-validation] reconsolidate parent fetch failed parent=" + parentId + " err=" + String(err) + "\n",
+            );
+          }
+        }
+      }
+
+      const byRoot = new Map<string, SourceDrawerWorkItem>();
+      for (const item of worklist) byRoot.set(item.drawer_id, item);
+      for (const item of reconParents) byRoot.set(item.drawer_id, item);
+      worklist = [...byRoot.values()];
+    }
+  }
+
 
   if (await runTriageOnlyPhase({
     argv,
@@ -391,13 +542,18 @@ async function main(): Promise<void> {
     limit: worklistOptions.limit,
     batchSize: worklistOptions.batchSize,
     note: includeBasePipeline
-      ? enumerateAll
-        ? "full-scope override active: this run may reprocess already-consolidated source drawers"
-        : worklistOptions.retryFailedOnly
-          ? "retry mode: unconsolidated source drawers selected from failed room"
-          : "default mode: unconsolidated source drawers selected from source room"
+      ? reconsolidateClosetIds.length > 0
+        ? "reconsolidate mode: selected closets are evaluated for retirement after successful parent replacement"
+        : enumerateAll
+          ? "full-scope override active: this run may reprocess already-consolidated source drawers"
+          : worklistOptions.retryFailedOnly
+            ? "retry mode: unconsolidated source drawers selected from failed room"
+            : "default mode: unconsolidated source drawers selected from source room"
       : "cadence-only run: base worklist pipeline not executed",
     sourceRoom: worklistOptions.retryFailedOnly ? worklistOptions.failedRoom : worklistOptions.sourceRoom,
+    reconsolidateClosetIds: reconsolidateClosetIds.length > 0 ? reconsolidateClosetIds : undefined,
+    reconsolidationParentsByCloset: reconsolidateClosetIds.length > 0 ? reconsolidationParentsByCloset : undefined,
+    reconsolidationParentCount: reconsolidateClosetIds.length > 0 ? reconsolidationParentIds.size : undefined,
     processedRoom: worklistOptions.processedRoom,
     failedRoom: worklistOptions.failedRoom,
     retryFailedOnly: worklistOptions.retryFailedOnly,
@@ -424,7 +580,7 @@ async function main(): Promise<void> {
     },
   );
   if (includeBasePipeline) {
-    const worklistChunks = chunkItems(worklist, worklistOptions.batchSize);
+    const worklistChunks = chunkHomogeneousWorklist(worklist, worklistOptions.batchSize);
     // The keyword fallback splits on sentences and lines, so a captured transcript
     // -- one long single-line JSON blob -- yields too few populated sections to
     // clear the confidence floor, and every drawer scores `low` and is dropped.
@@ -434,41 +590,124 @@ async function main(): Promise<void> {
     const movedToProcessed: Array<{ drawer_id: string; family_drawer_ids: string[]; reason: string }> = [];
     const movedToFailed: Array<{ drawer_id: string; family_drawer_ids: string[]; reason: string }> = [];
     const moveErrors: Array<{ drawer_id: string; phase: "processed" | "failed"; error: string }> = [];
+    const reconsolidationParentCoverage = new Set<string>();
+    const reconsolidationParentFailures = new Set<string>();
+
+    const trackReconsolidationOutcome = (items: SourceDrawerWorkItem[], outcome: "covered" | "failed"): void => {
+      if (reconsolidationParentIds.size === 0 || items.length === 0) return;
+      for (const item of items) {
+        for (const drawerId of getFamilyDrawerIds(item)) {
+          if (!reconsolidationParentIds.has(drawerId)) continue;
+          if (outcome === "covered") reconsolidationParentCoverage.add(drawerId);
+          else reconsolidationParentFailures.add(drawerId);
+        }
+      }
+    };
+
+    const trackReconsolidationMoves = (
+      entries: Array<{ drawer_id: string; family_drawer_ids: string[] }>,
+      outcome: "covered" | "failed",
+    ): void => {
+      if (entries.length === 0) return;
+      trackReconsolidationOutcome(entries as SourceDrawerWorkItem[], outcome);
+    };
+
+    const retireReconsolidationClosets = async (): Promise<void> => {
+      if (reconsolidationPlansByCloset.size === 0) return;
+
+      if (!consolidationOptions.applyWrites) {
+        for (const plan of reconsolidationPlansByCloset.values()) {
+          process.stderr.write(
+            `[memory-consolidation-validation] dry-run reconsolidate plan closet=${plan.closetId} retireEdges=${plan.retireEdges.length} retireStatus=es-status:provisional->retired\n`,
+          );
+        }
+        return;
+      }
+
+      const skippedRetirements: Array<{ closetId: string; missingParentIds: string[]; failedParentIds: string[] }> = [];
+
+      for (const plan of reconsolidationPlansByCloset.values()) {
+        const evaluation = evaluateReconsolidationRetirement(plan, {
+          coveredParentIds: reconsolidationParentCoverage,
+          failedParentIds: reconsolidationParentFailures,
+        });
+        if (!evaluation.canRetire) {
+          skippedRetirements.push({
+            closetId: plan.closetId,
+            missingParentIds: evaluation.missingParentIds,
+            failedParentIds: evaluation.failedParentIds,
+          });
+          process.stderr.write(
+            `[memory-consolidation-validation] reconsolidate preserving closet=${plan.closetId} missingParents=${evaluation.missingParentIds.join(",") || "<none>"} failedParents=${evaluation.failedParentIds.join(",") || "<none>"}\n`,
+          );
+          continue;
+        }
+
+        for (const edge of plan.retireEdges) {
+          try {
+            await client.kgInvalidate({
+              subject: edge.subject,
+              predicate: edge.predicate,
+              object: edge.object,
+            });
+          } catch (err) {
+            process.stderr.write(
+              `[memory-consolidation-validation] reconsolidate invalidate failed edge=${edge.subject}->${edge.object} predicate=${edge.predicate} err=${String(err)}\n`,
+            );
+          }
+        }
+
+        try {
+          await client.kgSupersede({
+            subject: plan.closetId,
+            predicate: "es-status",
+            old_object: "provisional",
+            new_object: "retired",
+          });
+        } catch (err) {
+          process.stderr.write(
+            `[memory-consolidation-validation] reconsolidate supersede status failed closet=${plan.closetId} err=${String(err)}\n`,
+          );
+        }
+      }
+
+      if (skippedRetirements.length > 0) {
+        (worklistOutput as Record<string, unknown>).reconsolidationRetirementsSkipped = skippedRetirements;
+      }
+    };
 
     if (worklistChunks.length === 0) {
-      // Even with no new source drawers selected, render mem-core from the
-      // current synthesized memory state so refreshes are not blocked on
-      // creating new closets.
-      const emptyConsolidation = await runSynthesisConsolidation(client, {
-        ...consolidationOptions,
-        rawEntries: [],
-        runId,
-      });
-      consolidationBatches.push(emptyConsolidation);
       flushRunProgress(
         {
           phase: "consolidation-empty-worklist",
           noWorkReason:
-            worklistOptions.retryFailedOnly
-              ? `no-items-in-${worklistOptions.failedRoom}`
-              : `no-items-in-${worklistOptions.sourceRoom}`,
+            reconsolidateClosetIds.length > 0
+              ? "reconsolidate-parent-set-empty"
+              : worklistOptions.retryFailedOnly
+                ? `no-items-in-${worklistOptions.failedRoom}`
+                : `no-items-in-${worklistOptions.sourceRoom}`,
         },
         {
           chunkIndex: 0,
           chunkTotal: 0,
-          createdNodeCount: consolidationBatches.map((c) => asString(c.createdNodeId).trim()).filter(Boolean).length,
+          createdNodeCount: 0,
         },
       );
     }
 
 
     for (const [chunkIndex, chunk] of worklistChunks.entries()) {
+      const chunkBatches = await splitChunkByLineageConflicts(
+        chunk,
+        (sourceId, targetId) => client.hasLineagePath(sourceId, targetId),
+      );
+      for (const chunkBatch of chunkBatches) {
       flushRunProgress(
         {
           phase: "chunk-processing",
           currentChunk: chunkIndex + 1,
           totalChunks: worklistChunks.length,
-          chunkItems: chunk.length,
+          chunkItems: chunkBatch.length,
         },
         {
           chunkIndex: chunkIndex + 1,
@@ -480,14 +719,15 @@ async function main(): Promise<void> {
         },
       );
       process.stderr.write(
-        `[memory-consolidation-validation] chunk ${chunkIndex + 1}/${worklistChunks.length} start (items=${chunk.length})\n`,
+        `[memory-consolidation-validation] chunk ${chunkIndex + 1}/${worklistChunks.length} start (items=${chunkBatch.length})\n`,
       );
       const { actionable, movedToProcessed: chunkProcessed, moveErrors: chunkMoveErrors } = await partitionChunk({
-        client, chunk,
+        client, chunk: chunkBatch,
         processedRoom: worklistOptions.processedRoom,
         targetWing: consolidationOptions.targetWing,
         applyWrites: consolidationOptions.applyWrites,
         moveAlreadyConsolidated: worklistOptions.moveAlreadyConsolidated,
+        forceActionableIds: reconsolidationParentIds.size > 0 ? reconsolidationParentIds : undefined,
       });
       movedToProcessed.push(...chunkProcessed);
       moveErrors.push(...chunkMoveErrors);
@@ -495,7 +735,6 @@ async function main(): Promise<void> {
       if (actionable.length === 0) continue;
 
       flushRunProgress({ phase: "chunk-actionable", actionableCount: actionable.length });
-
       process.stderr.write(
         `[memory-consolidation-validation] chunk ${chunkIndex + 1}/${worklistChunks.length} actionable=${actionable.length}\n`,
       );
@@ -525,10 +764,28 @@ async function main(): Promise<void> {
 
       const { entries: rawEntries, skipped: chunkSkipped } = await ensureRawEntriesForChunk(client, actionable);
       if (chunkSkipped.length > 0) allSkipped.push(...chunkSkipped);
+      const unmappedIds = [...new Set(chunkMapper?.unmappedTranscriptIds || [])];
+      const skippedUnmapped = new Set(unmappedIds);
+      const filteredRawEntries = rawEntries.filter((entry) => !skippedUnmapped.has(entry.id));
+      const actionableForMoves = actionable.filter((item) => {
+        const familyIds = getFamilyDrawerIds(item);
+        return familyIds.some((drawerId) => !skippedUnmapped.has(drawerId));
+      });
+      const actionableUnmapped = actionable.filter((item) => {
+        const familyIds = getFamilyDrawerIds(item);
+        return familyIds.every((drawerId) => skippedUnmapped.has(drawerId));
+      });
+      if (useLiveMapper && unmappedIds.length > 0) {
+        for (const drawerId of unmappedIds) allSkipped.push({ drawer_id: drawerId, reason: "mapper-unmapped" });
+        process.stderr.write(
+          `[memory-consolidation-validation] chunk ${chunkIndex + 1}/${worklistChunks.length} mapper-unmapped=${unmappedIds.length} skipped-from-synthesis\n`,
+        );
+      }
+
       const chunkConsolidation = await runSynthesisConsolidation(client, {
         ...consolidationOptions,
         mapperSummaries: chunkMapper && chunkMapper.summaries.length > 0 ? chunkMapper.summaries : undefined,
-        rawEntries,
+        rawEntries: filteredRawEntries,
         runId,
       });
       consolidationBatches.push(chunkConsolidation);
@@ -554,11 +811,11 @@ async function main(): Promise<void> {
         // tooling one and hides them from every later run. Leave them where they
         // are; the next pass with a working mapper picks them up.
         if (useLiveMapper && chunkMapper?.via === "none") {
-          for (const item of actionable) {
+          for (const item of actionableForMoves) {
             allSkipped.push({ drawer_id: item.drawer_id, reason: "mapper-unavailable" });
           }
           process.stderr.write(
-            `[memory-consolidation-validation] chunk ${chunkIndex + 1}/${worklistChunks.length} left in place count=${actionable.length} reason=mapper-unavailable\n`,
+            `[memory-consolidation-validation] chunk ${chunkIndex + 1}/${worklistChunks.length} left in place count=${actionableForMoves.length} reason=mapper-unavailable\n`,
           );
           flushRunProgress({ phase: "chunk-left-in-place-mapper-unavailable" });
           continue;
@@ -570,15 +827,36 @@ async function main(): Promise<void> {
         // refuse identically forever. Only a node missing despite a passing
         // guard means the tools failed, which is what the failed room is for.
         const noSubstance = !chunkConsolidation.inflationGuard.passed;
+        const noMappedEntries = filteredRawEntries.length === 0;
         const moveOutcome = await moveAllToRoom({
-          client, actionable, chunkIndex, totalChunks: worklistChunks.length,
+          client, actionable: actionableForMoves, chunkIndex, totalChunks: worklistChunks.length,
           targetRoom: noSubstance ? worklistOptions.processedRoom : worklistOptions.failedRoom,
           targetWing: consolidationOptions.targetWing,
-          reason: noSubstance ? "no-substance" : "no-created-node",
+          reason: noSubstance ? "no-substance" : noMappedEntries ? "mapper-unmapped" : "no-created-node",
         });
-        if (noSubstance) movedToProcessed.push(...moveOutcome.moved);
-        else movedToFailed.push(...moveOutcome.moved);
+        if (actionableUnmapped.length > 0) {
+          const unmappedMoves = await moveAllToRoom({
+            client, actionable: actionableUnmapped, chunkIndex, totalChunks: worklistChunks.length,
+            targetRoom: worklistOptions.failedRoom,
+            targetWing: consolidationOptions.targetWing,
+            reason: "mapper-unmapped",
+          });
+          movedToFailed.push(...unmappedMoves.moved);
+          moveErrors.push(...unmappedMoves.moveErrors);
+          trackReconsolidationOutcome(actionableUnmapped, "failed");
+        }
+        if (noSubstance) {
+          movedToProcessed.push(...moveOutcome.moved);
+          // No replacement closet was created, so reconsolidation parents are not covered.
+          trackReconsolidationOutcome(actionableForMoves, "failed");
+        } else {
+          movedToFailed.push(...moveOutcome.moved);
+          trackReconsolidationOutcome(actionableForMoves, "failed");
+        }
         moveErrors.push(...moveOutcome.moveErrors);
+        if (moveOutcome.moveErrors.length > 0) {
+          trackReconsolidationMoves(moveOutcome.moveErrors.map((entry) => ({ drawer_id: entry.drawer_id, family_drawer_ids: [entry.drawer_id] })), "failed");
+        }
         flushRunProgress(
           { phase: noSubstance ? "chunk-move-processed-no-substance" : "chunk-move-failed-no-created-node" },
           {
@@ -592,7 +870,7 @@ async function main(): Promise<void> {
 
       const postMoves = await postConsolidationMoves({
         client,
-        actionable,
+        actionable: actionableForMoves,
         chunkIndex,
         totalChunks: worklistChunks.length,
         worklistOptions: { processedRoom: worklistOptions.processedRoom, failedRoom: worklistOptions.failedRoom },
@@ -601,6 +879,22 @@ async function main(): Promise<void> {
       movedToProcessed.push(...postMoves.movedToProcessed);
       movedToFailed.push(...postMoves.movedToFailed);
       moveErrors.push(...postMoves.moveErrors);
+      trackReconsolidationMoves(postMoves.movedToProcessed, "covered");
+      trackReconsolidationMoves(postMoves.movedToFailed, "failed");
+      if (postMoves.moveErrors.length > 0) {
+        trackReconsolidationMoves(postMoves.moveErrors.map((entry) => ({ drawer_id: entry.drawer_id, family_drawer_ids: [entry.drawer_id] })), "failed");
+      }
+      if (actionableUnmapped.length > 0) {
+        const unmappedMoves = await moveAllToRoom({
+          client, actionable: actionableUnmapped, chunkIndex, totalChunks: worklistChunks.length,
+          targetRoom: worklistOptions.failedRoom,
+          targetWing: consolidationOptions.targetWing,
+          reason: "mapper-unmapped",
+        });
+        movedToFailed.push(...unmappedMoves.moved);
+        trackReconsolidationOutcome(actionableUnmapped, "failed");
+        moveErrors.push(...unmappedMoves.moveErrors);
+      }
       flushRunProgress(
         { phase: "chunk-post-verify" },
         {
@@ -610,6 +904,9 @@ async function main(): Promise<void> {
         },
       );
     }
+    }
+
+    await retireReconsolidationClosets();
 
     if (consolidationBatches.length > 0) {
       consolidation = consolidationBatches[consolidationBatches.length - 1];
@@ -617,8 +914,10 @@ async function main(): Promise<void> {
 
     if (mapperBatches.length > 0) {
       const mergedSummaries = mapperBatches.flatMap((batch) => batch.summaries);
+      const mergedUnmapped = [...new Set(mapperBatches.flatMap((batch) => batch.unmappedTranscriptIds || []))];
       mapper = {
         summaries: mergedSummaries,
+        unmappedTranscriptIds: mergedUnmapped,
         raw: mapperBatches.map((batch) => batch.raw),
         via: mapperBatches.some((batch) => batch.via === "opencode-run") ? "opencode-run" : "none",
       };

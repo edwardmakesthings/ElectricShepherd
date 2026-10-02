@@ -9,9 +9,24 @@
 
 import type { ListSourceScopeArgs, SourceDrawerWorkItem } from "../../core/memgraph-structure.ts";
 import type { MemgraphInternals } from "../../core/memgraph-internals.ts";
-import { asNumber, collapseChunkedSourceItems, parseKgFacts, parseRawMemoryItems, uniqueFromFactsByDirection } from "../../core/memgraph-transport.ts";
+import {
+  asNumber,
+  classifySourceDrawer,
+  collapseChunkedSourceItems,
+  parseKgFacts,
+  parseRawMemoryItems,
+  sourceTypeFromFacts,
+  uniqueFromFactsByDirection,
+} from "../../core/memgraph-transport.ts";
 import { listDrawers } from "../../core/memgraph-drawers.ts";
-import { isSourceDrawerConsolidated } from "./memgraph-lineage.ts";
+import { getConsolidationStateForDrawers } from "./memgraph-lineage.ts";
+
+function chunkIds(ids: string[], size: number): string[][] {
+  if (ids.length === 0) return [];
+  const out: string[][] = [];
+  for (let i = 0; i < ids.length; i += size) out.push(ids.slice(i, i + size));
+  return out;
+}
 
 export async function listSourceDrawersByScope(core: MemgraphInternals, args: ListSourceScopeArgs): Promise<SourceDrawerWorkItem[]> {
   const limit = Math.max(1, Math.floor(asNumber(args.limit, 200)));
@@ -37,22 +52,53 @@ export async function listSourceDrawersByScope(core: MemgraphInternals, args: Li
     offset += requestLimit;
   }
 
-  const out: SourceDrawerWorkItem[] = [];
+  const drawerIds = [...new Set(candidates.map((item) => item.drawer_id).filter(Boolean))];
+  const sourceTypeById = new Map<string, ReturnType<typeof sourceTypeFromFacts>>();
+  const hasOutgoingSynthById = new Map<string, boolean>();
 
-  for (const item of candidates) {
-    // Conservative fallback (logged): if lineage inspection fails, keep the item in
-    // the raw worklist so consolidation does not silently miss evidence.
-    const result = await core.kgQueryIgnoringFailure({
-      entity: item.drawer_id,
+  for (const chunk of chunkIds(drawerIds, 500)) {
+    const sourceTypeResults = await core.kgQueryMany({
+      entities: chunk,
+      direction: "outgoing",
+      predicate: "es-source-type",
+      recurse: false,
+      max_depth: 1,
+    });
+    const lineageResults = await core.kgQueryMany({
+      entities: chunk,
       direction: "outgoing",
       predicate: "synthesized-from",
       recurse: false,
       max_depth: 1,
-    }, `listSourceDrawersByScope(${item.drawer_id}) lineage read failure keeps item in worklist`);
-    const sourceIds = uniqueFromFactsByDirection(parseKgFacts(result), "outgoing");
-    if (sourceIds.length === 0) {
-      out.push(item);
+    });
+
+    for (const drawerId of chunk) {
+      sourceTypeById.set(drawerId, sourceTypeFromFacts(sourceTypeResults[drawerId] || {}));
+      const outgoing = uniqueFromFactsByDirection(parseKgFacts(lineageResults[drawerId] || {}), "outgoing");
+      hasOutgoingSynthById.set(drawerId, outgoing.length > 0);
     }
+  }
+
+  const out: SourceDrawerWorkItem[] = [];
+  for (const item of candidates) {
+    const sourceType = sourceTypeById.get(item.drawer_id) || null;
+    const classification = classifySourceDrawer({
+      sourceType,
+      hasOutgoingSynthesizedFrom: Boolean(hasOutgoingSynthById.get(item.drawer_id)),
+    });
+
+    if (classification.invariantViolation) {
+      console.warn(
+        "[memory-consolidation-validation] excluding source drawer " + item.drawer_id + ": transcript category with outgoing synthesized-from lineage",
+      );
+      continue;
+    }
+    if (sourceType === "skill" || sourceType === null) continue;
+
+    out.push({
+      ...item,
+      source_class: classification.sourceClass,
+    });
   }
 
   return collapseChunkedSourceItems(out);
@@ -60,27 +106,18 @@ export async function listSourceDrawersByScope(core: MemgraphInternals, args: Li
 
 export async function findUnconsolidatedSourceDrawers(core: MemgraphInternals, args: ListSourceScopeArgs): Promise<SourceDrawerWorkItem[]> {
   const rawItems = await listSourceDrawersByScope(core, args);
+  const familyMemberIds = [...new Set(rawItems.flatMap((item) => (item.family_drawer_ids && item.family_drawer_ids.length > 0
+    ? item.family_drawer_ids
+    : [item.drawer_id]))
+    .filter(Boolean))];
+  const consolidated = await getConsolidationStateForDrawers(core, familyMemberIds);
   const out: SourceDrawerWorkItem[] = [];
 
   for (const item of rawItems) {
-    // Check EVERY family member, not just the representative: collapse groups a
-    // chunked source's drawers under one representative (chosen by root/earliest
-    // filed_at, not consolidation status), so a split family — consolidated root
-    // with an unconsolidated sibling chunk — would be dropped wholesale if we only
-    // checked the representative. Keep the family if ANY member is unconsolidated;
-    // partitionChunk/getConsolidatedIdsForFamily then prune the consolidated members
-    // per-drawer downstream. Degrades read failures to "unconsolidated" (logged) so
-    // a broken substrate re-surfaces the drawer rather than dropping it.
     const familyIds = (item.family_drawer_ids && item.family_drawer_ids.length > 0
       ? item.family_drawer_ids
       : [item.drawer_id]);
-    let anyUnconsolidated = false;
-    for (const memberId of familyIds) {
-      if (!(await isSourceDrawerConsolidated(core, memberId))) {
-        anyUnconsolidated = true;
-        break;
-      }
-    }
+    const anyUnconsolidated = familyIds.some((memberId) => !consolidated.get(memberId));
     if (anyUnconsolidated) out.push(item);
   }
 

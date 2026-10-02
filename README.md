@@ -267,6 +267,9 @@ Two invariants follow:
   recording, and merge application all preview their exact edges and apply only on explicit
   approval. Outcomes in particular are human-authoritative: test failures and reviewer
   verdicts are *evidence*, never writers.
+- **Mapper attribution is explicit per drawer.** A live mapper summary only counts when it names an assigned `transcriptId`; unmapped IDs are not implicitly credited from batch context, and remain retryable (`mapper-unmapped`).
+- **Reconsolidation is parent-driven and explicit.** `--reconsolidate <closetId[,closetId...]>` retires listed closets (on apply), invalidates old lineage edges, and rebuilds only from those closets' `synthesized-from` parents.
+- **Raw vs layered intake is classifier-driven.** Source class comes from `es-source-type` plus outgoing `synthesized-from`: only `transcript` is raw; `note|doc|synthesis` are layered; any outgoing `synthesized-from` also classifies as layered. `skill` and unknown source types are excluded from source intake. Transcript drawers must not have outgoing `synthesized-from` (if found, warn + exclude), and raw drawers terminate via `consolidated-into`. Consolidation batches are homogeneous by class (raw-only or layered-only).
 
 Validation is context-isolated. A `dream-auditor` subagent checks new closets
 bidirectionally and recommends promotion; the orchestrating agent executes it. The auditor

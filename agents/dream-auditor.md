@@ -35,7 +35,7 @@ Upward check:
 Output:
 - verdict: pass|revise|escalate
 - findings: concise bullet list
-- recommended_actions: concrete substrate calls (add_drawer, kg_add, kg_query, find_closet_lineage_issues, find_merge_candidates, apply_merge, kg_invalidate)
+- recommended_actions: concrete substrate calls (prefer plural/batch tools for >1 id: get_drawers, add_drawers, move_drawers, delete_drawers, kg_query_many; include reconsolidation path when needed: /consolidate --reconsolidate <closetIds> dry-run first, then apply; use kg_invalidate/kg_supersede for retirements; treat find_closet_lineage_issues as read-only diagnostics)
 
 Finish with: CONFIDENCE: high|medium|low - one-line reason.
 

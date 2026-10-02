@@ -40,6 +40,7 @@ consult this table first.
 | Full wing → room → count tree | `mempalace_get_taxonomy` |
 | Semantic search by meaning | `mempalace_search` |
 | Fetch a single drawer by ID | `mempalace_get_drawer` |
+| Fetch many drawers by ID (<=500) | `mempalace_get_drawers` |
 | List drawers with pagination/filtering | `mempalace_list_drawers` |
 | Check for near-duplicate before filing | `mempalace_check_duplicate` |
 
@@ -48,9 +49,12 @@ consult this table first.
 | What you want to do | Tool |
 |---|---|
 | File verbatim content (single drawer) | `mempalace_add_drawer` |
+| File verbatim content (many drawers, <=500) | `mempalace_add_drawers` |
 | Save a whole session at once (batch + diary) | `mempalace_checkpoint` |
 | Update an existing drawer's content/location | `mempalace_update_drawer` |
+| Move drawers by ID in bulk (<=500) | `mempalace_move_drawers` |
 | Delete a drawer by ID | `mempalace_delete_drawer` |
+| Delete many drawers by ID (<=500) | `mempalace_delete_drawers` |
 | Bulk-delete every drawer from one source file | `mempalace_delete_by_source` |
 | Mine a directory into the palace | `mempalace_mine` |
 | Prune orphan drawers (deleted/ignored source files) | `mempalace_sync` |
@@ -60,6 +64,7 @@ consult this table first.
 | What you want to do | Tool |
 |---|---|
 | Query an entity's relationships (with time filter) | `mempalace_kg_query` |
+| Query many entities at once (<=500) | `mempalace_kg_query_many` |
 | Add a fact / relationship | `mempalace_kg_add` |
 | Invalidate a fact (mark no longer true) | `mempalace_kg_invalidate` |
 | Chronological timeline of an entity | `mempalace_kg_timeline` |
@@ -76,7 +81,7 @@ consult this table first.
 | Follow the merged-into chain to canonical | `mempalace_resolve_canonical` |
 | Surface merge candidates | `mempalace_find_merge_candidates` |
 | Execute a merge decision | `mempalace_apply_merge` |
-| Find structurally broken nodes | `mempalace_find_closet_lineage_issues` |
+| Find structurally broken nodes (read-only diagnostics) | `mempalace_find_closet_lineage_issues` (repairs: `/consolidate --reconsolidate <ids>` dry-run first, then apply; `kg_invalidate` / `kg_supersede` as needed) |
 | Build scoped synthesis sets (for mem-core rendering) | `mempalace_search` + recursive `mempalace_kg_query` expansion |
 | Replace or clear hall labels | `mempalace_kg_invalidate` + `mempalace_kg_add` (`predicate=in-hall`) |
 | Known hall values | `hall_facts`, `hall_events`, `hall_discoveries`, `hall_preferences`, `hall_advice` |
@@ -186,6 +191,8 @@ Do not mix these roles.
 | Intent | Correct tool | Wrong tool to avoid |
 |---|---|---|
 | Synthesis lineage (drawer+KG) | `mempalace_add_drawer` + `mempalace_kg_add` | `mempalace_create_tunnel` |
+| Drawer/KG checks for >1 entity/ID | `mempalace_get_drawers` + `mempalace_kg_query_many` (use singular only for one ID) | per-ID loops over `get_drawer` / `kg_query` |
+| Bulk filing/moves/deletes for >1 ID | `mempalace_add_drawers` / `mempalace_move_drawers` / `mempalace_delete_drawers` | one-call-per-ID loops |
 | Merge duplicate derived drawers | `mempalace_find_merge_candidates` → `mempalace_apply_merge` | Manual `kg_add` for merge edges |
 | Entity/fact assertion | `mempalace_kg_add` | `mempalace_create_tunnel` |
 | Cross-project/room navigation | `mempalace_create_tunnel` | `mempalace_add_drawer` + `mempalace_kg_add` (lineage creation) |
@@ -194,6 +201,20 @@ Do not mix these roles.
 Hard rule: `mempalace_create_tunnel` is for navigation only. It does not create
 synthesis lineage and will not be used by synthesis DAG traversal, merge canonicalization,
 or scoped synthesis retrieval.
+
+---
+
+Deep-consolidation sequence (must follow in order):
+
+1. Discover/search: `search`, `list_drawers`, and `get_drawers` for >1 ID (use `get_drawer` only for one ID).
+2. Synthesize: `add_drawer`/`add_drawers` + `kg_add` (`synthesized-from`) for accepted synthesis.
+3. Merge review: `find_merge_candidates` then `apply_merge`.
+4. Drift evidence + repair plan: `kg_query_many` for batch edge checks, recursive `kg_query` for lineage walks, then `find_closet_lineage_issues` (read-only).
+5. Repair execution (after review): run `/consolidate --reconsolidate <closetIds>` dry-run first, then apply; use `kg_invalidate`/`kg_supersede` for edge/fact retirement as needed.
+
+Raw-vs-layered intake rule for consolidation:
+- `--all-raw` = full-scope intake like `--all`, but process only raw/transcript-class sources.
+- `--reconsolidate <ids>` = rebuild from listed closets' `synthesized-from` parents; not a full-scope intake mode.
 
 ---
 

@@ -9,6 +9,7 @@ import {
   type MemgraphClientOptions,
   type MemgraphToolMap,
   type SkillDomain,
+  type SourceDrawerClass,
   type SourceDrawerWorkItem,
   type ToolCaller,
 } from "./memgraph-structure.ts";
@@ -22,7 +23,7 @@ import {
   uniqueFromFactsByDirection,
 } from "./memgraph-transport.ts";
 
-import type { KGQueryArgs, MemgraphInternals } from "./memgraph-internals.ts";
+import type { KGQueryArgs, KGQueryManyArgs, MemgraphInternals } from "./memgraph-internals.ts";
 
 import * as lineage from "../capability/episodic/memgraph-lineage.ts";
 import * as drawers from "./memgraph-drawers.ts";
@@ -46,6 +47,7 @@ export {
   type MemgraphClientOptions,
   type MemgraphToolMap,
   type SkillDomain,
+  type SourceDrawerClass,
   type SourceDrawerWorkItem,
   type ToolCaller,
 } from "./memgraph-structure.ts";
@@ -130,6 +132,7 @@ export class MemgraphClient {
       invoke: (name, args) => self.invoke(name, args),
       call: (name, args) => self.call(name, args),
       kgQuery: (args) => self.kgQuery(args),
+      kgQueryMany: (args) => self.kgQueryMany(args),
       kgQueryIgnoringFailure: (args, reason) => self.kgQueryIgnoringFailure(args, reason),
       callIgnoringFailure: (name, args, reason) => self.callIgnoringFailure(name, args, reason),
     };
@@ -187,6 +190,27 @@ export class MemgraphClient {
     return message.includes("-32602") || message.includes("unknown parameter");
   }
 
+  private isUnknownToolError(err: unknown, toolName: string): boolean {
+    const message = String(err || "").toLowerCase();
+    const normalizedTool = toolName.trim().toLowerCase();
+    if (!message || !normalizedTool) return false;
+    const unavailable =
+      message.includes("unknown tool")
+      || message.includes("tool not found")
+      || message.includes("unrecognized tool")
+      || message.includes("no such tool")
+      || message.includes("method not found")
+      || message.includes("not allowed");
+    return unavailable && message.includes(normalizedTool);
+  }
+
+  private chunkItems<T>(items: readonly T[], size = 500): T[][] {
+    if (items.length === 0) return [];
+    const out: T[][] = [];
+    for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+    return out;
+  }
+
   /**
    * Current MemPalace `kg_query` supports server-side `predicate` filtering and
    * recursive traversal (`recurse` / `max_depth`); see `mcp_server.py`'s
@@ -240,6 +264,47 @@ export class MemgraphClient {
     // callers like `isSourceDrawerConsolidated` treat as a match.
     const facts = parseKgFacts(result).filter((fact) => asString(fact.predicate).trim() === predicate);
     return { ...result, facts, count: facts.length };
+  }
+
+  async kgQueryMany(args: KGQueryManyArgs): Promise<Record<string, JsonMap>> {
+    const entities = [...new Set((args.entities || []).map((entity) => asString(entity).trim()).filter(Boolean))];
+    if (entities.length === 0) return {};
+
+    const wireArgs: JsonMap = {
+      entities,
+      direction: args.direction || "both",
+      recurse: Boolean(args.recurse),
+      max_depth: typeof args.max_depth === "number" ? args.max_depth : 20,
+    };
+    if (args.as_of) wireArgs.as_of = args.as_of;
+    if (args.predicate) wireArgs.predicate = args.predicate;
+
+    try {
+      const bulk = await this.call("kgQueryMany", wireArgs);
+      const byEntity = bulk && typeof bulk === "object" && bulk.results && typeof bulk.results === "object"
+        ? (bulk.results as Record<string, unknown>)
+        : {};
+      const out: Record<string, JsonMap> = {};
+      for (const entity of entities) {
+        const payload = byEntity[entity];
+        out[entity] = payload && typeof payload === "object" ? (payload as JsonMap) : {};
+      }
+      return out;
+    } catch (err) {
+      if (!this.isUnknownToolError(err, this.tools.kgQueryMany)) throw err;
+      const out: Record<string, JsonMap> = {};
+      for (const entity of entities) {
+        out[entity] = await this.kgQuery({
+          entity,
+          as_of: args.as_of,
+          direction: args.direction,
+          predicate: args.predicate,
+          recurse: args.recurse,
+          max_depth: args.max_depth,
+        });
+      }
+      return out;
+    }
   }
 
   // ── Static members: closed vocabularies / predicate names (unchanged API) ──
@@ -369,6 +434,59 @@ export class MemgraphClient {
     return drawers.addDrawer(this.core, args);
   }
 
+
+  addDrawers(args: {
+    items: Array<{
+      wing: string;
+      room: string;
+      content: string;
+      source_file?: string;
+      metadata?: Record<string, unknown>;
+    }>;
+    added_by?: string;
+  }) {
+    const items = Array.isArray(args.items) ? args.items : [];
+    if (items.length === 0) return Promise.resolve({ results: [], count: 0, errors: 0 });
+
+    const run = async (): Promise<JsonMap> => {
+      const mergedResults: unknown[] = [];
+      let totalErrors = 0;
+      for (const chunk of this.chunkItems(items, 500)) {
+        const res = await drawers.addDrawers(this.core, { items: chunk, added_by: args.added_by });
+        const rows = Array.isArray(res.results) ? res.results : [];
+        mergedResults.push(...rows);
+        totalErrors += Number(res.errors || 0) || 0;
+      }
+      return {
+        results: mergedResults,
+        count: mergedResults.length,
+        errors: totalErrors,
+      };
+    };
+
+    return run().catch(async (err) => {
+      if (!this.isUnknownToolError(err, this.tools.addDrawers)) throw err;
+      const results: unknown[] = [];
+      let errors = 0;
+      for (const item of items) {
+        try {
+          const out = await drawers.addDrawer(this.core, {
+            wing: asString(item.wing),
+            room: asString(item.room),
+            content: asString(item.content),
+            source_file: asString(item.source_file),
+            added_by: asString(args.added_by),
+          });
+          results.push(out);
+        } catch (e) {
+          errors += 1;
+          results.push({ error: String(e) });
+        }
+      }
+      return { results, count: results.length, errors };
+    });
+  }
+
   checkpoint(args: {
     items: Array<{
       wing: string;
@@ -480,12 +598,162 @@ export class MemgraphClient {
     return drawers.getDrawer(this.core, args);
   }
 
+  getDrawers(args: {
+    drawer_ids: string[];
+  }) {
+    const drawerIds = [...new Set((args.drawer_ids || []).map((id) => asString(id).trim()).filter(Boolean))];
+    if (drawerIds.length === 0) return Promise.resolve({ results: [], count: 0, errors: 0 });
+
+    const run = async (): Promise<JsonMap> => {
+      const merged: unknown[] = [];
+      let errors = 0;
+      for (const chunk of this.chunkItems(drawerIds, 500)) {
+        const res = await drawers.getDrawers(this.core, { drawer_ids: chunk });
+        const rows = Array.isArray(res.results) ? res.results : [];
+        merged.push(...rows);
+        errors += Number(res.errors || 0) || 0;
+      }
+      return { results: merged, count: merged.length, errors };
+    };
+
+    return run().catch(async (err) => {
+      if (!this.isUnknownToolError(err, this.tools.getDrawers)) throw err;
+      const results: unknown[] = [];
+      let errors = 0;
+      for (const drawerId of drawerIds) {
+        try {
+          results.push(await drawers.getDrawer(this.core, { drawer_id: drawerId }));
+        } catch (e) {
+          errors += 1;
+          results.push({ drawer_id: drawerId, error: String(e) });
+        }
+      }
+      return { results, count: results.length, errors };
+    });
+  }
+
+  moveDrawers(args: {
+    drawer_ids: string[];
+    target_wing?: string;
+    target_room?: string;
+  }) {
+    const drawerIds = [...new Set((args.drawer_ids || []).map((id) => asString(id).trim()).filter(Boolean))];
+    if (drawerIds.length === 0) return Promise.resolve({ results: [], count: 0, moved: 0, errors: 0 });
+
+    const run = async (): Promise<JsonMap> => {
+      const merged: unknown[] = [];
+      let moved = 0;
+      let errors = 0;
+      for (const chunk of this.chunkItems(drawerIds, 500)) {
+        const res = await drawers.moveDrawers(this.core, {
+          drawer_ids: chunk,
+          target_wing: args.target_wing,
+          target_room: args.target_room,
+        });
+        const rows = Array.isArray(res.results) ? res.results : [];
+        merged.push(...rows);
+        moved += Number(res.moved || 0) || 0;
+        errors += Number(res.errors || 0) || 0;
+      }
+      return { results: merged, count: merged.length, moved, errors };
+    };
+
+    return run().catch(async (err) => {
+      if (!this.isUnknownToolError(err, this.tools.moveDrawers)) throw err;
+      const results: unknown[] = [];
+      let moved = 0;
+      let errors = 0;
+      for (const drawerId of drawerIds) {
+        try {
+          const current = await drawers.getDrawer(this.core, { drawer_id: drawerId });
+          const currentWing = asString(current.wing).trim();
+          const currentRoom = asString(current.room).trim();
+          const targetWing = asString(args.target_wing).trim() || currentWing;
+          const targetRoom = asString(args.target_room).trim() || currentRoom;
+          const out = await drawers.updateDrawer(this.core, {
+            drawer_id: drawerId,
+            wing: targetWing || undefined,
+            room: targetRoom || undefined,
+          });
+          moved += 1;
+          results.push({
+            drawer_id: drawerId,
+            moved_ids: Array.isArray(out.chunk_ids) ? out.chunk_ids : [drawerId],
+            wing: asString(out.wing).trim() || targetWing || currentWing || undefined,
+            room: asString(out.room).trim() || targetRoom || currentRoom || undefined,
+          });
+        } catch (e) {
+          errors += 1;
+          results.push({ drawer_id: drawerId, error: String(e) });
+        }
+      }
+      return { results, count: results.length, moved, errors };
+    });
+  }
+
+  deleteDrawers(args: {
+    drawer_ids: string[];
+  }) {
+    const drawerIds = [...new Set((args.drawer_ids || []).map((id) => asString(id).trim()).filter(Boolean))];
+    if (drawerIds.length === 0) return Promise.resolve({ results: [], count: 0, deleted: 0, errors: 0 });
+
+    const run = async (): Promise<JsonMap> => {
+      const merged: unknown[] = [];
+      let deleted = 0;
+      let errors = 0;
+      for (const chunk of this.chunkItems(drawerIds, 500)) {
+        const res = await drawers.deleteDrawers(this.core, { drawer_ids: chunk });
+        const rows = Array.isArray(res.results) ? res.results : [];
+        merged.push(...rows);
+        deleted += Number(res.deleted || 0) || 0;
+        errors += Number(res.errors || 0) || 0;
+      }
+      return { results: merged, count: merged.length, deleted, errors };
+    };
+
+    return run().catch(async (err) => {
+      if (!this.isUnknownToolError(err, this.tools.deleteDrawers)) throw err;
+      const results: unknown[] = [];
+      let deleted = 0;
+      let errors = 0;
+      for (const drawerId of drawerIds) {
+        try {
+          const out = await this.call("deleteDrawer", { drawer_id: drawerId });
+          if (out && out.success === true) {
+            deleted += 1;
+            results.push({
+              drawer_id: drawerId,
+              deleted_ids: Array.isArray(out.deleted_ids) ? out.deleted_ids : [drawerId],
+              chunks_deleted: Number(out.chunks_deleted || 0) || 0,
+              closets_deleted: Number(out.closets_deleted || 0) || 0,
+            });
+          } else {
+            errors += 1;
+            results.push({ drawer_id: drawerId, error: asString(out.error).trim() || "delete_drawer failed" });
+          }
+        } catch (e) {
+          errors += 1;
+          results.push({ drawer_id: drawerId, error: String(e) });
+        }
+      }
+      return { results, count: results.length, deleted, errors };
+    });
+  }
+
   listSourceDrawersByScope(args: ListSourceScopeArgs): Promise<SourceDrawerWorkItem[]> {
     return listSourceDrawersByScope(this.core, args);
   }
 
   findUnconsolidatedSourceDrawers(args: ListSourceScopeArgs): Promise<SourceDrawerWorkItem[]> {
     return findUnconsolidatedSourceDrawers(this.core, args);
+  }
+
+  getSourceDrawerClass(drawerId: string): Promise<SourceDrawerClass> {
+    return lineage.getSourceDrawerClass(this.core, drawerId);
+  }
+
+  hasLineagePath(sourceId: string, targetId: string, maxDepth = 20): Promise<boolean> {
+    return lineage.hasLineagePath(this.core, sourceId, targetId, maxDepth);
   }
 
   // ── es-* axes + cross-type edge reads (capability/episodic) ────────────────

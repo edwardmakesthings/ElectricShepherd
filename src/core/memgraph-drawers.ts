@@ -25,6 +25,20 @@ export function addDrawer(core: MemgraphInternals, args: {
   return core.call("addDrawer", args as unknown as JsonMap);
 }
 
+export function addDrawers(core: MemgraphInternals, args: {
+  items: Array<{
+    wing: string;
+    room: string;
+    content: string;
+    source_file?: string;
+    metadata?: Record<string, unknown>;
+  }>;
+  added_by?: string;
+}) {
+  return core.call("addDrawers", args as unknown as JsonMap);
+}
+
+
 export function checkpoint(core: MemgraphInternals, args: {
   items: Array<{
     wing: string;
@@ -156,5 +170,25 @@ export function getDrawer(core: MemgraphInternals, args: {
   drawer_id: string;
 }) {
   return core.call("getDrawer", args as unknown as JsonMap);
+}
+
+export function getDrawers(core: MemgraphInternals, args: {
+  drawer_ids: string[];
+}) {
+  return core.call("getDrawers", args as unknown as JsonMap);
+}
+
+export function moveDrawers(core: MemgraphInternals, args: {
+  drawer_ids: string[];
+  target_wing?: string;
+  target_room?: string;
+}) {
+  return core.call("moveDrawers", args as unknown as JsonMap);
+}
+
+export function deleteDrawers(core: MemgraphInternals, args: {
+  drawer_ids: string[];
+}) {
+  return core.call("deleteDrawers", args as unknown as JsonMap);
 }
 

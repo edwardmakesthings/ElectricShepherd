@@ -21,10 +21,19 @@ export type KGQueryArgs = {
   max_depth?: number;
 };
 
+export type KGQueryManyArgs = {
+  entities: string[];
+  as_of?: string;
+  direction?: "incoming" | "outgoing" | "both";
+  predicate?: string;
+  recurse?: boolean;
+  max_depth?: number;
+};
 export interface MemgraphInternals {
   invoke(name: keyof MemgraphToolMap | string, args: JsonMap | undefined): Promise<SubstrateResult<JsonMap>>;
   call(name: keyof MemgraphToolMap, args?: JsonMap): Promise<JsonMap>;
   kgQuery(args: KGQueryArgs): Promise<JsonMap>;
+  kgQueryMany(args: KGQueryManyArgs): Promise<Record<string, JsonMap>>;
   kgQueryIgnoringFailure(args: KGQueryArgs, reason: string): Promise<JsonMap>;
   callIgnoringFailure(name: keyof MemgraphToolMap, args: JsonMap | undefined, reason: string): Promise<JsonMap>;
 }

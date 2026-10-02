@@ -12,7 +12,19 @@
 
 import type { MemgraphInternals } from "../../core/memgraph-internals.ts";
 import { addDrawer } from "../../core/memgraph-drawers.ts";
-import { asString, uniq } from "../../core/memgraph-transport.ts";
+import { asString, sourceTypeFromFacts, uniq } from "../../core/memgraph-transport.ts";
+
+
+async function sourceTypeByDrawerId(core: MemgraphInternals, drawerId: string) {
+  const result = await core.kgQueryIgnoringFailure({
+    entity: drawerId,
+    direction: "outgoing",
+    predicate: "es-source-type",
+    recurse: false,
+    max_depth: 1,
+  }, `createDerivedDrawer(${drawerId}) source-type read failure degrades to unstamped`);
+  return sourceTypeFromFacts(result);
+}
 
 export async function createDerivedDrawer(core: MemgraphInternals, args: {
   wing: string;
@@ -51,6 +63,23 @@ export async function createDerivedDrawer(core: MemgraphInternals, args: {
       add_result: addResult,
     };
   }
+  const subjectSourceType = await sourceTypeByDrawerId(core, id);
+  if (subjectSourceType && subjectSourceType !== "synthesis") {
+    return {
+      success: false,
+      drawer_id: id,
+      node_id: id,
+      lineage_edges_added: 0,
+      lineage_errors: [
+        `synthesized-from edge ${id} -> *: rejected: subject raw/source-type=${subjectSourceType}`,
+      ],
+      add_result: addResult,
+    };
+  }
+  // Guard: a subject stamped raw by category must never author synthesized-from edges.
+  // We fail closed here (no lineage writes) and surface the violation to callers.
+
+
 
   const lineageErrors: string[] = [];
   let lineageEdgesAdded = 0;
