@@ -289,6 +289,8 @@ is one `kg_invalidate {subject, predicate, object}` — no drawer content is eve
 
 ## Memory layers — where to write
 
+The live consolidation CLI uses the existing logical parent plus authoritative physical chunk IDs as coverage units, never message offsets. Multiple topical closets retain exact contributing chunk evidence. Complete extraction checkpoints alone are not `consolidated-into` evidence: source completion requires every topic write and lineage edge verified, with zero-substance spans explicitly accounted. Legacy parent edges do not certify coverage; missing coverage preserves old closets. Ambiguous drawer-write outcomes block for manual reconciliation, never blind duplicate writes. Live mapper output must parse as whole JSON, without nested-object/prose recovery or destination-search fallback. See `docs/chunk-aware-consolidation.md` for retry and completion semantics.
+
 | Tier | Room convention | Tool |
 |---|---|---|
 | raw transcripts | default `source-transcripts` room in the project wing (configurable via source-capture room / consolidation `--room`; legacy setups may use `transcripts`) | `add_drawer` by the capture pipeline only — never hand-write, never edit; append-only source |

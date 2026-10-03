@@ -267,7 +267,8 @@ Two invariants follow:
   recording, and merge application all preview their exact edges and apply only on explicit
   approval. Outcomes in particular are human-authoritative: test failures and reviewer
   verdicts are *evidence*, never writers.
-- **Mapper attribution is explicit per drawer.** A live mapper summary only counts when it names an assigned `transcriptId`; unmapped IDs are not implicitly credited from batch context, and remain retryable (`mapper-unmapped`).
+- **Live mapping is chunk-aware and multi-topic.** The CLI discovers physical chunk IDs from the logical drawer, sequentially extracts complete assessments, and creates separate topical closets with exact parent/chunk evidence. Legacy parent edges do not certify full coverage. [Coverage checkpoints](docs/chunk-aware-consolidation.md) preserve verified write IDs for retry; completion/retirement wait for every required chunk and topic.
+- **Live mapper JSON is all-or-nothing.** Malformed outer JSON is rejected even if it contains valid inner summaries; prose recovery is manual-only. Ambiguous drawer-write responses require manual reconciliation, never blind duplicate retries.
 - **Reconsolidation is parent-driven and explicit.** `--reconsolidate <closetId[,closetId...]>` retires listed closets (on apply), invalidates old lineage edges, and rebuilds only from those closets' `synthesized-from` parents.
 - **Raw vs layered intake is classifier-driven.** Source class comes from `es-source-type` plus outgoing `synthesized-from`: only `transcript` is raw; `note|doc|synthesis` are layered; any outgoing `synthesized-from` also classifies as layered. `skill` and unknown source types are excluded from source intake. Transcript drawers must not have outgoing `synthesized-from` (if found, warn + exclude), and raw drawers terminate via `consolidated-into`. Consolidation batches are homogeneous by class (raw-only or layered-only).
 

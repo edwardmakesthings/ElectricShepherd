@@ -100,6 +100,24 @@ test("inflation guard admits a single substantive source", async () => {
   assert.equal(result.inflationGuard.passed, true, JSON.stringify(result.inflationGuard.reasons));
 });
 
+const withSections = (sections) => ({ transcriptId: "raw-x", confidence: "high", durableFacts: [], decisions: [],
+  rootCausesAndWorkedExamples: [], subsystemsAndFiles: [], openItems: [], ...sections });
+const longFact = "ElectricShepherd keeps source drawers until every replacement closet verifies exact lineage and content, so a facts-only finding is still a meaningful durable record.";
+test("a facts-only topic with one substantive section passes the default guard", async () => {
+  const result = await runSynthesisConsolidation(stubClient(), { ...baseOptions, mapperSummaries: [withSections({ durableFacts: [longFact] })] });
+  assert.equal(result.inflationGuard.passed, true, JSON.stringify(result.inflationGuard.reasons));
+});
+test("names-only or empty content is refused even with default minimum 1", async () => {
+  for (const sections of [{}, { subsystemsAndFiles: ["src/a.ts", "src/b.ts"], openItems: [longFact] }]) {
+    const result = await runSynthesisConsolidation(stubClient(), { ...baseOptions, mapperSummaries: [withSections(sections)] });
+    assert.equal(result.inflationGuard.passed, false);
+  }
+});
+test("an explicit --min-section-count of 3 is still enforced", async () => {
+  const result = await runSynthesisConsolidation(stubClient(), { ...baseOptions, minimumPopulatedSections: 3, mapperSummaries: [withSections({ durableFacts: [longFact] })] });
+  assert.equal(result.inflationGuard.passed, false);
+  assert.ok(result.inflationGuard.reasons.some((r) => /3 populated/.test(r)));
+});
 test("inflation guard still enforces a caller-supplied distinct-source minimum", async () => {
   const result = await runSynthesisConsolidation(stubClient(), {
     ...baseOptions,

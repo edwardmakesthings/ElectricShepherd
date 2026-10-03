@@ -21,6 +21,9 @@ export type WorklistOptions = {
   retryFailedOnly: boolean;
   moveAlreadyConsolidated: boolean;
   reconsolidateClosetIds: string[];
+  /** Read-only smoke: process exactly this parent (never combined with --apply). */
+  onlyDrawerId?: string;
+  checkpointDirectory?: string;
 };
 
 export type MemcoreApplyOptions = {
@@ -134,7 +137,7 @@ export function parseConsolidationOptions(argv: string[], runtimeConfig: ReturnT
     searchLimit: Number(getArg(argv, "--search-limit") || runtimeConfig.valuesByPath.consolidation?.searchLimit || "12"),
     minimumDistinctSources: Number(getArg(argv, "--min-sources") || "1"),
     minimumContentCharacters: Number(getArg(argv, "--min-content-chars") || "220"),
-    minimumPopulatedSections: Number(getArg(argv, "--min-section-count") || "3"),
+    minimumPopulatedSections: Number(getArg(argv, "--min-section-count") || "1"),
     minimumMapperConfidence: (getArg(argv, "--mapper-confidence-floor") as "high" | "medium" | "low" | undefined) || "medium",
     labels: parseCSV(getArg(argv, "--labels")),
     writeDurableFactsToKg: !hasFlag(argv, "--no-kg-durable-facts"),
@@ -152,6 +155,9 @@ export function parseWorklistOptions(argv: string[], runtimeConfig: ReturnType<t
   }
   if (allRawMode && reconsolidateClosetIds.length > 0) {
     throw new Error("--all-raw cannot be combined with --reconsolidate");
+  }
+  if (getArg(argv, "--only-drawer") && (hasFlag(argv, "--apply") || reconsolidateClosetIds.length > 0 || allMode || allRawMode)) {
+    throw new Error("--only-drawer is read-only: it cannot be combined with --apply, --reconsolidate or --all modes");
   }
   const limit = Number(getArg(argv, "--worklist-limit") || getArg(argv, "--search-limit") || "200");
   const batchSize = Math.max(1, Number(getArg(argv, "--batch-size") || "1"));
@@ -173,6 +179,8 @@ export function parseWorklistOptions(argv: string[], runtimeConfig: ReturnType<t
     retryFailedOnly,
     moveAlreadyConsolidated,
     reconsolidateClosetIds,
+    onlyDrawerId: getArg(argv, "--only-drawer") || undefined,
+    checkpointDirectory: getArg(argv, "--checkpoint-dir") || undefined,
   };
 }
 
@@ -259,7 +267,7 @@ export function usage(): string {
     "  --search-limit <n>",
     "  --min-sources <n>",
     "  --min-content-chars <n>",
-    "  --min-section-count <n>",
+    "  --min-section-count <n>        (default 1; at least one finding section is always required)",
     "  --mapper-confidence-floor <high|medium|low>",
     "  --mapper-summaries-file <path-to-json-array>",
     "  --use-live-mapper                (invoke dream-mapper via opencode run)",

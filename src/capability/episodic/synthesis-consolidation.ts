@@ -405,6 +405,8 @@ function buildConsolidationDraft(args: {
   deadEnds: string[];
   contentCharacters: number;
   populatedSectionCount: number;
+  /** Sections that carry findings (facts, decisions, root causes, dead ends). Names-only subsystems/open items never count. */
+  substantiveSectionCount: number;
 } {
   const durableFacts = uniqSorted(args.summaries.flatMap((s) => s.durableFacts));
   const decisions = uniqSorted(args.summaries.flatMap((s) => s.decisions));
@@ -416,6 +418,7 @@ function buildConsolidationDraft(args: {
   const deadEnds = [...new Set(args.summaries.flatMap((s) => (s.deadEnds || []).map((line) => line.trim()).filter(Boolean)))];
 
   const populatedSectionCount = [durableFacts, decisions, rootCauses, subsystems, openItems].filter((s) => s.length > 0).length;
+  const substantiveSectionCount = [durableFacts, decisions, rootCauses, deadEnds].filter((s) => s.length > 0).length;
   const title = chooseTitle(decisions, durableFacts, args.query);
 
   const contentParts: string[] = [
@@ -454,6 +457,7 @@ function buildConsolidationDraft(args: {
     deadEnds,
     contentCharacters: contentParts.join("\n").length,
     populatedSectionCount,
+    substantiveSectionCount,
   };
 }
 
@@ -461,6 +465,7 @@ function evaluateInflationGuard(args: {
   sourceDrawerIds: string[];
   contentCharacters: number;
   populatedSectionCount: number;
+  substantiveSectionCount: number;
   minimumDistinctSources: number;
   minimumContentCharacters: number;
   minimumPopulatedSections: number;
@@ -474,6 +479,10 @@ function evaluateInflationGuard(args: {
   }
   if (args.populatedSectionCount < args.minimumPopulatedSections) {
     reasons.push(`requires at least ${args.minimumPopulatedSections} populated consolidation sections`);
+  }
+  // Whatever the configured minimum, at least one section must hold a real finding.
+  if (args.substantiveSectionCount < 1) {
+    reasons.push("requires at least 1 substantive section (facts, decisions, root causes or dead ends)");
   }
   return {
     passed: reasons.length === 0,
@@ -509,17 +518,20 @@ export async function runSynthesisConsolidation(
   // content-length and populated-section checks.
   const minimumDistinctSources = Math.max(1, Number(options.minimumDistinctSources ?? 1));
   const minimumContentCharacters = Math.max(120, Number(options.minimumContentCharacters ?? 220));
-  const minimumPopulatedSections = Math.max(2, Number(options.minimumPopulatedSections ?? 3));
+  const minimumPopulatedSections = Math.max(1, Number(options.minimumPopulatedSections ?? 1));
   const applyWrites = Boolean(options.applyWrites);
   const writeDurableFactsToKg = options.writeDurableFactsToKg ?? true;
 
   let summaries: TranscriptInsightSummary[] = [];
   let usedProvidedMapperSummaries = false;
 
-  if (Array.isArray(options.mapperSummaries) && options.mapperSummaries.length > 0) {
+  const explicitEmptyInput = options.mapperSummaries?.length === 0 || options.rawEntries?.length === 0;
+  if (explicitEmptyInput) {
+    usedProvidedMapperSummaries = options.mapperSummaries !== undefined;
+  } else if (options.mapperSummaries !== undefined) {
     summaries = parseProvidedMapperSummaries(options.mapperSummaries);
     usedProvidedMapperSummaries = true;
-  } else if (Array.isArray(options.rawEntries) && options.rawEntries.length > 0) {
+  } else if (options.rawEntries !== undefined) {
     summaries = options.rawEntries.map((entry) => mapEntryToSummary(entry));
   } else {
     const searchLimit = Math.max(3, Number(options.searchLimit ?? 12));
@@ -537,6 +549,7 @@ export async function runSynthesisConsolidation(
     sourceDrawerIds,
     contentCharacters: consolidationDraft.contentCharacters,
     populatedSectionCount: consolidationDraft.populatedSectionCount,
+    substantiveSectionCount: consolidationDraft.substantiveSectionCount,
     minimumDistinctSources,
     minimumContentCharacters,
     minimumPopulatedSections,

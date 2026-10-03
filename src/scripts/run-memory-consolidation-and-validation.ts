@@ -1,4 +1,6 @@
 import { dirname, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createMemgraphClient, type SourceDrawerWorkItem } from "../core/memgraph.ts";
 // Substrate transport is constructed ONLY through the core/ seam (Check A2).
@@ -29,9 +31,10 @@ import {
   type CadenceState,
 } from "./memory-pipeline/cli-options.ts";
 import {
-  callSubagentMapper, callSubagentAuditor, resolveSubagentTimeoutMs, resolveSubagentRunner,
+  callSubagentAuditor, runSubagent, formatPromptModelArg, resolveSubagentTimeoutMs, resolveSubagentRunner,
   type MapperEnvelope, type AuditorEnvelope,
 } from "./memory-pipeline/subagent.ts";
+import { runChunkConsolidation, type ChunkConsolidationOutcome } from "./memory-pipeline/chunk-consolidation.ts";
 import {
   chunkHomogeneousWorklist, ensureRawEntriesForChunk,
   getFamilyDrawerIds, buildReconsolidateWorklist, parseDrawerPayload, postConsolidationMoves, moveAllToRoom, partitionChunk,
@@ -254,6 +257,30 @@ async function main(): Promise<void> {
   const cadenceOptions = parseCadenceOptions(argv, consolidationOptions);
   const worklistOptions = parseWorklistOptions(argv, runtimeConfig);
   const memcoreApply = parseMemcoreApply(argv);
+  const readOnlyRoute = Boolean(worklistOptions.onlyDrawerId);
+  if (readOnlyRoute) process.env.ESHEPHERD_SOURCE_CAPTURE_ENABLED = "false";
+  const READ_ONLY_TOOLS = ["get_drawer", "get_drawers", "kg_query", "kg_query_many", "list_drawers", "search", "status"];
+  const readOnlyGuard = { allowed: [] as string[], blocked: [] as string[] };
+  const guardTool = (name: string) => {
+    if (!readOnlyRoute) return;
+    if (!READ_ONLY_TOOLS.some((base) => name === base || name.endsWith(`_${base}`) || name.endsWith(`-${base}`))) {
+      readOnlyGuard.blocked.push(name);
+      throw new Error(`read-only-route-blocked-tool:${name}`);
+    }
+    readOnlyGuard.allowed.push(name);
+  };
+  // Cover raw transport consumers (including triage) as well as Memgraph calls.
+  const guardTransport = (transport: Awaited<ReturnType<typeof createSubstrateClient>>["client"]) =>
+    !readOnlyRoute ? transport : new Proxy(transport, {
+      get(target, key) {
+        if (key === "callTool" || key === "callToolResult") return (name: string, args?: Record<string, any>) => {
+          guardTool(name);
+          return target[key](name, args);
+        };
+        const value = Reflect.get(target, key);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
 
   const discoveredMCP = mcpAutoDiscover ? discoverLiveMCPConfig(process.env, pythonBin) : undefined;
   if (!(process.env.MEMPALACE_MCP_BEARER_TOKEN || "").trim() && discoveredMCP?.bearerToken) {
@@ -282,7 +309,7 @@ async function main(): Promise<void> {
 
   // Construct through the core/ seam (Check A2): owns transport + initialize and
   // resolves headers per effective URL (loopback stays unauthenticated).
-  const { client: readMCP } = await createSubstrateClient({
+  const { client: readTransport } = await createSubstrateClient({
     env: process.env,
     clientName: "electric-shepherd-memory-system",
     urlOverride: readMCPURL,
@@ -291,10 +318,11 @@ async function main(): Promise<void> {
     retryBackoffMs: mcpHttpOptions.retryBackoffMs,
     retryMaxBackoffMs: mcpHttpOptions.retryMaxBackoffMs,
   });
+  const readMCP = guardTransport(readTransport);
 
   const writeMCP =
     writeMCPURL === readMCPURL
-      ? readMCP
+      ? readTransport
       : (
           await createSubstrateClient({
             env: process.env,
@@ -306,10 +334,18 @@ async function main(): Promise<void> {
             retryMaxBackoffMs: mcpHttpOptions.retryMaxBackoffMs,
           })
         ).client;
+  const guardedWriteMCP = guardTransport(writeMCP);
 
+  // Non-idempotent drawer creation must not be retried invisibly by transport.
+  const { client: drawerTransport } = await createSubstrateClient({
+    env: process.env, clientName: "electric-shepherd-topic-writes", urlOverride: readMCPURL,
+    requestTimeoutMs: mcpHttpOptions.requestTimeoutMs, maxRetries: 0,
+  });
+  const drawerWriteMCP = guardTransport(drawerTransport);
   const client = createMemgraphClient({
-    callTool: (name, args) =>
-      (isGraphWriteToolName(name) ? writeMCP : readMCP).callToolResult(name, args),
+    callTool: (name, args) => {
+      return (name.endsWith("add_drawer") ? drawerWriteMCP : isGraphWriteToolName(name) ? guardedWriteMCP : readMCP).callToolResult(name, args);
+    },
     toolPrefix,
   });
 
@@ -420,9 +456,12 @@ async function main(): Promise<void> {
     : worklistOptions.batchSize;
   const worklistMode = hasReconsolidateMode ? "reconsolidate" : worklistOptions.mode;
   let worklist: SourceDrawerWorkItem[] = [];
-  if (includeBasePipeline && !hasReconsolidateMode) {
+  if (includeBasePipeline && worklistOptions.onlyDrawerId) {
+    worklist = [{ drawer_id: worklistOptions.onlyDrawerId, source_class: "raw", wing: consolidationOptions.targetWing, room: worklistOptions.sourceRoom }];
+  } else if (includeBasePipeline && !hasReconsolidateMode) {
     const sourceRoom = worklistOptions.retryFailedOnly ? worklistOptions.failedRoom : worklistOptions.sourceRoom;
-    worklist = enumerateAll
+    // Live coverage must not inherit a legacy parent-only consolidated-into edge.
+    worklist = enumerateAll || !hasFlag(argv, "--no-live-mapper")
       ? await client.listSourceDrawersByScope({
           wing: consolidationOptions.targetWing,
           room: sourceRoom,
@@ -590,6 +629,12 @@ async function main(): Promise<void> {
     // The live mapper is therefore the default; --no-live-mapper keeps the
     // heuristic path for plain-text drawers and offline runs.
     const useLiveMapper = !hasFlag(argv, "--no-live-mapper");
+    const mapperAgent = getArg(argv, "--mapper-agent") || "dream-mapper";
+    const mapperDefinition = resolve(esRoot, "agents", `${mapperAgent}.md`);
+    const mapperPromptHash = createHash("sha256").update(existsSync(mapperDefinition) ? readFileSync(mapperDefinition) : mapperAgent).digest("hex");
+    const chunkCoverage: ChunkConsolidationOutcome[] = [];
+    const visitedLiveParents = new Set<string>();
+    (worklistOutput as Record<string, unknown>).chunkCoverage = chunkCoverage;
     const movedToProcessed: Array<{ drawer_id: string; family_drawer_ids: string[]; reason: string }> = [];
     const movedToFailed: Array<{ drawer_id: string; family_drawer_ids: string[]; reason: string }> = [];
     const moveErrors: Array<{ drawer_id: string; phase: "processed" | "failed"; error: string }> = [];
@@ -705,6 +750,53 @@ async function main(): Promise<void> {
         (sourceId, targetId) => client.hasLineagePath(sourceId, targetId),
       );
       for (const chunkBatch of chunkBatches) {
+      if (useLiveMapper) {
+        for (const item of chunkBatch) {
+          if (visitedLiveParents.has(item.drawer_id)) continue;
+          const result = await runChunkConsolidation({
+            client, sourceId: item.drawer_id, options: { ...consolidationOptions, runId },
+            checkpointDirectory: resolve(worklistOptions.checkpointDirectory || ".electric-shepherd/coverage"),
+            extractorVersion: JSON.stringify({ contract: "physical-chunk-topics-v8", model: mapperModel,
+              agent: mapperAgent, promptHash: mapperPromptHash }),
+            reducerVersion: JSON.stringify({ contract: "topic-reconciliation-v4", model: mapperModel,
+              agent: mapperAgent, promptHash: mapperPromptHash }),
+            mapChunk: async (prompt, identity) => {
+              if (!subagentRunner) throw new Error("mapper-unavailable");
+              return runSubagent({ runner: subagentRunner, esRoot, mapperRuntime: true,
+                agentName: getArg(argv, "--mapper-agent") || "dream-mapper",
+                modelArg: formatPromptModelArg(mapperModel), prompt, timeoutMs: subagentTimeoutMs,
+                keepSession: keepMapperSessions, sessionTitle: `es-mapper ${runId} ${identity.chunkId}` });
+            },
+            reconcileTopic: async (prompt, identity) => {
+              if (!subagentRunner) throw new Error("reducer-unavailable");
+              return runSubagent({ runner: subagentRunner, esRoot, mapperRuntime: true, agentName: mapperAgent,
+                modelArg: formatPromptModelArg(mapperModel), prompt, timeoutMs: subagentTimeoutMs,
+                keepSession: keepMapperSessions, sessionTitle: `es-reconcile ${runId} ${identity.topicKey} ${identity.stepIndex}` });
+            },
+          });
+          for (const id of result.familyIds) visitedLiveParents.add(id);
+          chunkCoverage.push(result);
+          mapperBatches.push({ summaries: result.reconciliation?.topics.map(({ topic }) => ({ ...topic, transcriptId: result.parentDrawerId })) || [],
+            unmappedTranscriptIds: result.reconciliation?.reconciliationComplete ? [] : [result.parentDrawerId],
+            raw: { extraction: result.extraction, reconciliation: result.reconciliation, error: result.error }, via: subagentRunner ? `${subagentRunner.kind}-run` : "none" });
+          consolidationBatches.push(...result.drafts);
+          const coveredItem = { ...item, drawer_id: result.parentDrawerId, family_drawer_ids: result.familyIds };
+          if (!consolidationOptions.applyWrites) continue;
+          if (!result.completed) {
+            for (const id of result.familyIds) allSkipped.push({ drawer_id: id, reason: result.error || "chunk-coverage-incomplete" });
+            trackReconsolidationOutcome([coveredItem], "failed");
+            continue;
+          }
+          const moveOutcome = await moveAllToRoom({ client, actionable: [coveredItem], chunkIndex,
+            totalChunks: worklistChunks.length, targetRoom: worklistOptions.processedRoom,
+            targetWing: consolidationOptions.targetWing, reason: result.replacementCoverage ? "chunk-coverage-verified" : "complete-no-substance" });
+          movedToProcessed.push(...moveOutcome.moved);
+          moveErrors.push(...moveOutcome.moveErrors);
+          trackReconsolidationOutcome([coveredItem], result.replacementCoverage && moveOutcome.moveErrors.length === 0 ? "covered" : "failed");
+          flushRunProgress({ phase: "chunk-coverage-verified", processedCount: movedToProcessed.length });
+        }
+        continue;
+      }
       flushRunProgress(
         {
           phase: "chunk-processing",
@@ -742,52 +834,12 @@ async function main(): Promise<void> {
         `[memory-consolidation-validation] chunk ${chunkIndex + 1}/${worklistChunks.length} actionable=${actionable.length}\n`,
       );
 
-      let chunkMapper: MapperEnvelope | undefined;
-
-      if (useLiveMapper) {
-        chunkMapper = await callSubagentMapper({
-          toolPrefix,
-          // callTool unwraps to the tool payload; callToolResult would hand back a
-          // SubstrateResult envelope that drawerContentFrom cannot read.
-          readTool: (name, toolArgs) => readMCP.callTool(name, toolArgs),
-          mapperAgentName: getArg(argv, "--mapper-agent") || "dream-mapper",
-          activeModel: mapperModel,
-          query: consolidationOptions.query,
-          wing: consolidationOptions.targetWing,
-          room: worklistOptions.retryFailedOnly ? worklistOptions.failedRoom : worklistOptions.sourceRoom,
-          worklistIds: actionable.map((item) => item.drawer_id),
-          runner: subagentRunner!,
-          esRoot,
-          timeoutMs: subagentTimeoutMs,
-          keepSession: keepMapperSessions,
-          sessionLabel: `${runId} chunk ${chunkIndex + 1}/${worklistChunks.length}`,
-        });
-        mapperBatches.push(chunkMapper);
-      }
-
-      const { entries: rawEntries, skipped: chunkSkipped } = await ensureRawEntriesForChunk(client, actionable);
-      if (chunkSkipped.length > 0) allSkipped.push(...chunkSkipped);
-      const unmappedIds = [...new Set(chunkMapper?.unmappedTranscriptIds || [])];
-      const skippedUnmapped = new Set(unmappedIds);
-      const filteredRawEntries = rawEntries.filter((entry) => !skippedUnmapped.has(entry.id));
-      const actionableForMoves = actionable.filter((item) => {
-        const familyIds = getFamilyDrawerIds(item);
-        return familyIds.some((drawerId) => !skippedUnmapped.has(drawerId));
-      });
-      const actionableUnmapped = actionable.filter((item) => {
-        const familyIds = getFamilyDrawerIds(item);
-        return familyIds.every((drawerId) => skippedUnmapped.has(drawerId));
-      });
-      if (useLiveMapper && unmappedIds.length > 0) {
-        for (const drawerId of unmappedIds) allSkipped.push({ drawer_id: drawerId, reason: "mapper-unmapped" });
-        process.stderr.write(
-          `[memory-consolidation-validation] chunk ${chunkIndex + 1}/${worklistChunks.length} mapper-unmapped=${unmappedIds.length} skipped-from-synthesis\n`,
-        );
-      }
-
+      // Non-live/manual mode retains heuristic input, never full chunk coverage.
+      const actionableForMoves = actionable;
+      const { entries: filteredRawEntries, skipped: chunkSkipped } = await ensureRawEntriesForChunk(client, actionable);
+      allSkipped.push(...chunkSkipped);
       const chunkConsolidation = await runSynthesisConsolidation(client, {
         ...consolidationOptions,
-        mapperSummaries: chunkMapper && chunkMapper.summaries.length > 0 ? chunkMapper.summaries : undefined,
         rawEntries: filteredRawEntries,
         runId,
       });
@@ -809,45 +861,18 @@ async function main(): Promise<void> {
 
       const createdNodeId = asString(chunkConsolidation.createdNodeId).trim();
       if (!createdNodeId) {
-        // A mapper that never answered says nothing about these drawers -- they
-        // were not examined, so quarantining them records a data failure for a
-        // tooling one and hides them from every later run. Leave them where they
-        // are; the next pass with a working mapper picks them up.
-        if (useLiveMapper && chunkMapper?.via === "none") {
-          for (const item of actionableForMoves) {
-            allSkipped.push({ drawer_id: item.drawer_id, reason: "mapper-unavailable" });
-          }
-          process.stderr.write(
-            `[memory-consolidation-validation] chunk ${chunkIndex + 1}/${worklistChunks.length} left in place count=${actionableForMoves.length} reason=mapper-unavailable\n`,
-          );
-          flushRunProgress({ phase: "chunk-left-in-place-mapper-unavailable" });
-          continue;
-        }
-
         // No node is not automatically a failure. If the inflation guard refused
         // the draft, the transcript simply had nothing worth synthesizing: that
         // is a processed drawer with zero syntheses, and re-running it would
         // refuse identically forever. Only a node missing despite a passing
         // guard means the tools failed, which is what the failed room is for.
         const noSubstance = !chunkConsolidation.inflationGuard.passed;
-        const noMappedEntries = filteredRawEntries.length === 0;
         const moveOutcome = await moveAllToRoom({
           client, actionable: actionableForMoves, chunkIndex, totalChunks: worklistChunks.length,
           targetRoom: noSubstance ? worklistOptions.processedRoom : worklistOptions.failedRoom,
           targetWing: consolidationOptions.targetWing,
-          reason: noSubstance ? "no-substance" : noMappedEntries ? "mapper-unmapped" : "no-created-node",
+          reason: noSubstance ? "no-substance" : "no-created-node",
         });
-        if (actionableUnmapped.length > 0) {
-          const unmappedMoves = await moveAllToRoom({
-            client, actionable: actionableUnmapped, chunkIndex, totalChunks: worklistChunks.length,
-            targetRoom: worklistOptions.failedRoom,
-            targetWing: consolidationOptions.targetWing,
-            reason: "mapper-unmapped",
-          });
-          movedToFailed.push(...unmappedMoves.moved);
-          moveErrors.push(...unmappedMoves.moveErrors);
-          trackReconsolidationOutcome(actionableUnmapped, "failed");
-        }
         if (noSubstance) {
           movedToProcessed.push(...moveOutcome.moved);
           // No replacement closet was created, so reconsolidation parents are not covered.
@@ -882,21 +907,11 @@ async function main(): Promise<void> {
       movedToProcessed.push(...postMoves.movedToProcessed);
       movedToFailed.push(...postMoves.movedToFailed);
       moveErrors.push(...postMoves.moveErrors);
-      trackReconsolidationMoves(postMoves.movedToProcessed, "covered");
+      // Heuristic/manual mapping does not establish physical chunk replacement coverage.
+      trackReconsolidationMoves(postMoves.movedToProcessed, "failed");
       trackReconsolidationMoves(postMoves.movedToFailed, "failed");
       if (postMoves.moveErrors.length > 0) {
         trackReconsolidationMoves(postMoves.moveErrors.map((entry) => ({ drawer_id: entry.drawer_id, family_drawer_ids: [entry.drawer_id] })), "failed");
-      }
-      if (actionableUnmapped.length > 0) {
-        const unmappedMoves = await moveAllToRoom({
-          client, actionable: actionableUnmapped, chunkIndex, totalChunks: worklistChunks.length,
-          targetRoom: worklistOptions.failedRoom,
-          targetWing: consolidationOptions.targetWing,
-          reason: "mapper-unmapped",
-        });
-        movedToFailed.push(...unmappedMoves.moved);
-        trackReconsolidationOutcome(actionableUnmapped, "failed");
-        moveErrors.push(...unmappedMoves.moveErrors);
       }
       flushRunProgress(
         { phase: "chunk-post-verify" },
@@ -922,10 +937,11 @@ async function main(): Promise<void> {
         summaries: mergedSummaries,
         unmappedTranscriptIds: mergedUnmapped,
         raw: mapperBatches.map((batch) => batch.raw),
-        via: mapperBatches.some((batch) => batch.via === "opencode-run") ? "opencode-run" : "none",
+        via: mapperBatches.find((batch) => batch.via !== "none")?.via || "none",
       };
     }
 
+    if (readOnlyRoute) (worklistOutput as Record<string, unknown>).readOnlyGuard = { ...readOnlyGuard, writeAttempts: readOnlyGuard.blocked.length };
     (worklistOutput as Record<string, unknown>).moves = {
       processed: movedToProcessed,
       failed: movedToFailed,
@@ -964,7 +980,7 @@ async function main(): Promise<void> {
     client,
     consolidationOptions,
     runtimeConfig,
-    memcoreApply,
+    memcoreApply: readOnlyRoute ? { ...memcoreApply, enabled: false } : memcoreApply,
     memcoreMinFactHeight,
     consolidation,
     validationMergeReview,

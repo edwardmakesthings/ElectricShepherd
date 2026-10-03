@@ -10,8 +10,9 @@
 
 import type { MemgraphInternals } from "../../core/memgraph-internals.ts";
 import { parseKgFacts, uniqueFromFactsByDirection, vocabValuesFromFacts } from "../../core/memgraph-transport.ts";
+import { logicalParentDrawerId } from "../../core/drawer-metadata.ts";
 
-/** Count a closet's DIRECT sources via its outgoing one-hop synthesized-from edges. */
+/** Count distinct direct source parents; chunk evidence from one parent is one source. */
 export async function countDirectSources(core: MemgraphInternals, closetId: string): Promise<number> {
   // Degrade to "no direct sources" on read failure (logged).
   const result = await core.kgQueryIgnoringFailure({
@@ -21,8 +22,20 @@ export async function countDirectSources(core: MemgraphInternals, closetId: stri
     recurse: false,
     max_depth: 1,
   }, `countDirectSources(${closetId}) read failure degrades to zero`);
-  return uniqueFromFactsByDirection(parseKgFacts(result), "outgoing")
-    .filter((id) => id !== closetId).length;
+  const facts = parseKgFacts(result);
+  const sources = uniqueFromFactsByDirection(facts, "outgoing").filter((id) => id !== closetId);
+  const parents = new Set<string>();
+  try {
+    for (const id of sources) {
+      const drawer = await core.call("getDrawer", { drawer_id: id });
+      if (drawer.drawer_id !== id) throw new Error(`Missing source drawer ${id}`);
+      parents.add(logicalParentDrawerId(drawer.metadata) || id);
+    }
+  } catch (error) {
+    console.warn(`[memgraph] countDirectSources(${closetId}) parent verification failed, degrading to zero: ${String(error)}`);
+    return 0;
+  }
+  return parents.size;
 }
 
 /** Read a closet's es-status. "provisional" | "active" | "unknown" (no stamp / legacy). */

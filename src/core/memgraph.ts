@@ -523,6 +523,7 @@ export class MemgraphClient {
     object: string;
     valid_from?: string;
     source_closet?: string;
+    source_drawer_id?: string;
     // Provenance — the run_id of the consolidation execution
     source_run_id?: string;
   }) {

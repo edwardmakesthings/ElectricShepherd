@@ -9,6 +9,8 @@ Scope: $ARGUMENTS (default: the current project's memory if no scope is given)
 
 Tool routing: follow the agent-discipline "MemPalace command routing matrix" already in your context for every memory operation (especially synthesis vs KG vs tunnel).
 
+Mapper safety: the live CLI uses authoritative physical chunk inventories and complete multi-topic JSON; malformed/truncated responses leave sources retryable, without search fallback. Topic evidence writes are verified before any `consolidated-into` completion edges. Extraction alone and legacy parent edges cannot certify source coverage or retire old closets. Ambiguous drawer writes block for manual reconciliation rather than blind retry. See `docs/chunk-aware-consolidation.md` before running or resuming.
+
 Discovery safety policy:
 - Use the BOUNDED batch discovery from `agents/dreamer.md`: one page, filter, begin.
 - Never issue broad wing-only `list_drawers` scans, and never page a room to exhaustion.

@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildSubagentArgs } from "../../src/scripts/memory-pipeline/subagent.ts";
+import { buildSubagentArgs, buildIsolatedSubagentEnv } from "../../src/scripts/memory-pipeline/subagent.ts";
 
 const omp = { kind: "omp", bin: "/home/u/.local/bin/omp" };
 const opencode = { kind: "opencode", bin: "/home/u/.opencode/bin/opencode" };
+test("mapper isolation explicitly disables capture even when the host enables it", () => {
+  const env = buildIsolatedSubagentEnv({ ESHEPHERD_SOURCE_CAPTURE_ENABLED: "true" });
+  assert.equal(env.ESHEPHERD_SOURCE_CAPTURE_ENABLED, "false");
+  assert.equal(env.ESHEPHERD_SUBAGENT_RUN, "1");
+});
 
 // Default stays ephemeral: 26 chunks would otherwise leave 26 session files per
 // run, so retention is opt-in.
@@ -37,9 +42,12 @@ test("opencode never receives a --no-session flag it does not support", () => {
   }
 });
 
-test("opencode titles the session only when retention is requested", () => {
-  assert.ok(!buildSubagentArgs({ runner: opencode, prompt: "p", sessionTitle: "t" }).includes("--title"));
-  assert.ok(buildSubagentArgs({ runner: opencode, prompt: "p", keepSession: true, sessionTitle: "t" }).includes("--title"));
+test("opencode titles persisted sessions independently of retention", () => {
+  for (const keepSession of [undefined, false, true]) {
+    const argv = buildSubagentArgs({ runner: opencode, prompt: "p", keepSession, sessionTitle: "es-mapper run-1 chunk 3/26" });
+    assert.deepEqual(argv.slice(argv.indexOf("--title"), argv.indexOf("--title") + 2), ["--title", "es-mapper run-1 chunk 3/26"]);
+  }
+  assert.ok(!buildSubagentArgs({ runner: opencode, prompt: "p" }).includes("--title"));
 });
 
 // The internal routing format (formatPromptModelArg) is always comma-joined;

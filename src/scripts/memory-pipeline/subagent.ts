@@ -2,14 +2,17 @@
  * Subagent invocation helpers (mapper + auditor) for the consolidation pipeline.
  * Extracted from run-memory-consolidation-and-validation.ts (criterion 2).
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { drawerContentFrom, scratchFileNameFor } from "../../core/palace-tools.ts";
 import type { TranscriptInsightSummary } from "../../capability/episodic/synthesis-consolidation.ts";
 import { asObject, asArray, asString, parsePositiveInt } from "./cli-options.ts";
 import type { PromptModelRouting } from "./runtime-utils.ts";
+import { parseCompleteJSON } from "./complete-json.ts";
+import { ompCompletionText } from "./omp-completion.ts";
 
 /** Which CLI drives a one-shot subagent, and the absolute binary to invoke. */
 export type SubagentRunner = {
@@ -94,16 +97,7 @@ export function parseEmbeddedJSON(text: string, accept: (value: unknown) => bool
   return undefined;
 }
 
-/**
- * Parse the mapper's SECTION format into summaries.
- *
- * `agents/dream-mapper.md` specifies markdown sections (DURABLE_FACTS,
- * DECISIONS, ...) while the task prompt asks for a JSON array. The agent's own
- * system prompt wins, so a mapper that follows its definition emitted prose the
- * JSON parser could not read — and the pipeline recorded that as every drawer
- * failing. Accepting both shapes removes the contract mismatch as a failure mode
- * regardless of which instruction the model follows.
- */
+/** Legacy/manual SECTION parser; live extraction requires complete JSON. */
 export function parseMapperSections(text: string, transcriptIds: readonly string[]): TranscriptInsightSummary[] {
   const clean = text.replace(ANSI_ESCAPE_PATTERN, "");
   const idSet = new Set(transcriptIds.map((id) => id.trim()).filter(Boolean));
@@ -243,6 +237,7 @@ export function buildIsolatedSubagentEnv(env: NodeJS.ProcessEnv): NodeJS.Process
     // plugin no-op, which also stops a subagent pass re-entering capture and
     // consolidation -- the guarantee `--no-extensions` gives on the omp side.
     ESHEPHERD_SUBAGENT_RUN: "1",
+    ESHEPHERD_SOURCE_CAPTURE_ENABLED: "false",
     ESHEPHERD_MEMCORE_REINJECT_ENABLED: "false",
     ESHEPHERD_MEMCORE_REINJECT_ON_IDLE: "false",
     ESHEPHERD_MEMCORE_REINJECT_ON_START: "false",
@@ -331,6 +326,8 @@ export type SubagentInvocation = {
   modelArg?: string;
   prompt: string;
   esRoot?: string;
+  /** Enable mapper-only request budget and authoritative OMP completion events. */
+  mapperRuntime?: boolean;
   /** Keep the pass as a readable harness session instead of an ephemeral one. */
   keepSession?: boolean;
   /** Session title when kept, so a run's passes are identifiable in a session list. */
@@ -340,28 +337,24 @@ export type SubagentInvocation = {
 /** Build the harness CLI argv for one subagent pass. Exported for tests. */
 export function buildSubagentArgs(args: SubagentInvocation, promptFile?: string): string[] {
   if (args.runner.kind === "omp") {
-    // omp has no --agent for a top-level run (agents are `task` subagents), so the
-    // agent definition rides in as an appended system prompt. Extensions stay off
-    // so a subagent pass cannot re-enter Electric Shepherd and recursively trigger
-    // capture/consolidation.
+    // Discovery stays disabled; the mapper's explicit hook only adjusts its request budget.
     const argv = ["-p", args.prompt, "--no-extensions", "--auto-approve"];
-    // omp writes the session JSONL when the run exits, not while it streams, so
-    // keeping it buys a transcript per completed pass — not a live feed.
+    if (args.mapperRuntime) argv.push("--mode", "json", "--extension",
+      fileURLToPath(new URL("./omp-mapper-runtime.mjs", import.meta.url)));
     if (args.keepSession) {
       if (args.sessionTitle) argv.push("--title", args.sessionTitle);
     } else {
       argv.push("--no-session", "--no-title");
     }
-    if (promptFile) argv.push(`--append-system-prompt=${promptFile}`);
+    if (promptFile) argv.push("--append-system-prompt=" + promptFile);
     if (args.modelArg) argv.push("--model", args.modelArg.replace(",", "/"));
     return argv;
   }
 
-  // `opencode run` has no --no-session: it always persists. Only the title is
-  // ours to set, so keepSession just makes the session findable.
+  // OpenCode always persists sessions; title them independently of retention.
   const argv = ["run", args.prompt];
   if (args.runner.standalone) argv.push("--standalone");
-  if (args.keepSession && args.sessionTitle) argv.push("--title", args.sessionTitle);
+  if (args.sessionTitle) argv.push("--title", args.sessionTitle);
   if (args.agentName) argv.push("--agent", args.agentName);
   // opencode's --model also wants provider/model, same rewrite as omp above —
   // the internal routing format (formatPromptModelArg) is comma-joined for both.
@@ -399,12 +392,27 @@ export function runSubagent(args: SubagentInvocation & { timeoutMs: number }): s
       : undefined;
   const commandArgs = buildSubagentArgs(args, promptFile);
 
+  if (args.mapperRuntime && args.runner.kind === "omp") {
+    const startedAt = Date.now();
+    const result = spawnSync(args.runner.bin, commandArgs, {
+      encoding: "utf8", timeout: args.timeoutMs, maxBuffer: 16 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "pipe"], env: buildIsolatedSubagentEnv(process.env),
+    });
+    // Only forward the explicit hook's allowlisted metadata, never raw provider/config output.
+    for (const line of (result.stderr || "").split("\n")) {
+      if (line.startsWith("[eshepherd-mapper-runtime] ")) process.stderr.write(line + "\n");
+    }
+    process.stderr.write("[eshepherd-mapper-runtime] " + JSON.stringify({ event: "process",
+      status: result.status, signal: result.signal, durationMs: Date.now() - startedAt,
+      stdoutPresent: Boolean(result.stdout), stdoutBytes: Buffer.byteLength(result.stdout || "") }) + "\n");
+    if (result.error || result.status !== 0) throw new Error("mapper-process-failed");
+    return ompCompletionText(result.stdout, (record) => {
+      process.stderr.write("[eshepherd-mapper-runtime] " + JSON.stringify(record) + "\n");
+    });
+  }
   return execFileSync(args.runner.bin, commandArgs, {
-    encoding: "utf8",
-    timeout: args.timeoutMs,
-    maxBuffer: 2 * 1024 * 1024,
-    stdio: ["ignore", "pipe", "pipe"],
-    env: buildIsolatedSubagentEnv(process.env),
+    encoding: "utf8", timeout: args.timeoutMs, maxBuffer: 2 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"], env: buildIsolatedSubagentEnv(process.env),
   });
 }
 
@@ -494,6 +502,7 @@ export async function callSubagentMapper(args: {
 }): Promise<MapperEnvelope> {
   const getDrawerTool = `${args.toolPrefix}get_drawer`;
   const orderedIds = args.worklistIds.filter(Boolean);
+  if (orderedIds.length === 0) return { summaries: [], unmappedTranscriptIds: [], raw: null, via: "none" };
   const serializedIds = orderedIds.join(", ");
   const exported = args.readTool
     ? await exportWorklistTranscripts({
@@ -507,7 +516,7 @@ export async function callSubagentMapper(args: {
       ? [
           "Each transcript has ALREADY been exported to a local file. Read only these files, in this exact order:",
           ...exported.map((item) => `- transcriptId '${item.drawerId}' -> ${item.filePath}`),
-          "These are large single-line JSON session transcripts. Call file-reader_info first for size, then page with file-reader_json_session_extract_messages (start_index/limit). Never read a whole file in one call.",
+          "Call file-reader_info first for size. For valid session JSON, page with file-reader_json_session_extract_messages (start_index/limit). Non-session text and character-split fragments are legitimate sources: page those with file-reader_lines or file-reader_bytes instead. Never assume a fragment is parseable message JSON.",
           `Do NOT call ${getDrawerTool}, search, or any other MemPalace tool. The files are the complete source.`,
         ]
       : [
@@ -555,8 +564,14 @@ export async function callSubagentMapper(args: {
       return orderedIds.filter((id) => !mappedSet.has(id));
     };
 
-    const parsedJSON = parseEmbeddedJSON(output, (value) => toSummaryFromRaw(value).length > 0);
-    if (parsedJSON) {
+    // The live mapper contract is complete JSON, not recoverable fragments or prose.
+    let parsedJSON: unknown;
+    try {
+      parsedJSON = parseCompleteJSON(output, 64_000);
+    } catch {
+      parsedJSON = undefined;
+    }
+    if (Array.isArray(parsedJSON)) {
       const summaries = toSummaryFromRaw(parsedJSON)
         .filter((summary) => requestedSet.has(asString(summary.transcriptId).trim()));
       if (summaries.length > 0) {
@@ -570,18 +585,6 @@ export async function callSubagentMapper(args: {
           via: `${args.runner.kind}-run` as SubagentVia,
         };
       }
-    }
-    const sectionSummaries = parseMapperSections(output, orderedIds);
-    if (sectionSummaries.length > 0) {
-      process.stderr.write(
-        `[memory-consolidation-validation] mapper ${args.runner.kind}-run done summaries=${sectionSummaries.length} format=sections durationMs=${Date.now() - startedAt}\n`,
-      );
-      return {
-        summaries: sectionSummaries,
-        unmappedTranscriptIds: unmappedFrom(mappedIdsFrom(sectionSummaries)),
-        raw: output,
-        via: `${args.runner.kind}-run` as SubagentVia,
-      };
     }
     const debugPath = `${SUBAGENT_DEBUG_DIR}/mapper-${Date.now()}.txt`;
     try {
