@@ -9,7 +9,7 @@ Scope: $ARGUMENTS (default: the current project's memory if no scope is given)
 
 Tool routing: follow the agent-discipline "MemPalace command routing matrix" already in your context for every memory operation (especially synthesis vs KG vs tunnel).
 
-Mapper safety: the live CLI uses authoritative physical chunk inventories and complete multi-topic JSON; malformed/truncated responses leave sources retryable, without search fallback. Topic evidence writes are verified before any `consolidated-into` completion edges. Extraction alone and legacy parent edges cannot certify source coverage or retire old closets. Ambiguous drawer writes block for manual reconciliation rather than blind retry. See `docs/chunk-aware-consolidation.md` before running or resuming.
+Mapper safety: live mapper/reducer return drawer-ready prose or Markdown, without required JSON/headings, confidence or structured task ledgers. Host-owned sequential batches, atomic raw-text caches and conservative PRIMARY provenance establish processing coverage, not accuracy or protection against invented tasks. Tools are disabled and unexpected tool events rejected. At most one inference retry follows a known transport/timeout, empty output or authoritative length/error failure within the run deadline. No uncertain palace write is retried. Full coverage, substantive text, verified content and lineage precede completion/retirement. Empty source/output cannot establish replacement coverage. See `docs/chunk-aware-consolidation.md`; no bulk-readiness claim.
 
 Discovery safety policy:
 - Use the BOUNDED batch discovery from `agents/dreamer.md`: one page, filter, begin.

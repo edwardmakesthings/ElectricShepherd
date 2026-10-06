@@ -5,6 +5,7 @@
 import { existsSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import type { SynthesisConsolidationOptions, SynthesisConsolidationResult } from "../../capability/episodic/synthesis-consolidation.ts";
+import type { RawDrawerDraft } from "./chunk-consolidation.ts";
 import type { ValidationMergeReviewResult } from "../../policy/validation-merge-review.ts";
 import type { AuditorEnvelope } from "./subagent.ts";
 import { asObject, asArray, asString, type MemcoreApplyOptions } from "./cli-options.ts";
@@ -136,7 +137,7 @@ export async function fetchHighHeightFacts(
  */
 export function buildMemcoreMarkdown(args: {
   query: string;
-  consolidation: SynthesisConsolidationResult;
+  consolidation: SynthesisConsolidationResult | RawDrawerDraft;
   validation: ValidationMergeReviewResult;
   auditor?: AuditorEnvelope;
   sourceDescriptions?: Record<string, string>;
@@ -155,7 +156,9 @@ export function buildMemcoreMarkdown(args: {
   const maxFacts = Math.max(1, Number(args.maxFactsPerSection) || 8);
   const runId = asString(args.consolidation.runId).trim();
   const runPointer = runId ? `.electric-shepherd/journal/${runId}.jsonl` : "(none)";
-  const draftTitle = pointerDescription(args.consolidation.consolidationDraft.title, "latest synthesis");
+  const structured = "consolidationDraft" in args.consolidation ? args.consolidation.consolidationDraft : undefined;
+  const draftTitle = pointerDescription(structured?.title, structured ? "latest synthesis" : "latest raw-text synthesis");
+  const rawUnavailable = ["- Not extracted from raw text; read the latest synthesis pointer."];
   const sourceDescriptions = args.sourceDescriptions || {};
   const verdictByNode = new Map(args.validation.downwardValidation.map((item) => [item.nodeId, item.verdict]));
   const createdNodePointers = args.consolidation.createdNodeId ? [args.consolidation.createdNodeId] : [];
@@ -168,7 +171,7 @@ export function buildMemcoreMarkdown(args: {
   const auditorPointer = args.auditor ? `available in run trace (via=${args.auditor.via})` : "(not-run)";
 
   const highHeightFacts = args.highHeightFacts || [];
-  const projectStateFacts = highHeightFacts.length > 0 ? highHeightFacts : args.consolidation.consolidationDraft.durableFacts || [];
+  const projectStateFacts = highHeightFacts.length > 0 ? highHeightFacts : structured?.durableFacts || [];
 
   const lines: string[] = ["# Labeled memory blocks (always in context)", ""];
 
@@ -178,13 +181,13 @@ export function buildMemcoreMarkdown(args: {
       "",
       "## [project-state]",
       `- Latest synthesis: ${draftTitle}`,
-      ...factBullets(projectStateFacts, maxFacts),
+      ...(!structured && !projectStateFacts.length ? rawUnavailable : factBullets(projectStateFacts, maxFacts)),
       "",
       "## [active-conventions]",
-      ...factBullets(args.consolidation.consolidationDraft.decisions || [], maxFacts),
+      ...(structured ? factBullets(structured.decisions || [], maxFacts) : rawUnavailable),
       "",
       "## [open-items]",
-      ...factBullets(args.consolidation.consolidationDraft.openItems || [], maxFacts),
+      ...(structured ? factBullets(structured.openItems || [], maxFacts) : rawUnavailable),
       "",
     );
 
@@ -340,7 +343,7 @@ export async function renderAndApplyMemcore(params: {
   runtimeConfig: LoadedRuntimeConfig;
   memcoreApply: MemcoreApplyOptions;
   memcoreMinFactHeight: number;
-  consolidation: SynthesisConsolidationResult | undefined;
+  consolidation: SynthesisConsolidationResult | RawDrawerDraft | undefined;
   validationMergeReview: ValidationMergeReviewResult | undefined;
   validationSkippedReason: string | undefined;
   auditor: AuditorEnvelope | undefined;
@@ -389,7 +392,7 @@ export async function renderAndApplyMemcore(params: {
           client: params.client,
           wing: params.consolidationOptions.targetWing,
           room: params.consolidationOptions.targetRoom,
-          draftDeadEnds: params.consolidation.consolidationDraft.deadEnds || [],
+          draftDeadEnds: "consolidationDraft" in params.consolidation ? params.consolidation.consolidationDraft.deadEnds || [] : [],
           maxDeadEnds,
         })
       : [];

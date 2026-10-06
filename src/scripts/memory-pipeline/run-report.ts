@@ -9,6 +9,7 @@ import type { AuditorEnvelope, MapperEnvelope } from "./subagent.ts";
 import type { DiscoveredMCPConfig } from "./coordination.ts";
 import type { SourceDrawerWorkItem } from "../../core/memgraph.ts";
 import type { SynthesisConsolidationResult } from "../../capability/episodic/synthesis-consolidation.ts";
+import type { RawDrawerDraft } from "./chunk-consolidation.ts";
 import type { LoadedRuntimeConfig } from "../../core/runtime-config.ts";
 import type { CadenceOrchestratorResult } from "../../policy/cadence-orchestrator.ts";
 
@@ -21,7 +22,7 @@ type ConsolidationCoordMode = "native-queue" | "lockfile" | "bypassed";
 export async function emitRunCompletion(params: {
   startTime: number;
   worklist: SourceDrawerWorkItem[];
-  consolidationBatches: SynthesisConsolidationResult[];
+  consolidationBatches: Array<SynthesisConsolidationResult | RawDrawerDraft>;
   mapper: MapperEnvelope | undefined;
   auditor: AuditorEnvelope | undefined;
   allSkipped: Array<{ drawer_id: string; reason: string }>;
@@ -61,7 +62,7 @@ export async function emitRunCompletion(params: {
       // createdNodeCount is 0, and the refusal has to be recovered by reading
       // the guard's source rather than the run's own log.
       inflationGuardRefusals: params.consolidationBatches
-        .map((batch, index) => ({ index, reasons: batch?.inflationGuard?.reasons ?? [] }))
+        .map((batch, index) => ({ index, reasons: "inflationGuard" in batch ? batch.inflationGuard.reasons : [] }))
         .filter((entry) => entry.reasons.length > 0),
       skipped: params.allSkipped.length > 0 ? params.allSkipped : undefined,
       warnings: traceWarnings.length > 0 ? traceWarnings : undefined,

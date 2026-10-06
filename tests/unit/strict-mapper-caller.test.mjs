@@ -17,7 +17,7 @@ function runCaller(mode) {
     return JSON.parse(run.stdout.trim());
   } finally { rmSync(cwd, { recursive: true, force: true }); }
 }
-for (const mode of ["truncated", "trailing", "sections", "legacy"]) {
+for (const mode of ["length", "error", "done", "tool"]) {
   test(`actual CLI rejects ${mode} mapper output without writes or retirement`, () => {
     const result = runCaller(mode);
     for (const calls of Object.values(result.calls)) assert.deepEqual(calls, []);
@@ -26,7 +26,7 @@ for (const mode of ["truncated", "trailing", "sections", "legacy"]) {
     assert.deepEqual(result.worklistOutput.reconsolidationRetirementsSkipped[0].failedParentIds, ["parent_a", "parent_b"]);
   });
 }
-test("actual CLI accepts a complete chunk JSON assessment and preserves omitted parent", () => {
+test("actual CLI accepts natural drawer text and preserves unprocessed parent", () => {
   const result = runCaller("valid");
   assert.equal(result.calls.create.length, 1);
   assert.ok(result.calls.kg.some((edge) => edge.subject === "replacement" && edge.predicate === "synthesized-from" && edge.object === "parent_a"));

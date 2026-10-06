@@ -73,5 +73,5 @@ test("CLI partial mapping synthesizes/moves only mapped ids and blocks original 
   assert.deepEqual(result.calls.retire, []);
   assert.deepEqual(result.allSkipped.map((entry) => entry.drawer_id), ["parent_b"]);
   assert.deepEqual(result.worklistOutput.reconsolidationRetirementsSkipped[0].failedParentIds, ["parent_b"]);
-  assert.deepEqual(result.consolidationBatches[0].includedSummaryIds, ["parent_a"]);
+  assert.deepEqual(result.consolidationBatches[0].sourceDrawerIds, ["parent_a"]);
 });

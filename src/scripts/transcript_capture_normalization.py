@@ -1,5 +1,31 @@
 import json
 import re
+from datetime import datetime, timezone
+import math
+
+RUNTIME_POLICY_MARKERS = (
+    "[Memory Checkpoint]",
+    "[Auto-Retry Guard]",
+    "[Spiral Guard]",
+    "[Loop Guard]",
+    "[Mem-core Reinjection]",
+)
+
+
+# ECMAScript whitespace, shared behavior with TypeScript trimStart and /\s/u.
+POLICY_WHITESPACE = "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+
+
+def runtime_policy_kind(role: str, text: str):
+    if role != "user":
+        return None
+    value = text.lstrip(POLICY_WHITESPACE)
+    for marker in RUNTIME_POLICY_MARKERS:
+        if value.startswith(marker) and (
+            len(value) == len(marker) or value[len(marker)] in POLICY_WHITESPACE
+        ):
+            return marker
+    return None
 
 
 TRIMMED_CONTENT_MARKER = (
@@ -38,6 +64,39 @@ def _message_role_and_text_parts(message: dict) -> tuple:
     return role, []
 
 
+def _exported_time(info: dict) -> dict:
+    """OpenCode numeric clocks are Unix milliseconds; retain exported field meanings."""
+    if not isinstance(info, dict):
+        return {}
+    raw = info.get("time")
+    if not isinstance(raw, dict):
+        return {}
+    result = {}
+    for key in (
+        "created",
+        "updated",
+        "completed",
+        "streamed",
+        "idle",
+        "viewed",
+        "archived",
+    ):
+        value = raw.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if value < 0 or value > 253402300799999 or not math.isfinite(value):
+            continue
+        try:
+            result[key] = (
+                datetime.fromtimestamp(value / 1000, timezone.utc)
+                .isoformat(timespec="milliseconds")
+                .replace("+00:00", "Z")
+            )
+        except (ValueError, OverflowError, OSError):
+            continue
+    return result
+
+
 def normalize_capture_content(raw: str) -> str:
     text = raw.strip()
     if not text:
@@ -60,6 +119,7 @@ def normalize_capture_content(raw: str) -> str:
             role, parts = _message_role_and_text_parts(message)
 
             text_parts = []
+            original_text_parts = []
             for part in parts:
                 if not isinstance(part, dict):
                     continue
@@ -70,29 +130,33 @@ def normalize_capture_content(raw: str) -> str:
                 value = part.get("text")
                 if not isinstance(value, str):
                     continue
-                cleaned = trim_embedded_content(value.strip())
+                original_text_parts.append(value)
+                cleaned = trim_embedded_content(value.strip(POLICY_WHITESPACE))
                 if cleaned:
                     text_parts.append(cleaned)
 
             if not text_parts:
                 continue
 
-            compact_messages.append(
-                {
-                    "role": role,
-                    "text": "\n\n".join(text_parts),
-                }
-            )
+            if runtime_policy_kind(role, "\n\n".join(original_text_parts)):
+                continue
 
-    compact = {
-        "session": {
-            "id": session_info.get("id"),
-            "title": session_info.get("title"),
-            "directory": session_info.get("directory")
-            or (session_info.get("location") or {}).get("directory"),
-        },
-        "messages": compact_messages,
+            compact_message = {"role": role, "text": "\n\n".join(text_parts)}
+            time = _exported_time(message.get("info") or message)
+            if time:
+                compact_message["time"] = time
+            compact_messages.append(compact_message)
+
+    session = {
+        "id": session_info.get("id"),
+        "title": session_info.get("title"),
+        "directory": session_info.get("directory")
+        or (session_info.get("location") or {}).get("directory"),
     }
+    time = _exported_time(session_info)
+    if time:
+        session["time"] = time
+    compact = {"session": session, "messages": compact_messages}
     return json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
 
 

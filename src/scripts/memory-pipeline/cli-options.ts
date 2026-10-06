@@ -146,7 +146,24 @@ export function parseConsolidationOptions(argv: string[], runtimeConfig: ReturnT
   };
 }
 
+export function parseLocalTranscriptOptions(argv: string[]): { file: string; checkpointDirectory: string } | undefined {
+  if (!argv.includes("--local-transcript-file")) return;
+  const values = new Set(["--local-transcript-file", "--checkpoint-dir", "--run-timeout-ms", "--query", "--mapper-agent", "--subagent-bin", "--opencode-bin"]);
+  const switches = new Set(["--use-live-mapper", "--no-mem-core-auto", "--no-lock", "--no-native-coord"]);
+  const seen = new Set<string>();
+  for (let i = 0; i < argv.length; i++) {
+    const flag = argv[i];
+    if (seen.has(flag) || (!values.has(flag) && !switches.has(flag))) throw new Error("local-transcript-option-conflict:" + flag);
+    seen.add(flag);
+    if (values.has(flag) && (!argv[++i]?.trim() || argv[i].startsWith("--"))) throw new Error("local-transcript-missing-value:" + flag);
+  }
+  const checkpointDirectory = getArg(argv, "--checkpoint-dir");
+  if (!checkpointDirectory) throw new Error("local-transcript-requires-checkpoint-dir");
+  return { file: getArg(argv, "--local-transcript-file")!, checkpointDirectory };
+}
+
 export function parseWorklistOptions(argv: string[], runtimeConfig: ReturnType<typeof loadRuntimeConfig>): WorklistOptions {
+  parseLocalTranscriptOptions(argv);
   const allMode = hasFlag(argv, "--all") || hasFlag(argv, "--full-scope") || hasFlag(argv, "--reprocess-all");
   const allRawMode = hasFlag(argv, "--all-raw");
   const reconsolidateClosetIds = parseCSV(getArg(argv, "--reconsolidate"));
@@ -266,11 +283,14 @@ export function usage(): string {
     "Consolidation flags:",
     "  --search-limit <n>",
     "  --min-sources <n>",
-    "  --min-content-chars <n>",
-    "  --min-section-count <n>        (default 1; at least one finding section is always required)",
-    "  --mapper-confidence-floor <high|medium|low>",
+    "  --min-content-chars <n>          (legacy/manual structured route)",
+    "  --min-section-count <n>          (legacy/manual; default 1)",
+    "  --mapper-confidence-floor <high|medium|low> (legacy/manual)",
     "  --mapper-summaries-file <path-to-json-array>",
-    "  --use-live-mapper                (invoke dream-mapper via opencode run)",
+    "  --local-transcript-file <path>   (read-only normalized session; no palace connection; requires --checkpoint-dir)",
+    "  --checkpoint-dir <path>          (versioned local extraction/reduction evidence)",
+    "  --use-live-mapper                (tool-disabled raw-text route)",
+    "  --run-timeout-ms <n>             (raw route total deadline; default 1800000)",
     "  --mapper-agent <name>            (default: dream-mapper)",
     "  --all | --full-scope             (worklist mode: reprocess all source drawers in scope)",
     "  --all-raw                        (worklist mode: reprocess only raw/transcript-class source drawers in scope)",

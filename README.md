@@ -180,8 +180,20 @@ see the coupling; `verify:structural` link-checks every `.md` path mentioned in 
 ### Model selection
 
 No bundled agent pins a model or requires LiteLLM. Agents inherit the host's selected
-model; your same-name agent definitions can pin different models per role. Watchdog
-model replacement routes are unset until you configure them.
+model; your same-name agent definitions can pin different models per role. Consolidation
+uses `consolidation.mapperModel` when configured, otherwise the calling session's model.
+Headless runs without a selected model must configure `<provider>/<model>` explicitly;
+there is no automatic provider or paid-model fallback. Watchdog model replacement routes
+are unset until you configure them.
+
+Raw consolidation workers currently require an OpenAI-compatible chat-completions
+transport on a `/chat/completions` request path; unsupported protocols fail closed.
+The output budget defaults to the smallest
+of 8,192 tokens, the declared output limit and half the context window. Set
+`ESHEPHERD_MAPPER_OUTPUT_TOKENS` for a different budget within those model limits.
+OMP models must be declared in its `models.yml` with positive `maxTokens` and
+`contextWindow`; OpenCode uses the selected model's catalog/configured limits.
+Tool isolation and bounded retries are unchanged.
 
 `npm run opencode:agents` preserves installed customizations, including model pins.
 Only untouched files tracked by a hash manifest are updated or removed; legacy name-only
@@ -267,7 +279,7 @@ worklist, then calls the model per bounded step: categorize, summarize, judge a 
 The script writes; the model only judges.
 
 Every model call stays small and isolated, so a consolidation pass cannot fill its own
-context and compact before finishing. Consolidation runs against a local model, on a
+context and compact before finishing. Consolidation runs against your selected model, on a
 schedule.
 
 Two invariants follow:
@@ -279,8 +291,8 @@ Two invariants follow:
   recording, and merge application all preview their exact edges and apply only on explicit
   approval. Outcomes in particular are human-authoritative: test failures and reviewer
   verdicts are *evidence*, never writers.
-- **Live mapping is chunk-aware and multi-topic.** The CLI discovers physical chunk IDs from the logical drawer, sequentially extracts complete assessments, and creates separate topical closets with exact parent/chunk evidence. Legacy parent edges do not certify full coverage. [Coverage checkpoints](docs/chunk-aware-consolidation.md) preserve verified write IDs for retry; completion/retirement wait for every required chunk and topic.
-- **Live mapper JSON is all-or-nothing.** Malformed outer JSON is rejected even if it contains valid inner summaries; prose recovery is manual-only. Ambiguous drawer-write responses require manual reconciliation, never blind duplicate retries.
+- **Live mapping preserves drawer-ready text.** Bounded sequential PRIMARY batches return prose or Markdown without required headings, JSON, confidence or task ledgers. The host owns coverage and conservative batch provenance, not accuracy. One source-wide raw drawer is revised chronologically. [Contracts and limitations](docs/chunk-aware-consolidation.md) describe bounded retries and tool isolation.
+- **Inference retries are bounded, writes are not blindly retried.** At most one retry follows a known transport/timeout, empty output or authoritative length/error failure, within a shared run deadline. Useful normal-stop text is accepted as-is. Unexpected worker tools fail closed; uncertain drawer writes require manual reconciliation.
 - **Reconsolidation is parent-driven and explicit.** `--reconsolidate <closetId[,closetId...]>` retires listed closets (on apply), invalidates old lineage edges, and rebuilds only from those closets' `synthesized-from` parents.
 - **Raw vs layered intake is classifier-driven.** Source class comes from `es-source-type` plus outgoing `synthesized-from`: only `transcript` is raw; `note|doc|synthesis` are layered; any outgoing `synthesized-from` also classifies as layered. `skill` and unknown source types are excluded from source intake. Transcript drawers must not have outgoing `synthesized-from` (if found, warn + exclude), and raw drawers terminate via `consolidated-into`. Consolidation batches are homogeneous by class (raw-only or layered-only).
 

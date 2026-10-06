@@ -27,7 +27,7 @@
  *
  * Usage:
  *   node --experimental-strip-types src/scripts/benchmark-mapper-models.ts \
- *     --models litellm/general-gemma4:26b,litellm/implementer-gemma4-31b \
+ *     --models custom/fast-model,custom/accurate-model \
  *     --wing armet --room source-transcripts-failed --drawers 5 --repeats 3
  */
 

@@ -9,20 +9,18 @@ export type ConsolidationConfidence = "high" | "medium" | "low";
 /**
  * Structured transcript summary used as reduce input for synthesis creation.
  */
-export type TranscriptInsightSummary = {
+export type ClosetContentSummary = {
   transcriptId: string;
-  confidence: ConsolidationConfidence;
   durableFacts: string[];
   decisions: string[];
   rootCausesAndWorkedExamples: string[];
   subsystemsAndFiles: string[];
   openItems: string[];
-  // Negative knowledge: approaches tried-and-failed or considered-and-rejected,
-  // one line each with the outcome clause attached. Empty when nothing qualifies —
-  // mappers must not manufacture dead ends.
   deadEnds?: string[];
   rawExcerpt?: string;
 };
+/** Legacy/manual summaries retain their explicit confidence gate. */
+export type TranscriptInsightSummary = ClosetContentSummary & { confidence: ConsolidationConfidence };
 
 /**
  * Options for synthesis consolidation (map/reduce + inflation guard).
@@ -41,6 +39,8 @@ export type SynthesisConsolidationOptions = {
   writeDurableFactsToKg?: boolean;
   applyWrites?: boolean;
   mapperSummaries?: TranscriptInsightSummary[];
+  /** Validated content-only input; no model-confidence admission or semantic evaluation. */
+  contentSummaries?: ClosetContentSummary[];
   rawEntries?: Array<{ id: string; text: string }>;
   // Provenance — the run_id of the consolidation execution that produced this result
   runId?: string;
@@ -308,7 +308,7 @@ function normalizeHall(value: string | undefined): string | undefined {
   return undefined;
 }
 
-function inferHallFromSummary(summary: TranscriptInsightSummary): string {
+function inferHallFromSummary(summary: ClosetContentSummary): string {
   const lines = [
     ...summary.durableFacts,
     ...summary.decisions,
@@ -325,7 +325,7 @@ function inferHallFromSummary(summary: TranscriptInsightSummary): string {
 }
 
 function selectTargetHall(args: {
-  summaries: TranscriptInsightSummary[];
+  summaries: ClosetContentSummary[];
   labels?: string[];
   targetHall?: string;
 }): string {
@@ -355,7 +355,7 @@ function normalizePredicate(raw: string): string {
   return normalized.replace(/\s+/g, "-");
 }
 
-function extractDurableFactTriples(summaries: TranscriptInsightSummary[], fallbackSubject: string): DurableFactTriple[] {
+function extractDurableFactTriples(summaries: ClosetContentSummary[], fallbackSubject: string): DurableFactTriple[] {
   const out: DurableFactTriple[] = [];
   const seen = new Set<string>();
 
@@ -395,7 +395,7 @@ function chooseTitle(decisions: string[], durableFacts: string[], query: string)
 
 function buildConsolidationDraft(args: {
   query: string;
-  summaries: TranscriptInsightSummary[];
+  summaries: ClosetContentSummary[];
 }): {
   title: string;
   content: string;
@@ -524,9 +524,19 @@ export async function runSynthesisConsolidation(
 
   let summaries: TranscriptInsightSummary[] = [];
   let usedProvidedMapperSummaries = false;
-
+  if (options.contentSummaries !== undefined && (options.mapperSummaries !== undefined || options.rawEntries !== undefined)) {
+    throw new Error("content-summaries-cannot-mix-legacy-inputs");
+  }
   const explicitEmptyInput = options.mapperSummaries?.length === 0 || options.rawEntries?.length === 0;
-  if (explicitEmptyInput) {
+  if (options.contentSummaries !== undefined) {
+    if (!Array.isArray(options.contentSummaries) || options.contentSummaries.some((summary) =>
+      !summary || typeof summary.transcriptId !== "string" || !summary.transcriptId.trim() || Object.hasOwn(summary, "confidence") ||
+      (["durableFacts", "decisions", "rootCausesAndWorkedExamples", "subsystemsAndFiles", "openItems", "deadEnds"] as const).some((key) => {
+        const items = key === "deadEnds" && summary[key] === undefined ? [] : summary[key];
+        return !Array.isArray(items) || items.length > 8 || items.some((item) => typeof item !== "string" || !item.trim() || item.length > 300);
+      }))) throw new Error("invalid-content-summary");
+    usedProvidedMapperSummaries = true;
+  } else if (explicitEmptyInput) {
     usedProvidedMapperSummaries = options.mapperSummaries !== undefined;
   } else if (options.mapperSummaries !== undefined) {
     summaries = parseProvidedMapperSummaries(options.mapperSummaries);
@@ -538,9 +548,8 @@ export async function runSynthesisConsolidation(
     const searchResult = await client.search(query, searchLimit, targetWing, targetRoom);
     summaries = parseSearchItems(searchResult).map(mapEntryToSummary);
   }
-
-  const included = summaries.filter((summary) => confidenceAllows(summary.confidence, confidenceFloor));
-  const dropped = summaries.filter((summary) => !confidenceAllows(summary.confidence, confidenceFloor));
+  const included: ClosetContentSummary[] = options.contentSummaries ?? summaries.filter((summary) => confidenceAllows(summary.confidence, confidenceFloor));
+  const dropped = options.contentSummaries !== undefined ? [] : summaries.filter((summary) => !confidenceAllows(summary.confidence, confidenceFloor));
 
   const sourceDrawerIds = uniqSorted([...included.map((summary) => summary.transcriptId), ...(options.rawEntries || []).map((entry) => asString(entry.id).trim()).filter(Boolean)]);
   const consolidationDraft = buildConsolidationDraft({ query, summaries: included });

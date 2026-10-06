@@ -34,7 +34,9 @@ import {
   callSubagentAuditor, runSubagent, formatPromptModelArg, resolveSubagentTimeoutMs, resolveSubagentRunner,
   type MapperEnvelope, type AuditorEnvelope,
 } from "./memory-pipeline/subagent.ts";
-import { runChunkConsolidation, type ChunkConsolidationOutcome } from "./memory-pipeline/chunk-consolidation.ts";
+import { runLocalTranscript } from "./memory-pipeline/local-transcript-run.ts";
+import { parseLocalTranscriptOptions } from "./memory-pipeline/cli-options.ts";
+import { runChunkConsolidation, type ChunkConsolidationOutcome, type RawDrawerDraft } from "./memory-pipeline/chunk-consolidation.ts";
 import {
   chunkHomogeneousWorklist, ensureRawEntriesForChunk,
   getFamilyDrawerIds, buildReconsolidateWorklist, parseDrawerPayload, postConsolidationMoves, moveAllToRoom, partitionChunk,
@@ -145,8 +147,17 @@ async function main(): Promise<void> {
   const runId = "eshepherd-" + new Date().toISOString().replace(/[:.]/g, "-").slice(0, 17) + "-" + Math.random().toString(36).slice(2, 6);
 
   const argv = process.argv.slice(2);
+  const runDeadlineMs = startTime + parsePositiveInt(getArg(argv, "--run-timeout-ms"), 1800000);
+  const useLiveMapper = !hasFlag(argv, "--no-live-mapper");
   if (hasFlag(argv, "--help") || hasFlag(argv, "-h")) {
     process.stdout.write(`${usage()}\n`);
+    return;
+  }
+  const localInput = parseLocalTranscriptOptions(argv);
+  if (localInput) {
+    const output = await runLocalTranscript({ ...localInput, argv, runtimeConfig, runId, deadlineMs: runDeadlineMs,
+      esRoot: resolve(dirname(fileURLToPath(import.meta.url)), "..", "..") });
+    process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
     return;
   }
 
@@ -292,18 +303,10 @@ async function main(): Promise<void> {
   const toolPrefix = String(runtimeConfig.valuesByPath.mcp?.toolPrefix || "").trim() || DEFAULT_MCP_TOOL_PREFIX;
   const mcpHttpOptions = parseMCPHttpOptions((runtimeConfig.valuesByPath.mcp || {}) as Record<string, any>, parsePositiveInt);
   const activeRouting = getActivePromptRoutingFromEnv(process.env);
-  // A configured mapper model beats the calling session's model: per-drawer
-  // judgement wants a short answer, and inheriting a thinking-heavy general
-  // model spends minutes per drawer deliberating a one-line verdict.
+  // Explicit mapper selection wins; otherwise inherit the calling session's model.
   const configuredMapperModel = String(runtimeConfig.valuesByPath.consolidation?.mapperModel || "").trim();
-  const mapperModel = configuredMapperModel
-    ? parseModelSelector(configuredMapperModel) ?? activeRouting.model
-    : activeRouting.model;
-  if (configuredMapperModel && !parseModelSelector(configuredMapperModel)) {
-    process.stderr.write(
-      `[memory-consolidation-validation] ignoring consolidation.mapperModel="${configuredMapperModel}": expected "<provider>/<model>"\n`,
-    );
-  }
+  const mapperModel = configuredMapperModel ? parseModelSelector(configuredMapperModel) : activeRouting.model;
+  if (configuredMapperModel && !mapperModel) throw new Error('Invalid consolidation.mapperModel: expected "<provider>/<model>"');
   const subagentTimeoutMs = resolveSubagentTimeoutMs(process.env);
   const keepMapperSessions = runtimeConfig.valuesByPath.consolidation?.keepMapperSessions === true;
 
@@ -375,8 +378,8 @@ async function main(): Promise<void> {
 
   let mapper: MapperEnvelope | undefined;
   const mapperBatches: MapperEnvelope[] = [];
-  let consolidation: SynthesisConsolidationResult | undefined;
-  const consolidationBatches: SynthesisConsolidationResult[] = [];
+  let consolidation: SynthesisConsolidationResult | RawDrawerDraft | undefined;
+  const consolidationBatches: Array<SynthesisConsolidationResult | RawDrawerDraft> = [];
   const allSkipped: Array<{ drawer_id: string; reason: string }> = [];
   let validationMergeReview: ValidationMergeReviewResult | undefined;
   let validationSkippedReason: string | undefined;
@@ -628,7 +631,6 @@ async function main(): Promise<void> {
     // clear the confidence floor, and every drawer scores `low` and is dropped.
     // The live mapper is therefore the default; --no-live-mapper keeps the
     // heuristic path for plain-text drawers and offline runs.
-    const useLiveMapper = !hasFlag(argv, "--no-live-mapper");
     const mapperAgent = getArg(argv, "--mapper-agent") || "dream-mapper";
     const mapperDefinition = resolve(esRoot, "agents", `${mapperAgent}.md`);
     const mapperPromptHash = createHash("sha256").update(existsSync(mapperDefinition) ? readFileSync(mapperDefinition) : mapperAgent).digest("hex");
@@ -679,7 +681,7 @@ async function main(): Promise<void> {
           coveredParentIds: reconsolidationParentCoverage,
           failedParentIds: reconsolidationParentFailures,
         });
-        if (!evaluation.canRetire) {
+        if (!evaluation.canRetire || (useLiveMapper && Date.now() >= runDeadlineMs)) {
           skippedRetirements.push({
             closetId: plan.closetId,
             missingParentIds: evaluation.missingParentIds,
@@ -692,6 +694,7 @@ async function main(): Promise<void> {
         }
 
         for (const edge of plan.retireEdges) {
+          if (useLiveMapper && Date.now() >= runDeadlineMs) break;
           try {
             await client.kgInvalidate({
               subject: edge.subject,
@@ -706,6 +709,7 @@ async function main(): Promise<void> {
         }
 
         try {
+          if (useLiveMapper && Date.now() >= runDeadlineMs) continue;
           await client.kgSupersede({
             subject: plan.closetId,
             predicate: "es-status",
@@ -756,33 +760,34 @@ async function main(): Promise<void> {
           const result = await runChunkConsolidation({
             client, sourceId: item.drawer_id, options: { ...consolidationOptions, runId },
             checkpointDirectory: resolve(worklistOptions.checkpointDirectory || ".electric-shepherd/coverage"),
-            extractorVersion: JSON.stringify({ contract: "physical-chunk-topics-v8", model: mapperModel,
+            deadlineMs: runDeadlineMs, timeoutMs: subagentTimeoutMs,
+            extractorVersion: JSON.stringify({ contract: "drawer-text-batches-v10", model: mapperModel,
               agent: mapperAgent, promptHash: mapperPromptHash }),
-            reducerVersion: JSON.stringify({ contract: "topic-reconciliation-v4", model: mapperModel,
+            reducerVersion: JSON.stringify({ contract: "drawer-text-reconciliation-v6", model: mapperModel,
               agent: mapperAgent, promptHash: mapperPromptHash }),
             mapChunk: async (prompt, identity) => {
               if (!subagentRunner) throw new Error("mapper-unavailable");
               return runSubagent({ runner: subagentRunner, esRoot, mapperRuntime: true,
                 agentName: getArg(argv, "--mapper-agent") || "dream-mapper",
-                modelArg: formatPromptModelArg(mapperModel), prompt, timeoutMs: subagentTimeoutMs,
+                modelArg: formatPromptModelArg(mapperModel), prompt, timeoutMs: identity.timeoutMs, workerAttempt: identity.attempt,
                 keepSession: keepMapperSessions, sessionTitle: `es-mapper ${runId} ${identity.chunkId}` });
             },
             reconcileTopic: async (prompt, identity) => {
               if (!subagentRunner) throw new Error("reducer-unavailable");
               return runSubagent({ runner: subagentRunner, esRoot, mapperRuntime: true, agentName: mapperAgent,
-                modelArg: formatPromptModelArg(mapperModel), prompt, timeoutMs: subagentTimeoutMs,
+                modelArg: formatPromptModelArg(mapperModel), prompt, timeoutMs: identity.timeoutMs, workerAttempt: identity.attempt,
                 keepSession: keepMapperSessions, sessionTitle: `es-reconcile ${runId} ${identity.topicKey} ${identity.stepIndex}` });
             },
           });
           for (const id of result.familyIds) visitedLiveParents.add(id);
           chunkCoverage.push(result);
-          mapperBatches.push({ summaries: result.reconciliation?.topics.map(({ topic }) => ({ ...topic, transcriptId: result.parentDrawerId })) || [],
+          mapperBatches.push({ summaries: [],
             unmappedTranscriptIds: result.reconciliation?.reconciliationComplete ? [] : [result.parentDrawerId],
             raw: { extraction: result.extraction, reconciliation: result.reconciliation, error: result.error }, via: subagentRunner ? `${subagentRunner.kind}-run` : "none" });
           consolidationBatches.push(...result.drafts);
           const coveredItem = { ...item, drawer_id: result.parentDrawerId, family_drawer_ids: result.familyIds };
           if (!consolidationOptions.applyWrites) continue;
-          if (!result.completed) {
+          if (!result.completed || Date.now() >= runDeadlineMs) {
             for (const id of result.familyIds) allSkipped.push({ drawer_id: id, reason: result.error || "chunk-coverage-incomplete" });
             trackReconsolidationOutcome([coveredItem], "failed");
             continue;
@@ -927,7 +932,7 @@ async function main(): Promise<void> {
     await retireReconsolidationClosets();
 
     if (consolidationBatches.length > 0) {
-      consolidation = consolidationBatches[consolidationBatches.length - 1];
+    consolidation = consolidationBatches.at(-1);
     }
 
     if (mapperBatches.length > 0) {
@@ -935,6 +940,7 @@ async function main(): Promise<void> {
       const mergedUnmapped = [...new Set(mapperBatches.flatMap((batch) => batch.unmappedTranscriptIds || []))];
       mapper = {
         summaries: mergedSummaries,
+        contentSummaries: mapperBatches.flatMap((batch) => batch.contentSummaries || []),
         unmappedTranscriptIds: mergedUnmapped,
         raw: mapperBatches.map((batch) => batch.raw),
         via: mapperBatches.find((batch) => batch.via !== "none")?.via || "none",
@@ -951,18 +957,18 @@ async function main(): Promise<void> {
 
     const touchedNodeIds = [...new Set(consolidationBatches.map((c) => c.createdNodeId).filter(Boolean))] as string[];
     flushRunProgress({ phase: "validation-merge-review", touchedNodeCount: touchedNodeIds.length });
-    if (touchedNodeIds.length > 0) {
+    if (touchedNodeIds.length > 0 && (!useLiveMapper || Date.now() < runDeadlineMs)) {
       validationMergeReview = await runValidationMergeReview(client, {
         ...validationOptions,
         candidateNodeIds: touchedNodeIds,
       });
     } else {
-      validationSkippedReason = "no-created-nodes";
+      validationSkippedReason = touchedNodeIds.length > 0 ? "run-deadline" : "no-created-nodes";
     }
   }
 
   let auditor: AuditorEnvelope | undefined;
-  if (includeBasePipeline && hasFlag(argv, "--use-live-auditor") && consolidation && validationMergeReview) {
+  if (includeBasePipeline && hasFlag(argv, "--use-live-auditor") && consolidation && validationMergeReview && (!useLiveMapper || Date.now() < runDeadlineMs)) {
     auditor = await callSubagentAuditor({
       auditorAgentName: getArg(argv, "--auditor-agent") || "dream-auditor",
       activeModel: mapperModel,
@@ -970,7 +976,7 @@ async function main(): Promise<void> {
       validationResult: validationMergeReview,
       runner: subagentRunner!,
       esRoot,
-      timeoutMs: subagentTimeoutMs,
+      timeoutMs: useLiveMapper ? Math.min(subagentTimeoutMs, runDeadlineMs - Date.now()) : subagentTimeoutMs,
       keepSession: keepMapperSessions,
       sessionLabel: runId,
     });
@@ -980,7 +986,7 @@ async function main(): Promise<void> {
     client,
     consolidationOptions,
     runtimeConfig,
-    memcoreApply: readOnlyRoute ? { ...memcoreApply, enabled: false } : memcoreApply,
+    memcoreApply: readOnlyRoute || (useLiveMapper && Date.now() >= runDeadlineMs) ? { ...memcoreApply, enabled: false } : memcoreApply,
     memcoreMinFactHeight,
     consolidation,
     validationMergeReview,
@@ -1039,7 +1045,7 @@ async function main(): Promise<void> {
 
 main().catch((err) => {
   try {
-    appendRunEvent(resolveRunEventLogPath(process.env, process.cwd()), {
+    if (!process.argv.includes("--local-transcript-file")) appendRunEvent(resolveRunEventLogPath(process.env, process.cwd()), {
       ts: new Date().toISOString(),
       runId: activeRunId || undefined,
       event: "finish",

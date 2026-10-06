@@ -366,3 +366,25 @@ test("applyWrites=false does NOT file dead ends (dry run)", async () => {
   assert.equal(fileDeadEndCalled, false, "fileDeadEnd must not run on a dry run");
   assert.equal(result.deadEndFiling, undefined);
 });
+
+test("content-only factual summaries pass substance gates without confidence, even with high legacy floor", async () => {
+  const content = { transcriptId: "source", durableFacts: ["The policy layer owns consolidation; immutable physical source records remain unchanged until all replacement content and lineage edges are verified. Host batching preserves bounded chronological inputs and keeps write uncertainty fail closed."], decisions: [], rootCausesAndWorkedExamples: [], subsystemsAndFiles: [], openItems: [] };
+  const result = await runSynthesisConsolidation(stubClient(), { ...baseOptions, contentSummaries: [content], minimumMapperConfidence: "high" });
+  assert.deepEqual(result.droppedSummaryIds, []); assert.equal(result.inflationGuard.passed, true);
+  assert.ok(!Object.hasOwn(content, "confidence"));
+});
+test("content-only empty input fails substance without falling back to search", async () => {
+  const result = await runSynthesisConsolidation(stubClient(), { ...baseOptions, contentSummaries: [] });
+  assert.equal(result.inflationGuard.passed, false); assert.equal(result.createdNodeId, undefined);
+});
+test("content-only adapter rejects invalid types and confidence placeholders", async () => {
+  const base = { transcriptId: "source", durableFacts: [], decisions: [], rootCausesAndWorkedExamples: [], subsystemsAndFiles: [], openItems: [] };
+  for (const content of [{ ...base, confidence: "medium" }, { ...base, durableFacts: "not an array" }]) {
+    await assert.rejects(runSynthesisConsolidation(stubClient(), { ...baseOptions, contentSummaries: [content] }), /invalid-content-summary/);
+  }
+});
+test("legacy missing or explicit low confidence still fails a medium floor", async () => {
+  const summaries = richSummaries().map(({ confidence: _confidence, ...summary }) => summary);
+  const result = await runSynthesisConsolidation(stubClient(), { ...baseOptions, mapperSummaries: summaries });
+  assert.deepEqual(result.droppedSummaryIds.sort(), ["raw-001", "raw-002"]); assert.equal(result.inflationGuard.passed, false);
+});

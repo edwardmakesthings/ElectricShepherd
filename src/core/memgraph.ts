@@ -466,6 +466,8 @@ export class MemgraphClient {
 
     return run().catch(async (err) => {
       if (!this.isUnknownToolError(err, this.tools.addDrawers)) throw err;
+      // Single-drawer fallback cannot persist metadata; never silently lose provenance.
+      if (items.some(item => item.metadata && Object.keys(item.metadata).length)) throw err;
       const results: unknown[] = [];
       let errors = 0;
       for (const item of items) {

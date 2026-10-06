@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { registerCheckpoint } from "../../src/surface/omp/session-stop.ts";
-import { CHECKPOINT_PROMPT } from "../../src/policy/checkpoint-prompt.ts";
+import { CHECKPOINT_MARKER, CHECKPOINT_PROMPT } from "../../src/policy/checkpoint-prompt.ts";
 
 function capture() {
   let handler;
@@ -48,7 +48,7 @@ test("omp checkpoint requests a continuation after a clean, substantive session"
   const { handler, logs } = capture();
   const result = await handler(stopEvent(), ctx);
   assert.equal(result.continue, true);
-  assert.equal(result.additionalContext, CHECKPOINT_PROMPT);
+  assert.equal(result.additionalContext, `${CHECKPOINT_MARKER} ${CHECKPOINT_PROMPT}`);
   assert.match(logs.join("\n"), /memory checkpoint requested/);
 });
 
@@ -128,4 +128,20 @@ test("omp checkpoint never lands on a stall", async () => {
     const { handler } = capture();
     assert.equal(await handler(stopEvent({ last_assistant_message: last }), ctx), undefined);
   }
+});
+
+const { maybeCheckpointWithGating } = await import("../../src/surface/plugin/session-policy/checkpoint-handler.ts");
+const { readFileSync } = await import("node:fs");
+test("OpenCode checkpoint false stops injection; default/true retain legitimate gates and replies", async () => {
+  for (const enabled of [false, true, undefined]) {
+    const calls = [], args = { sid: "s", last: { info: { role: "assistant", finish: "stop", mode: "build" }, parts: [{ type: "text", text: DONE.content[0].text }] },
+      checkpointedSessions: new Set(), terminalCountBySession: new Map([["s", 4]]), checkpointDisabledAgents: new Set(), checkpointEnabled: enabled,
+      client: { session: { prompt: async request => calls.push(request) } }, directory: "test", getPromptRouting: () => ({ agent: "build" }) };
+    assert.equal(await maybeCheckpointWithGating(args), enabled !== false); assert.equal(calls.length, enabled === false ? 0 : 1);
+    if (calls.length) { assert.equal(calls[0].body.parts[0].text, CHECKPOINT_MARKER + " " + CHECKPOINT_PROMPT);
+      assert.equal(calls[0].body.noReply, undefined); assert.equal(calls[0].body.parts[0].synthetic, undefined); }
+    args.checkpointDisabledAgents.add("build"); args.checkpointedSessions.clear();
+    assert.equal(await maybeCheckpointWithGating(args), false);
+  }
+  assert.ok(readFileSync(new URL("../../src/surface/plugin/session-policy-v1.ts", import.meta.url), "utf8").includes('checkpointEnabled: cfgBool("checkpoint.enabled")'));
 });

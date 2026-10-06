@@ -3,6 +3,16 @@ import test from "node:test";
 
 import { createMemgraphClient } from "../../src/core/memgraph.ts";
 
+test("metadata-bearing drawer writes cannot silently fall back to metadata-free single writes", async () => {
+  const calls = [];
+  const client = createMemgraphClient({ toolPrefix: "test_", callTool: async (name, args) => {
+    calls.push({ name, args }); throw new Error("Unknown tool: test_add_drawers");
+  } });
+  await assert.rejects(client.addDrawers({ items: [{ wing: "w", room: "r", content: "historical result", metadata: { desc: "provenance" } }] }), /Unknown tool/);
+  assert.deepEqual(calls.map(c => c.name), ["test_add_drawers"]);
+  assert.equal(calls[0].args.items[0].metadata.desc, "provenance");
+});
+
 test("memgraph client uses default tool prefix", async (t) => {
   // The default is only observable when the ambient env var is absent; the dev
   // shell exports MEMGRAPH_TOOL_PREFIX from eshepherd-config.jsonc, which would

@@ -17,9 +17,7 @@ export type MessageWithParts = {
   parts?: any[]
 }
 
-export const AUTO_RETRY_MARKER = "[Auto-Retry Guard]"
-export const CHECKPOINT_MARKER = "[Memory Checkpoint]"
-export const MEMCORE_REINJECT_MARKER = "[Mem-core Reinjection]"
+export { AUTO_RETRY_MARKER, CHECKPOINT_MARKER, MEMCORE_REINJECT_MARKER, LOOP_GUARD_MARKER, SPIRAL_GUARD_MARKER } from "../../../policy/checkpoint-prompt.ts"
 export const MIN_USEFUL_TEXT = 24
 export const START_BANNER = "[turn-guard] START"
 export const MAX_RETRIES_PER_PARENT = 2
@@ -53,7 +51,6 @@ export const DEFAULT_MEMCORE_MAX_CHARS = 12000
 export const DEFAULT_MEMCORE_MAX_SCOPES = 6
 export const DEFAULT_INJECTION_COOLDOWN_MS = 15000
 export const DEFAULT_RETRY_ENABLED = false
-export const LOOP_GUARD_MARKER = "[Loop Guard]"
 // Loop guard: abort a tool call whose (name + args) has already run N times in
 // the recent window with no mutation in between, and hand the model a short
 // nudge instead of the tool result. Deliberately gentle — in practice "are you
@@ -175,7 +172,6 @@ export const DEFAULT_LOOP_MUTATION_TOOLS = [
 // Never blocked: the escape hatches the nudge itself recommends.
 export const DEFAULT_LOOP_EXEMPT_TOOLS = ["compress", "dcp-compress"]
 
-export const SPIRAL_GUARD_MARKER = "[Spiral Guard]"
 // Deliberation-spiral guard: the inverse of the loop guard. The loop guard
 // catches a repeated *tool call*; this catches a finish=stop turn that narrates
 // many investigations ("let me check X", "let me re-read Y") while executing NO

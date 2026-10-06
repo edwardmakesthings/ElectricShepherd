@@ -52,7 +52,9 @@
   },
   "dependencies": {
     "@opencode/plugin": "^2.0.21",
-    "effect": "^4.0.0-rc.112"
+    "effect": "^4.0.0-rc.112",
+    "jsonc-parser": "^3.3.1",
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
     "@types/node": "^26.4.0",

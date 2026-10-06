@@ -4,149 +4,60 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { reconcileSourceTopics } from "../../src/scripts/memory-pipeline/topic-reconciliation.ts";
-import { reconciliationResponse, deltaResponse } from "../fixtures/topic-reconciliation-mock.mjs";
-
-const topic = { topicKey: "architecture", title: "Project migration", confidence: "high",
-  durableFacts: ["A source-authored migration plan exists."], decisions: ["Perform compatibility review first."],
-  rootCausesAndWorkedExamples: [], subsystemsAndFiles: [], openItems: ["Await a source-authored migration decision."], deadEnds: [] };
-const extraction = { parentDrawerId: "parent", sourceVersion: "source-hash", extractionComplete: true,
-  assessments: [{ chunkId: "chunk-0" }, { chunkId: "chunk-1" }], failures: [],
-  topics: [{ topicKey: topic.topicKey, parentDrawerId: "parent", contributingChunkIds: ["chunk-0"], insights: [{ chunkId: "chunk-0", pieceIndex: 0, topic }] }],
-  contextualEvidence: [{ chunkId: "chunk-1", pieceIndex: 0, kind: "resolution", origin: "source", text: "Migration canceled, not completed.", sourceQuote: "Migration canceled." }] };
-function setup(t) {
-  const checkpointDirectory = mkdtempSync(join(tmpdir(), "es-reconcile-"));
-  t.after(() => rmSync(checkpointDirectory, { recursive: true, force: true }));
+const early = "# Proposal\nMigration was proposed pending source-based validation of the new architecture.";
+const late = "## Cancellation\nThe later source canceled migration; keep the existing architecture without migration tasks.";
+function harness(t) {
+  const directory = mkdtempSync(join(tmpdir(), "es-raw-reducer-")); t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const extraction = { parentDrawerId: "parent", sourceVersion: "source", extractionComplete: true, failures: [], attempts: [],
+    assessments: [early, late].map((content, i) => ({ content, batchId: String(i), members: [{ chunkId: "c" + i, pieceIndex: 0, pieceCount: 1, contentHash: "h" + i }] })) };
   const calls = [];
-  return { calls, args: { extraction, checkpointDirectory, reducerVersion: "mock-model/prompt-v1",
-    reconcileTopic: async (prompt) => { const input = JSON.parse(prompt.split("\n").at(-1)); calls.push(input); return reconciliationResponse(input); } } };
+  const args = { extraction, reducerVersion: "test", checkpointDirectory: directory, reconcileTopic: async (prompt) => {
+    calls.push(prompt); return prompt.split("NEXT CHRONOLOGICAL FINDINGS\n")[1];
+  } };
+  return { args, calls, directory };
 }
-test("reducer identity and source hashes invalidate reducer checkpoints; matching identity resumes without calls", async (t) => {
-  const h = setup(t);
-  const first = await reconcileSourceTopics(h.args);
-  assert.equal(h.calls.length, 2);
-  assert.deepEqual(await reconcileSourceTopics(h.args), first);
-  assert.equal(h.calls.length, 2);
-  const second = await reconcileSourceTopics({ ...h.args, reducerVersion: "mock-model/prompt-v2" });
-  assert.equal(h.calls.length, 4);
-  assert.notEqual(second.reconciliationVersion, first.reconciliationVersion);
-  const changed = await reconcileSourceTopics({ ...h.args, reducerVersion: "mock-model/prompt-v2", extraction: { ...extraction, sourceVersion: "changed-source" } });
-  assert.equal(h.calls.length, 6);
-  assert.notEqual(changed.reconciliationVersion, second.reconciliationVersion);
+test("all findings supplied chronologically, corrected raw output retained, conservative full-source provenance", async (t) => {
+  const h = harness(t), result = await reconcileSourceTopics(h.args);
+  assert.equal(result.reconciliationComplete, true); assert.equal(h.calls.length, 2);
+  assert.ok(h.calls[0].endsWith(early)); assert.ok(h.calls[1].includes("PREVIOUS SUMMARY\n" + early)); assert.ok(h.calls[1].endsWith(late));
+  assert.equal(result.topics[0].content, late); assert.deepEqual(result.topics[0].contributingChunkIds, ["c0", "c1"]);
+  assert.deepEqual(result.topics[0].inputBatchIds, ["0", "1"]);
+  h.args.reconcileTopic = async () => { throw new Error("must reuse cache"); }; await reconcileSourceTopics(h.args);
 });
-test("tampered cached reducer receipt is rejected, never silently reclassified or overwritten", async (t) => {
-  const h = setup(t);
-  await reconcileSourceTopics(h.args);
-  const file = join(h.args.checkpointDirectory, readdirSync(h.args.checkpointDirectory)[0]);
-  const checkpoint = JSON.parse(readFileSync(file, "utf8"));
-  const response = JSON.parse(checkpoint.responses.architecture[1]);
-  response.receipt.evidenceId = "unrequested-evidence";
-  checkpoint.responses.architecture[1] = JSON.stringify(response);
-  writeFileSync(file, JSON.stringify(checkpoint));
-  await assert.rejects(reconcileSourceTopics(h.args), /reconciliation-evidence-gap/);
-  assert.equal(h.calls.length, 2);
+test("raw route deliberately has no structured task or dead-end gate", async (t) => {
+  const h = harness(t); const text = "# Arbitrary heading\nA task not present in source may pass structural admission; this fixture proves no semantic protection.";
+  h.args.reconcileTopic = async () => text;
+  const result = await reconcileSourceTopics(h.args); assert.equal(result.topics[0].content, text);
+  assert.ok(!Object.hasOwn(result.topics[0], "extractedOpenTasks"));
 });
-test("reducer cannot invent a negative drawer assertion absent from supplied topic evidence", async (t) => {
-  const h = setup(t);
-  await assert.rejects(reconcileSourceTopics({ ...h.args, reconcileTopic: async (prompt) => {
-    const value = JSON.parse(reconciliationResponse(JSON.parse(prompt.split("\n").at(-1))));
-    value.add.deadEnds = ['- Reuse partial parent coverage | outcome: minority topic disappeared | because: "only the first topic was checked" | polarity: tried-failed'];
-    return JSON.stringify(value);
-  } }), /reconciliation-invented-dead-end/);
+for (const response of ["", "Done", "Acknowledged."]) {
+  test("missing or acknowledgement reducer cannot complete: " + response, async (t) => {
+    const h = harness(t); let calls = 0; h.args.reconcileTopic = async () => { calls++; return response; };
+    await assert.rejects(reconcileSourceTopics(h.args)); assert.equal(calls, response ? 1 : 2);
+    assert.equal(readdirSync(h.directory).filter(f => f.endsWith(".json")).length, 0);
+  });
+}
+test("failed reducer resumes accepted steps only and retains historical version evidence", async (t) => {
+  const h = harness(t), original = h.args.reconcileTopic; let count = 0;
+  h.args.reconcileTopic = async (prompt) => { if (++count === 2) throw new Error("unavailable"); return original(prompt); };
+  await assert.rejects(reconcileSourceTopics(h.args), /unavailable/);
+  h.calls.length = 0; h.args.reconcileTopic = original; await reconcileSourceTopics(h.args); assert.equal(h.calls.length, 1);
+  h.args.reducerVersion = "new"; await reconcileSourceTopics(h.args); assert.equal(readdirSync(h.directory).filter(f => f.endsWith(".json")).length, 2);
 });
-
-test("growing topic keeps prompts and model responses bounded; last step output is a small delta", async (t) => {
-  const many = Array.from({ length: 6 }, (_v, index) => ({ chunkId: "chunk-" + index }));
-  const grown = { ...extraction, assessments: many, contextualEvidence: [],
-    topics: [{ topicKey: "architecture", parentDrawerId: "parent", contributingChunkIds: [], insights: many.map((chunk, index) => ({ chunkId: chunk.chunkId, pieceIndex: 0,
-      topic: { ...topic, openItems: [], durableFacts: ["F".repeat(280) + index], decisions: ["D".repeat(280) + index] } })) }] };
-  const sizes = [];
-  const h = setup(t);
-  const result = await reconcileSourceTopics({ ...h.args, extraction: grown, reconcileTopic: async (prompt) => {
-    const input = JSON.parse(prompt.split("\n").at(-1));
-    const response = reconciliationResponse(input);
-    sizes.push(Buffer.byteLength(response));
-    return response;
-  } });
-  assert.ok(Math.max(...sizes) < 2_500, "response size tracks the delta, not the accumulated state: " + sizes);
-  assert.equal(result.topics[0].topic.durableFacts.length, 6);
-  assert.ok(result.topics[0].receipts.length === 6);
+test("cached text is validated again", async (t) => {
+  const h = harness(t); await reconcileSourceTopics(h.args);
+  const path = join(h.directory, readdirSync(h.directory).find(f => f.endsWith(".json"))), stored = JSON.parse(readFileSync(path, "utf8"));
+  Object.values(stored.responses)[0].response = "Done"; writeFileSync(path, JSON.stringify(stored));
+  await assert.rejects(reconcileSourceTopics(h.args), /insubstantial/);
 });
-test("truncated or non-delta reducer output fails closed", async (t) => {
-  const h = setup(t);
-  await assert.rejects(reconcileSourceTopics({ ...h.args, reconcileTopic: async () => '{"schemaVersion":1,"add":{"durableFacts":["x' }));
-  await assert.rejects(reconcileSourceTopics({ ...h.args, reconcileTopic: async (prompt) => {
-    const value = JSON.parse(reconciliationResponse(JSON.parse(prompt.split("\n").at(-1))));
-    value.remove.durableFacts = [99];
-    return JSON.stringify(value);
-  } }), /invalid-reconciliation-delta/);
+test("large summaries and combined reducer inputs stay complete without artificial caps", async (t) => {
+  const h = harness(t), text = "x".repeat(17000); h.args.extraction.assessments[0].content = text;
+  const result = await reconcileSourceTopics(h.args);
+  assert.equal(result.reconciliationComplete, true); assert.equal(h.calls.length, 2);
+  assert.ok(h.calls[1].length > 16000); assert.ok(h.calls[1].includes("PREVIOUS SUMMARY\n" + text));
+  assert.ok(h.calls[1].endsWith(late)); assert.equal(result.topics[0].content, late);
 });
-test("array reducer envelope is rejected, not coerced; one bounded retry recovers a valid object", async (t) => {
-  const h = setup(t);
-  let calls = 0;
-  const arrayOnce = async (prompt) => { calls++;
-    const body = reconciliationResponse(JSON.parse(prompt.split("\n").at(-1)));
-    return calls === 1 ? "[" + body + "]" : body; };
-  const ok = await reconcileSourceTopics({ ...h.args, reconcileTopic: arrayOnce });
-  assert.ok(ok.reconciliationComplete);
-  assert.equal(calls, 3, "first step retried once (2 calls) + second step (1 call)");
-  const always = [];
-  await assert.rejects(reconcileSourceTopics({ ...h.args, reducerVersion: "other",
-    reconcileTopic: async (prompt) => { always.push(1); return "[" + reconciliationResponse(JSON.parse(prompt.split("\n").at(-1))) + "]"; } }),
-  /invalid-reconciliation-response-shape/);
-  assert.equal(always.length, 2, "exactly one retry, then fail closed");
-  let n = 0;
-  await assert.rejects(reconcileSourceTopics({ ...h.args, reducerVersion: "third",
-    reconcileTopic: async () => { n++; return '{"schemaVersion":1,"add":{"durableFacts":["x'; } }));
-  assert.equal(n, 1, "non-shape failures are not retried");
-});
-test("a delta cannot add or alter open items", async (t) => {
-  const h = setup(t);
-  await assert.rejects(reconcileSourceTopics({ ...h.args, reconcileTopic: async (prompt) => {
-    const value = JSON.parse(reconciliationResponse(JSON.parse(prompt.split("\n").at(-1))));
-    value.add.openItems = ["invented"];
-    return JSON.stringify(value);
-  } }), /unsupported-reconciliation-open-task/);
-});
-test("accumulation beyond section capacity fails closed instead of silently dropping", async (t) => {
-  const many = Array.from({ length: 9 }, (_v, index) => ({ chunkId: "chunk-" + index }));
-  const grown = { ...extraction, assessments: many, contextualEvidence: [],
-    topics: [{ topicKey: "architecture", parentDrawerId: "parent", contributingChunkIds: [], insights: many.map((chunk, index) => ({ chunkId: chunk.chunkId, pieceIndex: 0,
-      topic: { ...topic, openItems: [], durableFacts: ["fact " + index] } })) }] };
-  await assert.rejects(reconcileSourceTopics({ ...setup(t).args, extraction: grown }), /reconciliation-section-capacity/);
-});
-
-test("rejected global context truncates by model-response index when a reader-window record is skipped; retry is not stuck on cache", async (t) => {
-  const h = setup(t);
-  const windowed = { ...extraction, assessments: [{ chunkId: "chunk-0" }, { chunkId: "chunk-1" }, { chunkId: "chunk-2" }],
-    contextualEvidence: [
-      { chunkId: "chunk-1", pieceIndex: 0, kind: "qualifier", origin: "reader-window", text: "Id cut at window edge.", sourceQuote: "drawer_x" },
-      { chunkId: "chunk-2", pieceIndex: 0, kind: "resolution", origin: "source", text: "Migration canceled, not completed.", sourceQuote: "Migration canceled." }] };
-  await assert.rejects(reconcileSourceTopics({ ...h.args, extraction: windowed, reconcileTopic: async (prompt) => {
-    const input = JSON.parse(prompt.split("\n").at(-1));
-    return deltaResponse(input, { add: input.evidence.topic ? { durableFacts: input.evidence.topic.durableFacts, decisions: input.evidence.topic.decisions } : undefined, disposition: input.evidence.context ? "unrelated" : "incorporated",
-      openTaskIds: input.evidence.context ? input.eligibleOpenTasks.map((task) => task.taskId) : undefined });
-  } }), /context-not-reconciled/);
-  const checkpoint = JSON.parse(readFileSync(join(h.args.checkpointDirectory, readdirSync(h.args.checkpointDirectory)[0]), "utf8"));
-  assert.equal(checkpoint.responses.architecture.length, 1, "only the seed response survives; the rejected source-context response is gone");
-  const result = await reconcileSourceTopics({ ...h.args, extraction: windowed });
-  assert.deepEqual(result.topics[0].receipts.map((receipt) => receipt.disposition), ["incorporated", "boundary-only", "resolved"]);
-  assert.deepEqual(result.topics[0].contributingChunkIds, ["chunk-0", "chunk-2"], "boundary-only chunk is not a contribution");
-});
-test("reducer response must be a strict delta object: legacy full topic, missing or primitive containers are rejected", async (t) => {
-  for (const mutate of [
-    (v) => { delete v.add; delete v.remove; v.topic = topic; },
-    (v) => { v.topic = topic; },
-    (v) => { v.add = null; },
-    (v) => { v.remove = "x"; },
-    (v) => { v.add = []; },
-    (v) => { delete v.remove; },
-    (v) => { v.receipt = "ok"; },
-  ]) {
-    const h = setup(t);
-    await assert.rejects(reconcileSourceTopics({ ...h.args, reconcileTopic: async (prompt) => {
-      const value = JSON.parse(reconciliationResponse(JSON.parse(prompt.split("\n").at(-1))));
-      mutate(value);
-      return JSON.stringify(value);
-    } }), /invalid-reconciliation-delta/);
-  }
+test("partial extraction cannot reach reducer", async (t) => {
+  const h = harness(t); h.args.extraction.extractionComplete = false;
+  await assert.rejects(reconcileSourceTopics(h.args), /complete-extraction/); assert.equal(h.calls.length, 0);
 });

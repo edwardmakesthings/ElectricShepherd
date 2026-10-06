@@ -53,11 +53,11 @@ test("opencode titles persisted sessions independently of retention", () => {
 // The internal routing format (formatPromptModelArg) is always comma-joined;
 // both CLIs want provider/model, so both harnesses rewrite the separator.
 test("both harnesses rewrite the model separator to provider/model", () => {
-  const ompArgs = buildSubagentArgs({ runner: omp, prompt: "p", modelArg: "litellm,implementer-qwen3.8-27b" });
-  assert.ok(ompArgs.includes("litellm/implementer-qwen3.8-27b"));
+  const ompArgs = buildSubagentArgs({ runner: omp, prompt: "p", modelArg: "litellm,swift-qwen3.8-27b-thinking" });
+  assert.ok(ompArgs.includes("litellm/swift-qwen3.8-27b-thinking"));
 
-  const ocArgs = buildSubagentArgs({ runner: opencode, prompt: "p", modelArg: "litellm,implementer-qwen3.8-27b" });
-  assert.ok(ocArgs.includes("litellm/implementer-qwen3.8-27b"));
+  const ocArgs = buildSubagentArgs({ runner: opencode, prompt: "p", modelArg: "litellm,swift-qwen3.8-27b-thinking" });
+  assert.ok(ocArgs.includes("litellm/swift-qwen3.8-27b-thinking"));
 });
 
 // omp has no --agent for a top-level run; the definition rides in as a prompt file.

@@ -34,7 +34,7 @@ const { createMemgraphClient, MemgraphClient } = await import("../../src/core/me
 // ── (a) Phase 15 helpers: model identity + bucket ids ────────────────────────
 
 test("canonicalModelId produces a deterministic provider/model string", () => {
-  assert.equal(canonicalModelId("litellm", "implementer-qwen3.8-27b"), "litellm/implementer-qwen3.8-27b");
+  assert.equal(canonicalModelId("litellm", "swift-qwen3.8-27b-thinking"), "litellm/swift-qwen3.8-27b-thinking");
   // Case-insensitive: routing pins are case-sensitive but attribution is not.
   assert.equal(canonicalModelId("LiteLLM", "Implementer-Qwen"), "litellm/implementer-qwen");
 });

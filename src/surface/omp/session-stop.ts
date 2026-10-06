@@ -6,7 +6,7 @@
  * native fit for the checkpoint: OpenCode had to inject a whole follow-up prompt
  * through `client.session.prompt` and then teach its retry guard to recognise the
  * reply as terminal, which is why the OpenCode path carries CHECKPOINT_MARKER.
- * Here the continuation IS the mechanism, so no marker is needed.
+ * The reserved marker also makes any logged continuation recognizable at capture.
  *
  * `session_stop` only fires on the TOP-level session (`session/agent-session.ts`,
  * `session-maintenance.ts` are the only emit sites) — a `task`-tool subagent (the
@@ -34,7 +34,7 @@
  */
 
 import { matchesAgentIdentity } from "../../policy/agent-identity.ts";
-import { CHECKPOINT_PROMPT, MIN_TURNS_BEFORE_CHECKPOINT } from "../../policy/checkpoint-prompt.ts";
+import { CHECKPOINT_MARKER, CHECKPOINT_PROMPT, MIN_TURNS_BEFORE_CHECKPOINT } from "../../policy/checkpoint-prompt.ts";
 import { endsMidIntent, hasUsefulPayload, isAssistantStop, type TurnMessage } from "../../policy/turn-quality.ts";
 import type { OmpAgentMessage, OmpExtensionApi, OmpExtensionContext, OmpSessionStopEvent } from "./api.ts";
 import { isTrue, log, resolveEnv, toList } from "./runtime.ts";
@@ -96,6 +96,6 @@ export function registerCheckpoint(pi: OmpExtensionApi): void {
 
     checkpointed.add(sessionID);
     log(pi, `memory checkpoint requested for session=${sessionID} after ${assistantTurns} assistant turns`);
-    return { continue: true, additionalContext: CHECKPOINT_PROMPT };
+    return { continue: true, additionalContext: `${CHECKPOINT_MARKER} ${CHECKPOINT_PROMPT}` };
   });
 }

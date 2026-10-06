@@ -2,7 +2,7 @@
  * Subagent invocation helpers (mapper + auditor) for the consolidation pipeline.
  * Extracted from run-memory-consolidation-and-validation.ts (criterion 2).
  */
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -12,7 +12,8 @@ import type { TranscriptInsightSummary } from "../../capability/episodic/synthes
 import { asObject, asArray, asString, parsePositiveInt } from "./cli-options.ts";
 import type { PromptModelRouting } from "./runtime-utils.ts";
 import { parseCompleteJSON } from "./complete-json.ts";
-import { ompCompletionText } from "./omp-completion.ts";
+import { WorkerFailure } from "./omp-completion.ts";
+import { runRawWorker } from "./raw-runner.ts";
 
 /** Which CLI drives a one-shot subagent, and the absolute binary to invoke. */
 export type SubagentRunner = {
@@ -31,6 +32,7 @@ export type SubagentVia = "opencode-run" | "omp-run" | "none";
 
 export type MapperEnvelope = {
   summaries: TranscriptInsightSummary[];
+  contentSummaries?: import("../../capability/episodic/synthesis-consolidation.ts").ClosetContentSummary[];
   // Requested transcript ids that produced no explicit summary in this mapper pass.
   // Callers treat these as unmapped (retryable), never as implicitly summarized.
   unmappedTranscriptIds: string[];
@@ -326,8 +328,9 @@ export type SubagentInvocation = {
   modelArg?: string;
   prompt: string;
   esRoot?: string;
-  /** Enable mapper-only request budget and authoritative OMP completion events. */
+  /** Enable isolated raw-text inference, scoped budgets and authoritative runner completion. */
   mapperRuntime?: boolean;
+  workerAttempt?: number;
   /** Keep the pass as a readable harness session instead of an ephemeral one. */
   keepSession?: boolean;
   /** Session title when kept, so a run's passes are identifiable in a session list. */
@@ -337,9 +340,9 @@ export type SubagentInvocation = {
 /** Build the harness CLI argv for one subagent pass. Exported for tests. */
 export function buildSubagentArgs(args: SubagentInvocation, promptFile?: string): string[] {
   if (args.runner.kind === "omp") {
-    // Discovery stays disabled; the mapper's explicit hook only adjusts its request budget.
+    // Discovery and all tools disabled; explicit extension also blocks unexpected tool turns.
     const argv = ["-p", args.prompt, "--no-extensions", "--auto-approve"];
-    if (args.mapperRuntime) argv.push("--mode", "json", "--extension",
+    if (args.mapperRuntime) argv.push("--no-tools", "--mode", "json", "--extension",
       fileURLToPath(new URL("./omp-mapper-runtime.mjs", import.meta.url)));
     if (args.keepSession) {
       if (args.sessionTitle) argv.push("--title", args.sessionTitle);
@@ -386,30 +389,20 @@ function withResolvedStandalone(runner: SubagentRunner): SubagentRunner {
 
 export function runSubagent(args: SubagentInvocation & { timeoutMs: number }): string {
   args = { ...args, runner: withResolvedStandalone(args.runner) };
-  const promptFile =
-    args.runner.kind === "omp" && args.agentName && args.esRoot
-      ? ompAgentPromptFile(args.agentName, args.esRoot)
-      : undefined;
-  const commandArgs = buildSubagentArgs(args, promptFile);
-
-  if (args.mapperRuntime && args.runner.kind === "omp") {
-    const startedAt = Date.now();
-    const result = spawnSync(args.runner.bin, commandArgs, {
-      encoding: "utf8", timeout: args.timeoutMs, maxBuffer: 16 * 1024 * 1024,
-      stdio: ["ignore", "pipe", "pipe"], env: buildIsolatedSubagentEnv(process.env),
-    });
-    // Only forward the explicit hook's allowlisted metadata, never raw provider/config output.
-    for (const line of (result.stderr || "").split("\n")) {
-      if (line.startsWith("[eshepherd-mapper-runtime] ")) process.stderr.write(line + "\n");
+  if (args.mapperRuntime) {
+    if (args.runner.kind === "opencode" && !args.runner.standalone) throw new WorkerFailure("process");
+    if (!args.modelArg) {
+      const error = new WorkerFailure("process");
+      error.message = "Set consolidation.mapperModel to <provider>/<model>, or invoke consolidation from a session with an active model";
+      throw error;
     }
-    process.stderr.write("[eshepherd-mapper-runtime] " + JSON.stringify({ event: "process",
-      status: result.status, signal: result.signal, durationMs: Date.now() - startedAt,
-      stdoutPresent: Boolean(result.stdout), stdoutBytes: Buffer.byteLength(result.stdout || "") }) + "\n");
-    if (result.error || result.status !== 0) throw new Error("mapper-process-failed");
-    return ompCompletionText(result.stdout, (record) => {
-      process.stderr.write("[eshepherd-mapper-runtime] " + JSON.stringify(record) + "\n");
-    });
+    const source = args.agentName && args.esRoot ? join(args.esRoot, "agents", args.agentName + ".md") : undefined;
+    const system = source && existsSync(source) ? stripFrontmatter(readFileSync(source, "utf8")) : undefined;
+    return runRawWorker({ ...args, modelArg: args.modelArg, system, env: buildIsolatedSubagentEnv(process.env) });
   }
+  const promptFile = args.runner.kind === "omp" && args.agentName && args.esRoot
+    ? ompAgentPromptFile(args.agentName, args.esRoot) : undefined;
+  const commandArgs = buildSubagentArgs(args, promptFile);
   return execFileSync(args.runner.bin, commandArgs, {
     encoding: "utf8", timeout: args.timeoutMs, maxBuffer: 2 * 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"], env: buildIsolatedSubagentEnv(process.env),

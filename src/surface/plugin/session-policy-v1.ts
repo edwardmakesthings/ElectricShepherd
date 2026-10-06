@@ -637,6 +637,7 @@ export const TurnGuard = async ({ client, directory, disableV1ToolRegistry = tru
       checkpointedSessions,
       terminalCountBySession,
       checkpointDisabledAgents,
+      checkpointEnabled: cfgBool("checkpoint.enabled"),
       client,
       directory,
       getPromptRouting,

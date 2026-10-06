@@ -17,6 +17,8 @@
  */
 
 import { readFileSync } from "node:fs";
+import { runtimePolicyKind } from "../../policy/checkpoint-prompt.ts";
+import { sourceISOTime, type TranscriptTime } from "../../core/transcript-time.ts";
 
 import { createMemgraphClient } from "../../core/memgraph.ts";
 import { resolveMCPHeadersFromEnv } from "../../core/mcp-transport.ts";
@@ -30,7 +32,7 @@ const CONTENT_ENTRY_TYPES = new Set(["message", "custom_message"]);
 
 const TRIMMED_CONTENT_MARKER = "<content>\n[trimmed by source-capture normalization]\n</content>";
 
-type SessionEntry = { type?: string; message?: { role?: string; content?: unknown } };
+type SessionEntry = { type?: string; timestamp?: unknown; message?: { role?: string; content?: unknown; timestamp?: unknown } };
 
 /** Mirrors trim_embedded_content in transcript_capture_normalization.py. */
 function trimEmbeddedContent(text: string): string {
@@ -42,29 +44,27 @@ function trimEmbeddedContent(text: string): string {
  * Render an omp session JSONL into the compact JSON the consolidation pipeline
  * already reads. Deliberately byte-compatible with the shape
  * `transcript_capture_normalization.py` produces for OpenCode exports —
- * `{session,messages:[{role,text}]}`, text parts only — so one mapper serves
+ * `{session,messages:[{role,text,time?}]}`, text parts only — so one mapper serves
  * both harnesses. A markdown rendering would also collide with the `##`
  * headings that appear inside message bodies.
  */
 export function renderSessionTranscript(jsonl: string, sessionID: string, directory: string): string {
-  const messages: Array<{ role: string; text: string }> = [];
-
+  const messages: Array<{ role: string; text: string; time?: TranscriptTime }> = [];
+  let sessionCreated: string | undefined;
   for (const raw of jsonl.split("\n")) {
     const line = raw.trim();
     if (!line) continue;
-
     let entry: SessionEntry;
-    try {
-      entry = JSON.parse(line);
-    } catch {
-      continue; // a torn final line during an in-flight append is not an error
+    try { entry = JSON.parse(line); } catch { continue; } // torn final append
+    if (!entry || typeof entry !== "object") continue;
+    if (entry.type === "session") {
+      sessionCreated ??= sourceISOTime(entry.timestamp);
+      continue;
     }
     if (!CONTENT_ENTRY_TYPES.has(String(entry.type ?? ""))) continue;
-
     const message = entry.message;
     if (!message || typeof message !== "object") continue;
     const content = Array.isArray(message.content) ? message.content : [];
-
     const textParts: string[] = [];
     for (const part of content) {
       if (!part || typeof part !== "object") continue;
@@ -75,12 +75,16 @@ export function renderSessionTranscript(jsonl: string, sessionID: string, direct
       if (cleaned) textParts.push(cleaned);
     }
     if (textParts.length === 0) continue;
-
-    messages.push({ role: String(message.role ?? ""), text: textParts.join("\n\n") });
+    const role = String(message.role ?? ""), text = textParts.join("\n\n");
+    if (runtimePolicyKind(role, text)) continue;
+    // OMP message.timestamp is Unix ms; entry.timestamp is ISO log-recording time.
+    const created = sourceISOTime(message.timestamp, true), recorded = sourceISOTime(entry.timestamp);
+    const time: TranscriptTime = { ...(created ? { created } : {}), ...(recorded ? { recorded } : {}) };
+    messages.push({ role, text, ...(Object.keys(time).length ? { time } : {}) });
   }
-
   if (messages.length === 0) return "";
-  return JSON.stringify({ session: { id: sessionID, title: null, directory }, messages });
+  return JSON.stringify({ session: { id: sessionID, title: null, directory,
+    ...(sessionCreated ? { time: { created: sessionCreated } } : {}) }, messages });
 }
 
 async function capture(env: EsEnv, sessionFile: string, sessionID: string, cwd: string): Promise<string> {

@@ -8,6 +8,21 @@
  * policy, so it lives here rather than in either adapter.
  */
 
+export const AUTO_RETRY_MARKER = "[Auto-Retry Guard]";
+export const CHECKPOINT_MARKER = "[Memory Checkpoint]";
+export const MEMCORE_REINJECT_MARKER = "[Mem-core Reinjection]";
+export const LOOP_GUARD_MARKER = "[Loop Guard]";
+export const SPIRAL_GUARD_MARKER = "[Spiral Guard]";
+export const RUNTIME_POLICY_MARKERS = [CHECKPOINT_MARKER, AUTO_RETRY_MARKER, SPIRAL_GUARD_MARKER, LOOP_GUARD_MARKER, MEMCORE_REINJECT_MARKER] as const;
+
+/** Reserved legacy user-prefix convention; bodies may drift and replies remain substantive. */
+export function runtimePolicyKind(role: string, text: string): typeof RUNTIME_POLICY_MARKERS[number] | undefined {
+  if (role !== "user") return undefined;
+  const value = text.trimStart();
+  return RUNTIME_POLICY_MARKERS.find(marker => value.startsWith(marker) &&
+    (value.length === marker.length || /\s/u.test(value[marker.length])));
+}
+
 export const CHECKPOINT_PROMPT =
   `Before this session winds down, run a two-part memory ` +
   `check. These are independent — answer both; either can warrant saving alone.\n\n` +

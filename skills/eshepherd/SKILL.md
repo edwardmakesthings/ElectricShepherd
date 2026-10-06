@@ -289,7 +289,7 @@ is one `kg_invalidate {subject, predicate, object}` — no drawer content is eve
 
 ## Memory layers — where to write
 
-The live consolidation CLI uses the existing logical parent plus authoritative physical chunk IDs as coverage units, never message offsets. Multiple topical closets retain exact contributing chunk evidence. Complete extraction checkpoints alone are not `consolidated-into` evidence: source completion requires every topic write and lineage edge verified, with zero-substance spans explicitly accounted. Legacy parent edges do not certify coverage; missing coverage preserves old closets. Ambiguous drawer-write outcomes block for manual reconciliation, never blind duplicate writes. Live mapper output must parse as whole JSON, without nested-object/prose recovery or destination-search fallback. See `docs/chunk-aware-consolidation.md` for retry and completion semantics.
+The live consolidation CLI preserves raw drawer-ready text from bounded sequential batches and chronological reconciliation. No required JSON, headings, confidence or structured task ledger: invented tasks and accuracy require source-based evaluation. The host maintains atomic raw-text caches, full processing coverage and conservative entire-PRIMARY-batch provenance, not per-claim grounding. OMP tools are disabled and unexpected use fails closed. One inference retry is allowed only for known transport/timeout, empty output or authoritative length/error failure within the shared run deadline. Every drawer/lineage write must verify before completion/retirement; uncertain writes are never blindly retried. Legacy/manual structured confidence behavior remains separate. See `docs/chunk-aware-consolidation.md`.
 
 | Tier | Room convention | Tool |
 |---|---|---|

@@ -254,7 +254,7 @@ test("parseTriageOptions defaults the rejected room off the source room", () => 
 
 test("parseTriageOptions lets CLI flags beat config", () => {
   const options = parseTriageOptions(
-    ["--triage-only", "--triage-min-score", "4", "--triage-batch-size", "25", "--triage-model", "litellm/general-gemma4:26b"],
+    ["--triage-only", "--triage-min-score", "4", "--triage-batch-size", "25", "--triage-model", "litellm/gemma4:26b"],
     { valuesByPath: { consolidation: { triage: { minScore: 1, batchSize: 10 } } } },
     "source-transcripts",
   );
@@ -262,7 +262,7 @@ test("parseTriageOptions lets CLI flags beat config", () => {
   assert.equal(options.only, true);
   assert.equal(options.minScore, 4);
   assert.equal(options.batchSize, 25);
-  assert.deepEqual(options.model, { providerID: "litellm", modelID: "general-gemma4:26b" });
+  assert.deepEqual(options.model, { providerID: "litellm", modelID: "gemma4:26b" });
 });
 
 test("parseTriageOptions ignores a malformed model selector instead of throwing", () => {

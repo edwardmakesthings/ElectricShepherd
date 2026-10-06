@@ -47,14 +47,14 @@ test("parseRunEvents separates concurrent runs, newest first", () => {
 });
 
 test("parseModelSelector splits a provider/model pair", () => {
-  assert.deepEqual(parseModelSelector("litellm/implementer-gemma4-31b"), {
+  assert.deepEqual(parseModelSelector("litellm/gemma4:31b-thinking"), {
     providerID: "litellm",
-    modelID: "implementer-gemma4-31b",
+    modelID: "gemma4:31b-thinking",
   });
 });
 
 test("parseModelSelector rejects a value missing either half", () => {
-  for (const bad of ["implementer-gemma4-31b", "/model", "litellm/", ""]) {
+  for (const bad of ["gemma4:31b-thinking", "/model", "litellm/", ""]) {
     assert.equal(parseModelSelector(bad), undefined, `expected ${JSON.stringify(bad)} to be rejected`);
   }
 });

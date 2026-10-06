@@ -17,11 +17,13 @@ export async function maybeCheckpointWithGating(args: {
   checkpointedSessions: Set<string>
   terminalCountBySession: Map<string, number>
   checkpointDisabledAgents: Set<string>
+  checkpointEnabled?: boolean
   client: any
   directory: string
   getPromptRouting: (...candidates: Array<MessageWithParts | null | undefined>) => { agent?: string; model?: { providerID: string; modelID: string } }
 }): Promise<boolean> {
   const { sid, last } = args
+  if (args.checkpointEnabled === false) return false
   if (args.checkpointedSessions.has(sid)) return false
 
   const mode = String(last?.info?.mode ?? "")
