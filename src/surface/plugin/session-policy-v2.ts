@@ -109,19 +109,40 @@ const SessionPolicyPluginV2 = Plugin.define({
       })
     }
 
+    let disposed = false
+    const eventsController = new AbortController()
     const eventHook = legacy?.event
     if (typeof eventHook === "function") {
       ;(async () => {
         try {
-          for await (const event of ctx.event.subscribe()) {
+          for await (const event of ctx.event.subscribe({ signal: eventsController.signal })) {
+            if (disposed) break
             const legacyEvent = toLegacyEvent(event)
             if (!legacyEvent) continue
-            await eventHook({ event: legacyEvent })
+            const sessionID = String(legacyEvent.properties?.info?.sessionID ?? legacyEvent.properties?.sessionID ?? "")
+            if (!sessionID) continue
+            try {
+              const session = await ctx.session.get({ sessionID }, { signal: eventsController.signal })
+              if (disposed) break
+              if (session.location?.directory !== ctx.location.directory) continue
+              await eventHook({ event: legacyEvent })
+              if (event.type === "session.step.ended") {
+                void legacy.shadowJudge?.observe(sessionID, String(legacyEvent.properties?.info?.id ?? ""))
+              }
+            } catch {
+              console.warn("[turn-guard] v2 event unavailable; keeping event bridge active")
+            }
           }
         } catch (error) {
-          console.error("[turn-guard] v2 event bridge failed:", error)
+          if (!disposed) console.error("[turn-guard] v2 event bridge failed:", error)
         }
       })()
+    }
+    return () => {
+      if (disposed) return
+      disposed = true
+      eventsController.abort()
+      legacy?.dispose?.()
     }
   },
 })

@@ -1,9 +1,29 @@
+import type { Plugin } from "@opencode/plugin"
+
+type NativeMessage = Awaited<ReturnType<Plugin.Context["session"]["context"]>>[number]
+type NativeAssistant = Extract<NativeMessage, { type: "assistant" }>
+type NativeToolState = Extract<NativeAssistant["content"][number], { type: "tool" }>["state"]
+type DataResult<T> = T | { data: T }
+type JsonMetadata = NonNullable<Parameters<Plugin.Context["session"]["prompt"]>[0]["metadata"]>
+
+export type LegacyMessage = {
+  info: { id: string; role: "user" | "assistant" | "system" | "control"; parentID: string; finish?: NativeAssistant["finish"]; time: NativeMessage["time"];
+    agent?: string; mode?: JsonMetadata[string]; synthetic?: boolean; model?: { providerID: string; modelID: string; variant?: string } }
+  parts: Array<{ type: "text" | "reasoning"; text: string } | { type: "tool"; tool: string; callID: string;
+    state: NativeToolState; input: NativeToolState["input"]; content?: Extract<NativeToolState, { status: "completed" }>["content"];
+    error?: Extract<NativeToolState, { status: "error" }>["error"] }>
+}
+
+function unwrapData<T>(result: DataResult<T>): T {
+  return result !== null && typeof result === "object" && "data" in result ? result.data : result as T
+}
+
 type LegacyPromptRequest = {
   path?: { id?: string }
   body?: {
     parts?: Array<{ type?: string; text?: string }>
     text?: string
-    metadata?: Record<string, unknown>
+    metadata?: JsonMetadata
     delivery?: "steer" | "queue"
     resume?: boolean
     noReply?: boolean
@@ -16,37 +36,21 @@ type LegacyMessageRequest = {
 }
 
 type SessionLike = {
-  context: (input: { sessionID: string }) => Promise<unknown[]>
-  synthetic?: (input: {
-    sessionID: string
-    text: string
-    description?: string
-    metadata?: Record<string, any>
-    delivery?: "steer" | "queue"
-    resume?: boolean
-  }) => Promise<unknown>
-  message?: {
-    get: (input: { sessionID: string; messageID: string }) => Promise<unknown>
-  }
-  prompt: (input: {
-    sessionID: string
-    text: string
-    metadata?: Record<string, any>
-    delivery?: "steer" | "queue"
-    resume?: boolean
-    agents?: Array<{ name: string }>
-  }) => Promise<unknown>
+  context: (input: { sessionID: string }) => Promise<DataResult<readonly NativeMessage[]>>
+  message?: { get: (input: { sessionID: string; messageID: string }) => Promise<DataResult<NativeMessage>> }
+  synthetic?: Plugin.Context["session"]["synthetic"]
+  prompt: Plugin.Context["session"]["prompt"]
 }
 
-function getRoleFromType(type: string): string {
+function getRoleFromType(type: string): LegacyMessage["info"]["role"] {
+  if (type === "synthetic") return "user"
   if (type === "assistant" || type === "user" || type === "system") return type
-  return "assistant"
+  return "control"
 }
 
-function toLegacyParts(message: any): any[] {
+function toLegacyParts(message: NativeMessage): LegacyMessage["parts"] {
   if (message?.type === "assistant") {
-    const content = Array.isArray(message?.content) ? message.content : []
-    return content.flatMap((part) => {
+    return message.content.flatMap<LegacyMessage["parts"][number]>((part) => {
       if (part?.type === "text" && typeof part?.text === "string") {
         return [{ type: "text", text: part.text }]
       }
@@ -54,40 +58,41 @@ function toLegacyParts(message: any): any[] {
         return [{ type: "reasoning", text: part.text }]
       }
       if (part?.type === "tool") {
-        const state = part?.state && typeof part.state === "object" ? part.state : {}
+        const state = part.state
         return [{
           type: "tool",
           tool: String(part?.name ?? ""),
           callID: String(part?.id ?? ""),
           state,
           input: state?.input,
-          content: state?.content,
-          error: state?.error,
+          content: "content" in state ? state.content : undefined,
+          error: "error" in state ? state.error : undefined,
         }]
       }
       return []
     })
   }
 
-  if (message?.type === "user" && typeof message?.text === "string") {
+  if ((message.type === "user" || message.type === "synthetic" || message.type === "system") && typeof message.text === "string") {
     return [{ type: "text", text: message.text }]
   }
 
   return []
 }
 
-function toLegacyMessage(message: any): any {
-  const role = getRoleFromType(String(message?.type ?? "assistant"))
+function toLegacyMessage(message: NativeMessage): LegacyMessage {
+  const role = getRoleFromType(message.type)
   return {
     info: {
       id: String(message?.id ?? ""),
       role,
-      finish: message?.finish,
-      parentID: String(message?.metadata?.parentID ?? message?.parentID ?? ""),
-      time: message?.time,
-      agent: message?.agent,
-      mode: message?.metadata?.mode,
-      model: message?.model,
+      finish: message.type === "assistant" ? message.finish : undefined,
+      parentID: typeof message.metadata?.parentID === "string" ? message.metadata.parentID : "",
+      time: message.time,
+      agent: message.type === "assistant" ? message.agent : undefined,
+      mode: message.metadata?.mode,
+      synthetic: message.type === "synthetic",
+      model: message.type === "assistant" ? { ...message.model, modelID: message.model.id } : undefined,
     },
     parts: toLegacyParts(message),
   }
@@ -104,25 +109,39 @@ function textFromLegacyPrompt(body: LegacyPromptRequest["body"]): string {
 }
 
 export function createLegacyClientAdapter(session: SessionLike) {
+  const contextMessages = async (sessionID: string): Promise<LegacyMessage[]> => {
+    const messages = [...unwrapData(await session.context({ sessionID }))]
+      .sort((left, right) => left.time.created - right.time.created).map(toLegacyMessage)
+      .filter(message => message.info.role !== "control")
+    // V2 stores no parent link; infer the preceding prompt from ordered context.
+    let parentID = ""
+    for (const message of messages) {
+      if (!message.info.parentID) message.info.parentID = parentID
+      if (message.info.role === "user") parentID = message.info.id
+    }
+    return messages
+  }
   return {
     session: {
       async messages(input: LegacyMessageRequest) {
         const sessionID = String(input?.path?.id ?? "")
         if (!sessionID) return { data: [] }
-        const messages = await session.context({ sessionID })
-        return { data: (messages as any[]).map(toLegacyMessage) }
+        return { data: await contextMessages(sessionID) }
       },
       async message(input: LegacyMessageRequest) {
         const sessionID = String(input?.path?.id ?? "")
         const messageID = String(input?.path?.messageID ?? "")
         if (!sessionID || !messageID) return { data: null }
         if (session.message?.get) {
-          const message = await session.message.get({ sessionID, messageID })
-          return { data: toLegacyMessage(message) }
+          const message = toLegacyMessage(unwrapData(await session.message.get({ sessionID, messageID })))
+          if ((message.info.role === "assistant" || message.info.synthetic) && !message.info.parentID) {
+            const contextual = (await contextMessages(sessionID)).find(item => item.info.id === messageID)
+            if (contextual) message.info.parentID = contextual.info.parentID
+          }
+          return { data: message }
         }
-        const messages = await session.context({ sessionID })
-        const found = (messages as any[]).find((message) => String((message as any)?.id ?? "") === messageID)
-        return { data: found ? toLegacyMessage(found) : null }
+        const found = (await contextMessages(sessionID)).find(message => message.info.id === messageID)
+        return { data: found ?? null }
       },
       async prompt(input: LegacyPromptRequest) {
         const sessionID = String(input?.path?.id ?? "")

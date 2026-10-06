@@ -249,6 +249,29 @@ cd electric-shepherd && npm install
 
 Then see [QUICKSTART.md](QUICKSTART.md) for MemPalace wiring, config, and first run.
 
+### Optional turn-guard shadow judging (OpenCode v2)
+
+The existing heuristics remain the default. In your runtime configuration, set
+`turnGuard.judge.mode` to `shadow` to record System One recommendations after
+completed assistant steps. Configure `turnGuard.judge.endpoint` with the full
+`/v1/systemone` URL and `turnGuard.judge.model` with your service's model alias
+(for example, `laya`). Both default to empty; no provider or model fallback is used.
+Non-secret runtime settings are config-file driven, not environment overrides.
+
+Shadow mode never sends intervention messages, switches models, or replaces the
+existing guards. Recommendations and skip/failure reasons are written to
+`.electric-shepherd/turn-guard-judge.ndjson`, without prompts or raw responses.
+Checks are deduplicated, skip guard-generated prompts, and do not run on idle
+notifications. Only one shadow check runs across plugin instances; busy steps
+are recorded as skipped rather than queued.
+
+`turnGuard.judge.timeoutMs` defaults to 10000 (maximum 120000), and
+`turnGuard.judge.maxStateChars` defaults to 2000 (range 256–16000).
+Excerpts may be truncated and model confidence is not a correctness guarantee;
+validate recommendations on representative sessions before enabling any future
+model-led policy. Stream-loop interruption and model-led intervention are not
+implemented by shadow mode. Reload the plugin to apply code/config changes.
+
 ### What ships
 
 - **agents** (`agents/*.md`) — `dreamer`, `dream-mapper`, `dream-auditor`, `drawer-digest`,

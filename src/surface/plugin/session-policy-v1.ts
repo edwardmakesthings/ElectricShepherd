@@ -84,6 +84,7 @@ import { bindSessionPolicyHandlers, issueRetryWithGating, maybeSpiralNudgeWithGa
 import { bindToolExecuteBefore } from "./session-policy/tool-hook.ts"
 import type { TurnGuardContext } from "./session-policy/context.ts"
 import { initSessionPolicyState } from "./session-policy/state.ts"
+import { createTurnGuardShadowJudge } from "./session-policy/shadow-judge.ts"
 const ESHEPHERD_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 
 export const TurnGuard = async ({ client, directory, disableV1ToolRegistry = true, v2Bridge = false }: any) => {
@@ -730,6 +731,19 @@ export const TurnGuard = async ({ client, directory, disableV1ToolRegistry = tru
     tool: toolRegistry,
   }
   if (v2Bridge) {
+    hooks.shadowJudge = createTurnGuardShadowJudge({
+      mode: cfgRaw("turnGuard.judge.mode"),
+      endpoint: cfgRaw("turnGuard.judge.endpoint"),
+      model: cfgRaw("turnGuard.judge.model"),
+      timeoutMs: Number(cfgRaw("turnGuard.judge.timeoutMs")),
+      maxStateChars: Number(cfgRaw("turnGuard.judge.maxStateChars")),
+      projectRoot,
+      getMessages: async (sessionID: string) => {
+        const result = await client.session.messages({ path: { id: sessionID }, query: { directory } })
+        return result.data
+      },
+    })
+    hooks.dispose = () => { hooks.shadowJudge.dispose(); instanceDirs.delete(rootDirectory) }
     hooks.compactionArchive = {
       enabled: compactArchiveEnabled,
       dir: join(projectRoot, STATUS_DIR, "compaction-archive"),

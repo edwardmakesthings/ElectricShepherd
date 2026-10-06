@@ -130,6 +130,12 @@ export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
   { envKey: "ESHEPHERD_MEMCORE_INJECTION_COOLDOWN_MS", path: "memcore.injectionCooldownMs", kind: "number", defaultValue: 15000, min: 1 },
   { envKey: "ESHEPHERD_SCOPE_DIR", path: "memcore.scopeDir", kind: "string", defaultValue: "" },
 
+  { envKey: "ESHEPHERD_TURN_JUDGE_MODE", path: "turnGuard.judge.mode", kind: "enum", defaultValue: "heuristic", allowedValues: ["heuristic", "shadow"] },
+  { envKey: "ESHEPHERD_TURN_JUDGE_ENDPOINT", path: "turnGuard.judge.endpoint", kind: "string", defaultValue: "" },
+  { envKey: "ESHEPHERD_TURN_JUDGE_MODEL", path: "turnGuard.judge.model", kind: "string", defaultValue: "" },
+  { envKey: "ESHEPHERD_TURN_JUDGE_TIMEOUT_MS", path: "turnGuard.judge.timeoutMs", kind: "number", defaultValue: 10000, min: 1 },
+  { envKey: "ESHEPHERD_TURN_JUDGE_MAX_STATE_CHARS", path: "turnGuard.judge.maxStateChars", kind: "number", defaultValue: 2000, min: 256 },
+
   { envKey: "ESHEPHERD_RETRY_ENABLED", path: "retry.enabled", kind: "boolean", defaultValue: false },
   { envKey: "ESHEPHERD_MAX_RETRIES_PER_SESSION", path: "retry.maxRetriesPerSession", kind: "number", defaultValue: 4, min: 1 },
   { envKey: "ESHEPHERD_RETRY_DISABLED_AGENTS", path: "retry.disabledAgents", kind: "csv", defaultValue: "" },

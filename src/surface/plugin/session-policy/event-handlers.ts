@@ -123,13 +123,11 @@ export async function onMessageUpdatedWithGating(args: {
     }
 
     const parentID = String(current?.info?.parentID ?? "")
-    if (!parentID) return
-
-    const parentRes: any = await args.client.session.message({
+    const parentRes = parentID ? await args.client.session.message({
       path: { id: sid, messageID: parentID },
       query: { directory: args.directory },
-    })
-    const parent = args.unwrapMessageResult(parentRes)
+    }) : null
+    const parent = parentRes ? args.unwrapMessageResult(parentRes) : null
     args.verifySourceCapture(sid, "message.stop").catch(() => {})
 
     // message.updated owns the reactive end-of-turn guards; checkpoint is

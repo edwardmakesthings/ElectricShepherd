@@ -186,3 +186,27 @@ test("watchdog guards remain enabled without automatic model replacement", async
       { providerID: "custom", modelID: "chosen-model", reason: "matched qwen" });
   }
 });
+
+test("turn-guard judging is model-neutral, optional, and configurable", () => {
+  const root = makeTempDir("es-turn-judge-config-");
+  try {
+    const defaults = loadRuntimeConfig({ cwd: root, env: {} });
+    assert.equal(getRuntimeConfigValueByPath(defaults, "turnGuard.judge.mode"), "heuristic");
+    assert.equal(getRuntimeConfigValueByPath(defaults, "turnGuard.judge.endpoint"), "");
+    assert.equal(getRuntimeConfigValueByPath(defaults, "turnGuard.judge.model"), "");
+    const env = { ESHEPHERD_TURN_JUDGE_MODE: "shadow", ESHEPHERD_TURN_JUDGE_ENDPOINT: "http://localhost:8080/v1/systemone",
+      ESHEPHERD_TURN_JUDGE_MODEL: "custom-decision-model", ESHEPHERD_TURN_JUDGE_TIMEOUT_MS: "3210", ESHEPHERD_TURN_JUDGE_MAX_STATE_CHARS: "1000" };
+    writeFileSync(join(root, "eshepherd-config.jsonc"), JSON.stringify({ turnGuard: { judge: { mode: "shadow", endpoint: "http://localhost:8080/v1/systemone", model: "custom-decision-model", timeoutMs: 3210, maxStateChars: 1000 } } }));
+    const configured = loadRuntimeConfig({ cwd: root, env });
+    assert.equal(getRuntimeConfigValueByPath(configured, "turnGuard.judge.mode"), "shadow");
+    assert.equal(getRuntimeConfigValueByPath(configured, "turnGuard.judge.model"), "custom-decision-model");
+    assert.equal(getRuntimeConfigValueByPath(configured, "turnGuard.judge.timeoutMs"), "3210");
+    assert.equal(getRuntimeConfigValueByPath(configured, "turnGuard.judge.maxStateChars"), "1000");
+    writeFileSync(join(root, "eshepherd-config.jsonc"), JSON.stringify({ turnGuard: { judge: { mode: "model" } } }));
+    assert.equal(getRuntimeConfigValueByPath(loadRuntimeConfig({ cwd: root, env: {} }), "turnGuard.judge.mode"), "heuristic");
+    writeFileSync(join(root, "eshepherd-config.jsonc"), JSON.stringify({ turnGuard: { judge: { mode: "shadow", model: "configured-model", endpoint: "http://example.local/v1/systemone" } } }));
+    const file = loadRuntimeConfig({ cwd: root, env: {} });
+    assert.equal(getRuntimeConfigValueByPath(file, "turnGuard.judge.model"), "configured-model");
+    assert.equal(getRuntimeConfigValueByPath(file, "turnGuard.judge.endpoint"), "http://example.local/v1/systemone");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
