@@ -1,7 +1,6 @@
 ---
 description: Cheap first-pass span detector — locates where value lives in a transcript, without judging it
 mode: subagent
-model: "litellm/general-gemma4:26b"
 temperature: 0.1
 top_p: 0.85
 steps: 60

@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 
 import { translateAgent, translateCommand, translateInstruction } from "../../src/scripts/sync-omp-assets.ts";
 
 const ES_AGENT = `---
 description: Memory consolidation orchestrator (map-reduce policy layer)
 mode: primary
-model: "litellm/implementer-qwen3.8-27b"
+model: "custom/research-model"
 temperature: 0.2
 permission:
   read: allow
@@ -49,10 +50,10 @@ test("agent translation drops OpenCode-only frontmatter", () => {
 
 // Both harnesses use the same provider/model selector. Dropping the pin would
 // silently re-route the agent to whatever the `task` model role points at —
-// these agents pin a local model deliberately.
+// user-customized agents may deliberately pin different models.
 test("agent translation preserves the model pin", () => {
   const out = translateAgent("dreamer", ES_AGENT);
-  assert.match(out, /^model: "litellm\/implementer-qwen3\.8-27b"$/m);
+  assert.match(out, /^model: "custom\/research-model"$/m);
 });
 
 test("agent translation omits model when none is declared", () => {
@@ -104,7 +105,24 @@ test("instruction translation becomes an always-on omp rule", () => {
   assert.ok(!out.includes("agents:"), "no agents filter means every agent, matching OpenCode");
 });
 
+test("staged OMP guidance matches the canonical packaged instruction", (t) => {
+  const staged = new URL("../../src/surface/omp/rules/agent-discipline.md", import.meta.url);
+  if (!existsSync(staged)) return t.skip("OMP assets are not staged; run npm run omp:assets");
+  const canonical = readFileSync(new URL("../../instructions/agent-discipline.md", import.meta.url), "utf8");
+  assert.equal(readFileSync(staged, "utf8"), translateInstruction("agent-discipline", canonical));
+});
+
 test("instruction translation keeps an authored description", () => {
   const out = translateInstruction("x", "---\ndescription: Custom\n---\nBody\n");
   assert.match(out, /description: "Custom"/);
+});
+
+test("all canonical and staged OMP agents remain model-neutral", async () => {
+  const source = new URL("../../agents/", import.meta.url);
+  for (const file of readdirSync(source).filter(name => name.endsWith(".md"))) {
+    const translated = translateAgent(file.slice(0, -3), readFileSync(new URL(file, source), "utf8"));
+    assert.doesNotMatch(translated, /^model:/m);
+    const staged = new URL("../../src/surface/omp/agents/" + file, import.meta.url);
+    if (existsSync(staged)) assert.equal(readFileSync(staged, "utf8"), translated);
+  }
 });

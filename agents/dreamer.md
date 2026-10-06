@@ -1,7 +1,6 @@
 ---
 description: Memory consolidation orchestrator (map-reduce policy layer)
 mode: all
-model: "litellm/implementer-swift-qwen3.8-27b"
 temperature: 0.2
 top_p: 0.9
 steps: 400

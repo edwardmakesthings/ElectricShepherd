@@ -3,6 +3,8 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import test from "node:test";
+import * as constants from "../../src/surface/plugin/session-policy/constants.ts";
+import { resolveTaskSwapTarget } from "../../src/surface/plugin/session-policy/routing.ts";
 
 import {
   applyRuntimeConfigToEnv,
@@ -153,4 +155,34 @@ test("an explicit empty-string config wing still falls back to the computed defa
   assert.equal(getRuntimeConfigValueByPath(loaded, "sourceCapture.wing"), expectedWing);
 
   rmSync(root, { recursive: true, force: true });
+});
+
+test("packaged model routes stay unset until explicitly customized", () => {
+  const root = makeTempDir("es-portable-defaults-");
+  try {
+    const defaults = loadRuntimeConfig({ cwd: root, env: {} });
+    for (const path of ["consolidation.mapperModel", "taskWatchdog.swap.qwen.toModel", "taskWatchdog.swap.gemma.toModel", "taskWatchdog.fallback.model"]) {
+      assert.equal(getRuntimeConfigValueByPath(defaults, path), "", path);
+    }
+    writeFileSync(join(root, "eshepherd-config.jsonc"), JSON.stringify({
+      consolidation: { mapperModel: "custom/provider-model" },
+      taskWatchdog: { swap: { qwen: { toProvider: "custom", toModel: "replacement" } } },
+    }));
+    const configured = loadRuntimeConfig({ cwd: root, env: {} });
+    assert.equal(getRuntimeConfigValueByPath(configured, "consolidation.mapperModel"), "custom/provider-model");
+    assert.equal(getRuntimeConfigValueByPath(configured, "taskWatchdog.swap.qwen.toModel"), "replacement");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("watchdog guards remain enabled without automatic model replacement", async () => {
+  assert.equal(constants.DEFAULT_TASK_WATCHDOG_ENABLED, true);
+  assert.equal(constants.DEFAULT_TASK_SWAP_QWEN_TO_MODEL, "");
+  assert.equal(constants.DEFAULT_TASK_SWAP_GEMMA_TO_MODEL, "");
+  for (const modelID of ["qwen-test", "gemma-test", "unrelated"]) {
+    const args = { current: { providerID: "custom", modelID }, qwenMatch: "qwen", gemmaMatch: "gemma",
+      qwenToModel: constants.DEFAULT_TASK_SWAP_QWEN_TO_MODEL, gemmaToModel: constants.DEFAULT_TASK_SWAP_GEMMA_TO_MODEL };
+    assert.equal(resolveTaskSwapTarget(args), null);
+    if (modelID === "qwen-test") assert.deepEqual(resolveTaskSwapTarget({ ...args, qwenToModel: "chosen-model" }),
+      { providerID: "custom", modelID: "chosen-model", reason: "matched qwen" });
+  }
 });

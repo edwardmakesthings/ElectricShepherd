@@ -73,9 +73,9 @@ export const DEFAULT_TASK_WATCHDOG_MAX_ESCALATIONS = 2
 export const DEFAULT_TASK_SERIALIZE_TYPES = ["explore", "review-diff", "run-tests"]
 export const DEFAULT_TASK_SERIALIZE_COOLDOWN_MS = 15000
 export const DEFAULT_TASK_SWAP_QWEN_MATCH = "qwen"
-export const DEFAULT_TASK_SWAP_QWEN_TO_MODEL = "litellm/implementer-gemma4-31b"
+export const DEFAULT_TASK_SWAP_QWEN_TO_MODEL = ""
 export const DEFAULT_TASK_SWAP_GEMMA_MATCH = "gemma"
-export const DEFAULT_TASK_SWAP_GEMMA_TO_MODEL = "litellm/implementer-qwen3.8-27b"
+export const DEFAULT_TASK_SWAP_GEMMA_TO_MODEL = ""
 // Worked-example injection: when delegating to @implement-local via the
 // task tool, append up to WORKED_EXAMPLE_MAX_INJECT relevant apprenticeship worked
 // examples as demonstrations. Below WORKED_EXAMPLE_RELEVANCE_FLOOR, inject nothing.

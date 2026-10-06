@@ -159,10 +159,10 @@ export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
   { envKey: "ESHEPHERD_TASK_SERIALIZE_COOLDOWN_MS", path: "taskWatchdog.serializeCooldownMs", kind: "number", defaultValue: 15000, min: 1 },
   { envKey: "ESHEPHERD_TASK_SWAP_QWEN_MATCH", path: "taskWatchdog.swap.qwen.match", kind: "string", defaultValue: "qwen" },
   { envKey: "ESHEPHERD_TASK_SWAP_QWEN_TO_PROVIDER", path: "taskWatchdog.swap.qwen.toProvider", kind: "string", defaultValue: "" },
-  { envKey: "ESHEPHERD_TASK_SWAP_QWEN_TO_MODEL", path: "taskWatchdog.swap.qwen.toModel", kind: "string", defaultValue: "litellm/implementer-gemma4-31b" },
+  { envKey: "ESHEPHERD_TASK_SWAP_QWEN_TO_MODEL", path: "taskWatchdog.swap.qwen.toModel", kind: "string", defaultValue: "" },
   { envKey: "ESHEPHERD_TASK_SWAP_GEMMA_MATCH", path: "taskWatchdog.swap.gemma.match", kind: "string", defaultValue: "gemma" },
   { envKey: "ESHEPHERD_TASK_SWAP_GEMMA_TO_PROVIDER", path: "taskWatchdog.swap.gemma.toProvider", kind: "string", defaultValue: "" },
-  { envKey: "ESHEPHERD_TASK_SWAP_GEMMA_TO_MODEL", path: "taskWatchdog.swap.gemma.toModel", kind: "string", defaultValue: "litellm/implementer-qwen3.8-27b" },
+  { envKey: "ESHEPHERD_TASK_SWAP_GEMMA_TO_MODEL", path: "taskWatchdog.swap.gemma.toModel", kind: "string", defaultValue: "" },
   { envKey: "ESHEPHERD_TASK_WATCHDOG_FALLBACK_PROVIDER", path: "taskWatchdog.fallback.provider", kind: "string", defaultValue: "" },
   { envKey: "ESHEPHERD_TASK_WATCHDOG_FALLBACK_MODEL", path: "taskWatchdog.fallback.model", kind: "string", defaultValue: "" },
   { envKey: "ESHEPHERD_TASK_WATCHDOG_WORKED_EXAMPLE_INJECTION_ENABLED", path: "taskWatchdog.workedExampleInjection.enabled", kind: "boolean", defaultValue: true },
@@ -206,9 +206,7 @@ export const RUNTIME_CONFIG_SPECS: readonly RuntimeConfigSpec[] = [
     kind: "boolean",
     defaultValue: false,
   },
-  // Per-drawer mapper/auditor model. Empty = inherit the calling session's active
-  // model, which is rarely what you want: a thinking-heavy general model burns
-  // minutes per drawer on a judgement that wants a short answer.
+  // Empty = inherit the calling session's active model; users may select a dedicated mapper.
   { envKey: "ESHEPHERD_CONSOLIDATION_MAPPER_MODEL", path: "consolidation.mapperModel", kind: "string", defaultValue: "" },
   // Keep each mapper/auditor pass as a readable harness session instead of an
   // ephemeral one. omp discards the transcript entirely without this; opencode

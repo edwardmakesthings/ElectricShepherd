@@ -1,7 +1,6 @@
 ---
 description: Cheap read-only summarizer for an exported drawer file (context offload)
 mode: subagent
-model: "litellm/implementer-swift-qwen3.8-27b"
 temperature: 0.1
 top_p: 0.85
 steps: 200

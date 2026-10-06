@@ -177,6 +177,18 @@ see the coupling; `verify:structural` link-checks every `.md` path mentioned in 
 
 ## Install
 
+### Model selection
+
+No bundled agent pins a model or requires LiteLLM. Agents inherit the host's selected
+model; your same-name agent definitions can pin different models per role. Watchdog
+model replacement routes are unset until you configure them.
+
+`npm run opencode:agents` preserves installed customizations, including model pins.
+Only untouched files tracked by a hash manifest are updated or removed; legacy name-only
+manifests are preserved conservatively. To replace a customized definition, back it up and
+remove that installed file before syncing. OMP's generated extension assets are not a
+customization store: use your host's agent definitions for overrides.
+
 Electric Shepherd runs on three harness surfaces — **OpenCode v2** (the default), **OpenCode
 v1**, and **oh-my-pi (omp)**. The memory layer is identical on all of them; only the wiring
 differs. [HARNESSES.md](HARNESSES.md) records exactly what each surface supports.

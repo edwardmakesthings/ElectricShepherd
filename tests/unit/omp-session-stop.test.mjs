@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { registerCheckpoint } from "../../src/surface/omp/session-stop.ts";
 import { CHECKPOINT_PROMPT } from "../../src/policy/checkpoint-prompt.ts";
@@ -85,22 +88,19 @@ test("omp checkpoint interactive-only gate can be turned off", async () => {
 // checkpoint.disabledAgents is an existing OpenCode config key this surface
 // never read. Recognised the same way the synthesis boundary recognises the
 // dreamer: from the system prompt's identity sentence.
-test("omp checkpoint skips a session whose active agent is disabled", async () => {
-  const previous = process.env.ESHEPHERD_CHECKPOINT_DISABLED_AGENTS;
-  process.env.ESHEPHERD_CHECKPOINT_DISABLED_AGENTS = "dreamer";
-  try {
-    const { handler, logs } = capture();
-    const result = await handler(stopEvent(), {
-      ...ctx,
-      mode: "tui",
-      getSystemPrompt: () => ["You are the Dreamer."],
-    });
-    assert.equal(result, undefined);
-    assert.match(logs.join("\n"), /disabledAgents/);
-  } finally {
-    if (previous === undefined) delete process.env.ESHEPHERD_CHECKPOINT_DISABLED_AGENTS;
-    else process.env.ESHEPHERD_CHECKPOINT_DISABLED_AGENTS = previous;
-  }
+test("omp checkpoint skips a session whose active agent is disabled", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "es-omp-checkpoint-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  writeFileSync(join(directory, "eshepherd-config.jsonc"), JSON.stringify({ checkpoint: { disabledAgents: ["dreamer"] } }));
+  const { handler, logs } = capture();
+  const result = await handler(stopEvent(), {
+    ...ctx,
+    cwd: directory,
+    mode: "tui",
+    getSystemPrompt: () => ["You are the Dreamer."],
+  });
+  assert.equal(result, undefined);
+  assert.match(logs.join("\n"), /disabledAgents/);
 });
 
 test("omp checkpoint fires at most once per session", async () => {

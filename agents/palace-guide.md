@@ -1,7 +1,6 @@
 ---
 description: Read-only MemPalace guide — answers "what is actually in my memory?" without writing anything
 mode: primary
-model: "litellm/implementer-swift-qwen3.8-27b"
 temperature: 0.2
 top_p: 0.9
 steps: 60

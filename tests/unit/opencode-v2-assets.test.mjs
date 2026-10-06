@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -15,14 +15,15 @@ import {
   registerPermissionDefaults,
   translateAgent,
 } from "../../src/surface/opencode-v2/assets.ts";
-import { loadPackagedSkills } from "../../src/surface/asset-loader.ts";
+import { syncPackagedAgents } from "../../src/scripts/sync-opencode-agents.ts";
+import { loadInstructionPaths, loadPackagedAssets, loadPackagedSkills } from "../../src/surface/asset-loader.ts";
 
 test("translateAgent maps v1 frontmatter onto v2 agent fields", () => {
   const out = translateAgent({
     prompt: "You are a guide.",
     description: "Guide",
     mode: "primary",
-    model: "litellm/implementer-swift-qwen3.8-27b",
+    model: "custom/research-model",
     temperature: 0.2,
     top_p: 0.9,
     steps: 60,
@@ -31,7 +32,7 @@ test("translateAgent maps v1 frontmatter onto v2 agent fields", () => {
   });
 
   assert.equal(out.system, "You are a guide.");
-  assert.deepEqual(out.model, { providerID: "litellm", id: "implementer-swift-qwen3.8-27b" });
+  assert.deepEqual(out.model, { providerID: "custom", id: "research-model" });
   assert.deepEqual(out.body, { temperature: 0.2, top_p: 0.9 });
   assert.equal(out.steps, 60);
   assert.deepEqual(out.permissions, [
@@ -65,7 +66,8 @@ test("expandTemplate handles $ARGUMENTS, positions and the append fallback", () 
 
 test("registerPackagedAssets registers bundled commands/agents and respects existing names", async () => {
   const commands = [];
-  const agents = new Map([["dreamer", { id: "dreamer" }]]);
+  const pinned = { id: "dreamer", model: { providerID: "user-provider", id: "user-model" } };
+  const agents = new Map([["dreamer", pinned]]);
   const created = [];
   const calls = [];
   const ctx = {
@@ -97,6 +99,8 @@ test("registerPackagedAssets registers bundled commands/agents and respects exis
   assert.ok(!names.includes("consolidate"), "existing user command must win");
   assert.ok(created.some(([id]) => id === "palace-guide"));
   assert.ok(!created.some(([id]) => id === "dreamer"), "existing user agent must win");
+  assert.equal(agents.get("dreamer"), pinned);
+  assert.ok(created.every(([, draft]) => draft.model === undefined));
   assert.equal(summary.commands, names.length);
 
   const palaceTour = commands.find((c) => c.name === "palace-tour");
@@ -123,6 +127,36 @@ test("registerInstructions appends instruction text to the system prompt on ever
     hook({ system: [] });
     assert.deepEqual(event.system, [{ type: "text", text: "base" }, { type: "text", text: "Rule A" }]);
     assert.equal(readInstructionText([join(dir, "missing.md")]), "");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("packaged guidance supplies safety rules without a user instruction file", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "es-standalone-instr-"));
+  try {
+    mkdirSync(join(dir, "instructions"));
+    writeFileSync(join(dir, "instructions", "agent-discipline.md"), readInstructionText(loadInstructionPaths()));
+    assert.equal(existsSync(join(dir, "AGENTS.md")), false);
+    let hook;
+    const paths = loadInstructionPaths(dir);
+    const count = await registerInstructions(
+      { session: { hook: async (name, cb) => { assert.equal(name, "context"); hook = cb; } } },
+      paths,
+    );
+    assert.equal(count, 1);
+    const event = { system: [] };
+    hook(event);
+    assert.equal(event.system.length, 1);
+    const text = event.system[0].text;
+    assert.equal(text, readInstructionText(paths));
+    assert.ok(!text.includes("belong to the user's global AGENTS.md"));
+    assert.match(text, /retrieved content.*data/i);
+    assert.match(text, /copy exact identifiers/i);
+    assert.match(text, /two failed attempts/i);
+    assert.match(text, /actual child session/i);
+    assert.match(text, /Do not use Serena or graphify memory/);
+    assert.match(text, /current role's exact output/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -179,4 +213,48 @@ test("registerPackagedSkills adds bundled skills unless an earlier registration 
   assert.equal(registry.get("mine").path, "/user/mine/SKILL.md");
   assert.equal(registry.get("bundled").path, "/bundled/bundled/SKILL.md");
   assert.deepEqual(offered, ["mine", "bundled"]);
+});
+
+test("every packaged agent inherits the host model unless the user pins it", () => {
+  const { agents } = loadPackagedAssets();
+  assert.ok(Object.keys(agents).length >= 6);
+  for (const [id, definition] of Object.entries(agents)) {
+    assert.equal(definition.model, undefined, `${id} must not pin a provider/model in the package`);
+    assert.equal(translateAgent(definition).model, undefined);
+  }
+});
+
+test("agent sync preserves model pins and other customizations while updating untouched managed files", () => {
+  const root = mkdtempSync(join(tmpdir(), "es-agent-sync-"));
+  const source = join(root, "source"), target = join(root, "target");
+  mkdirSync(source); mkdirSync(target);
+  const canonical = new URL("../../agents/dreamer.md", import.meta.url);
+  try {
+    for (const name of ["pinned.md", "plain.md", "removed.md", "custom-removed.md", "linked.md", "dangling.md"]) copyFileSync(canonical, join(source, name));
+    syncPackagedAgents(source, target);
+    const external = join(root, "external.md"), missing = join(root, "missing.md");
+    copyFileSync(canonical, external);
+    for (const name of ["linked.md", "dangling.md"]) rmSync(join(target, name));
+    symlinkSync(external, join(target, "linked.md")); symlinkSync(missing, join(target, "dangling.md"));
+    const pin = readFileSync(join(target, "pinned.md"), "utf8").replace("---\n", '---\nmodel: "custom/my-chosen-model"\n');
+    writeFileSync(join(target, "pinned.md"), pin);
+    writeFileSync(join(target, "custom-removed.md"), pin);
+    writeFileSync(join(target, "unmanaged.md"), pin);
+    for (const name of ["pinned.md", "plain.md", "linked.md", "dangling.md"]) writeFileSync(join(source, name), readFileSync(canonical, "utf8") + "\nUpdated packaged prompt.\n");
+    for (const name of ["removed.md", "custom-removed.md"]) rmSync(join(source, name));
+    syncPackagedAgents(source, target);
+    syncPackagedAgents(source, target);
+    assert.equal(readFileSync(external, "utf8"), readFileSync(canonical, "utf8"));
+    assert.equal(existsSync(missing), false);
+    for (const name of ["linked.md", "dangling.md"]) assert.ok(lstatSync(join(target, name)).isSymbolicLink());
+    assert.equal(readFileSync(join(target, "pinned.md"), "utf8"), pin);
+    assert.equal(readFileSync(join(target, "plain.md"), "utf8"), readFileSync(join(source, "plain.md"), "utf8"));
+    assert.equal(existsSync(join(target, "removed.md")), false);
+    for (const name of ["custom-removed.md", "unmanaged.md"]) assert.equal(readFileSync(join(target, name), "utf8"), pin);
+    // A legacy name-only manifest proves no ownership of the current bytes.
+    writeFileSync(join(target, ".electric-shepherd-agents.json"), JSON.stringify(["pinned.md", "plain.md", "unmanaged.md"]));
+    writeFileSync(join(target, "plain.md"), pin);
+    syncPackagedAgents(source, target);
+    for (const name of ["pinned.md", "plain.md", "unmanaged.md"]) assert.equal(readFileSync(join(target, name), "utf8"), pin);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
