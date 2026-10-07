@@ -48,7 +48,8 @@
     "test:unit": "node --experimental-strip-types --test tests/unit/*.test.mjs",
     "test:integration": "node --experimental-strip-types --test tests/integration/*.test.mjs",
     "test:all": "npm test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint"
   },
   "dependencies": {
     "@opencode/plugin": "^2.0.21",
@@ -58,6 +59,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.4.0",
+    "oxlint": "1.87.0",
     "typescript": "^7.0.2"
   }
 }
