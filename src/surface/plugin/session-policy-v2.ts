@@ -1,4 +1,7 @@
 import { Plugin } from "@opencode/plugin"
+import { Error as ToolError } from "@opencode/plugin/promise/tool"
+import { LoopBlockedError } from "../turn-guard-helpers.ts"
+import { registerLoopGuardContext, type LoopGuardControl } from "../opencode-v2/loop-guard-context.ts"
 import { ES_TOOLS } from "../../tools/index.ts"
 import { registerInstructions, registerPackagedAssets, registerPackagedSkills, registerPermissionDefaults } from "../opencode-v2/assets.ts"
 import { registerCompactionArchive } from "../opencode-v2/compaction-archive.ts"
@@ -88,21 +91,37 @@ const SessionPolicyPluginV2 = Plugin.define({
       }
     })
 
+    const loopGuard = legacy?.loopGuard as LoopGuardControl | undefined
+    const loopContext = loopGuard ? await registerLoopGuardContext(ctx, loopGuard) : undefined
     const toolBeforeHook = legacy?.["tool.execute.before"]
     if (typeof toolBeforeHook === "function") {
       await ctx.tool.hook("execute.before", async (input) => {
         const output = { args: input.input as Record<string, unknown> }
-        await toolBeforeHook(
-          {
-            tool: input.tool,
-            sessionID: input.sessionID,
-            messageID: input.messageID,
-            agent: input.agent,
-            id: input.id,
-            args: output.args,
-          },
-          output,
-        )
+        try {
+          if (loopContext && !await loopContext.before(input)) return
+          await toolBeforeHook(
+            {
+              tool: input.tool,
+              sessionID: input.sessionID,
+              messageID: input.messageID,
+              agent: input.agent,
+              id: input.id,
+              args: output.args,
+            },
+            output,
+          )
+        } catch (error) {
+          if (error instanceof LoopBlockedError) {
+            const receipt = loopContext?.reject(input, error) ?? error.message
+            throw new ToolError({ message: receipt, metadata: { electricShepherdLoopBlocked: true, paused: error.paused } })
+          }
+          // V2 execute.before only permits Tool.Error in its failure channel.
+          // Convert known legacy guard rejections, not unrelated plugin failures.
+          if (error instanceof Error && error.message.startsWith("[Loop Guard]")) {
+            throw new ToolError({ message: error.message })
+          }
+          throw error
+        }
         if (output.args && typeof output.args === "object") {
           input.input = output.args as typeof input.input
         }
@@ -117,6 +136,7 @@ const SessionPolicyPluginV2 = Plugin.define({
         try {
           for await (const event of ctx.event.subscribe({ signal: eventsController.signal })) {
             if (disposed) break
+            if (event.type === "session.deleted") loopContext?.forgetSession(event.data.sessionID)
             const legacyEvent = toLegacyEvent(event)
             if (!legacyEvent) continue
             const sessionID = String(legacyEvent.properties?.info?.sessionID ?? legacyEvent.properties?.sessionID ?? "")
@@ -125,6 +145,8 @@ const SessionPolicyPluginV2 = Plugin.define({
               const session = await ctx.session.get({ sessionID }, { signal: eventsController.signal })
               if (disposed) break
               if (session.location?.directory !== ctx.location.directory) continue
+              // Reactive retries/checkpoints must not restart a paused loop.
+              if (loopContext?.isPaused(sessionID)) continue
               await eventHook({ event: legacyEvent })
               if (event.type === "session.step.ended") {
                 void legacy.shadowJudge?.observe(sessionID, String(legacyEvent.properties?.info?.id ?? ""))
@@ -142,6 +164,7 @@ const SessionPolicyPluginV2 = Plugin.define({
       if (disposed) return
       disposed = true
       eventsController.abort()
+      loopContext?.dispose()
       legacy?.dispose?.()
     }
   },

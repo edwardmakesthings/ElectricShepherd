@@ -221,12 +221,13 @@ test("TurnGuard CREATE wiring: onSessionIdle records capability tuple for succes
   }
 });
 
-test("TurnGuard CREATE wiring: loop-block failure records event and persists intervention after confirmation", async () => {
+test("TurnGuard CREATE wiring: loop-block records failure without treating new arguments as proof of recovery", async () => {
   const projectDir = makeTempProjectDir();
   const envKeys = [
     "ESHEPHERD_AUTO_CONSOLIDATION_ENABLED",
     "ESHEPHERD_MEMCORE_REINJECT_ENABLED",
     "ESHEPHERD_LOOPGUARD_THRESHOLD",
+    "ESHEPHERD_LOOPGUARD_MESSAGE_DISTANCE_WINDOW",
   ];
   const envSnapshot = Object.fromEntries(envKeys.map((k) => [k, process.env[k]]));
   const originalFetch = globalThis.fetch;
@@ -290,11 +291,12 @@ test("TurnGuard CREATE wiring: loop-block failure records event and persists int
 
     await assert.rejects(
       () => hook({ ...input }, { args: { ...input.args } }),
-      /STOP\. You have called `bash` 3 times with identical arguments/,
+      /Already attempted this call 3 times with identical arguments/,
     );
 
     await new Promise((resolve) => setTimeout(resolve, 0));
-    await hook({ ...input }, { args: { ...input.args } });
+    await assert.rejects(() => hook({ ...input }, { args: { ...input.args } }), /blocked and did not run/);
+    await hook({ ...input }, { args: { command: "a different inspection" } });
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     for (let i = 0; i < 16; i += 1) {
@@ -320,8 +322,7 @@ test("TurnGuard CREATE wiring: loop-block failure records event and persists int
     assert.ok(failureEvent, "blocked loop must record es-failure-event=loop");
 
     const interventionText = kgAdds.find((row) => row.predicate === "es-intervention-text");
-    assert.ok(interventionText, "confirmed loop-block must persist es-intervention-text");
-    assert.ok(String(interventionText.object || "").includes("You are looping"));
+    assert.equal(interventionText, undefined, "different arguments alone must not file a supposedly verified intervention patch");
     assert.ok(prompts.length >= 1, "loop-block must inject a noReply prompt nudge");
   } finally {
     globalThis.fetch = originalFetch;

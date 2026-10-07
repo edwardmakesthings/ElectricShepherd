@@ -277,23 +277,24 @@ export function computeToolSignature(tool: string, args: unknown): string {
   return `${String(tool).toLowerCase()}|${hashText(canonicalizeToolArgs(args))}`
 }
 
+/** A rejected repeat; exhaustion requests a host-owned pause, not another retry. */
+export class LoopBlockedError extends Error {
+  readonly paused: boolean
+  readonly repeatCount?: number
+
+  constructor(message: string, paused = false, repeatCount?: number) {
+    super(message)
+    this.name = "LoopBlockedError"
+    this.paused = paused
+    this.repeatCount = repeatCount
+  }
+}
+
 export type LoopGuardDecision = { count: number; shouldIntervene: boolean; exhausted: boolean }
 
 type LoopWindowEntry = string | { signature: string; atMessage: number }
 
-/**
- * Decide whether the current tool call is a loop worth interrupting.
- *
- * `window` holds the recent tool signatures for the session, oldest first, and
- * excludes the current call. `count` therefore includes the current call. The
- * window is a WINDOW rather than a consecutive run because real loops alternate
- * (read -> grep -> read -> grep), and it is cleared by the caller on any
- * mutating tool, so a legitimate verify cycle (typecheck -> edit -> typecheck)
- * can never accumulate repeats.
- *
- * `exhausted` distinguishes "we already nudged enough times, stop fighting it"
- * from "not a loop" — the caller should log the former rather than intervene.
- */
+/** Count repeated calls in a bounded window; exhaustion requires a pause. */
 export function decideLoopIntervention(args: {
   window: LoopWindowEntry[]
   signature: string

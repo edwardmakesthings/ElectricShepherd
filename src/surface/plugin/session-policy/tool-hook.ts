@@ -1,6 +1,6 @@
 // @ts-nocheck
 import type { TurnGuardContext } from "./context.ts"
-import { decideLoopIntervention } from "../../turn-guard-helpers.ts"
+import { decideLoopIntervention, LoopBlockedError } from "../../turn-guard-helpers.ts"
 
 // Typed binder for the "tool.execute.before" hook. turn-guard.ts instantiates
 // this once with its closure deps and registers the returned handler — no
@@ -41,11 +41,9 @@ export interface ToolExecuteBeforeDeps {
   INTERVENTION_REPLAY_HEADING: string
   formatInterventionBlock: (interventions: any[]) => string
   INTERVENTION_REPLAY_MAX_PATCHES: number
-  confirmPendingInterventions: (args: { sid: string; confirmedKey?: string; model?: { providerID: string; modelID: string } | null; taskText: string }) => Promise<void>
-  activeRoutingBySession: Map<string, { agent?: string; model?: { providerID: string; modelID: string } }>
   LOOP_GUARD_MARKER: string
   maybeRecordModelFailure: (args: { sid: string; model?: { providerID: string; modelID: string } | null; taskText: string; event: "spiral" | "loop"; interventionLabel: "spiral-nudge" | "retry-nudge" | "loop-block"; interventionText: string }) => Promise<void>
-  queuePendingIntervention: (sid: string, key: string, label: string, text: string) => void
+  contextReceipts?: boolean
 }
 
 export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
@@ -78,6 +76,18 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
             `${deps.LOOP_GUARD_MARKER} STOP. You are spawning \`${subagentType}\` tasks too quickly in parallel.\n\n` +
             `This \`task\` call was BLOCKED. Wait about ${waitSec}s, then launch the next \`${subagentType}\` task serially.\n\n` +
             `Do not retry immediately; queue it and continue with non-overlapping work.`
+          const signature = deps.computeToolSignature(toolName, args)
+          const window = context.toolWindowBySession.get(sid) ?? []
+          const used = context.loopInterventionsBySession.get(sid) ?? 0
+          const decision = decideLoopIntervention({
+            window, signature, repeatThreshold: context.loopRepeatThreshold,
+            interventionsUsed: used, maxInterventions: context.loopMaxInterventions,
+          })
+          window.push({ signature, atMessage: context.messageCountBySession.get(sid) ?? 0 })
+          while (window.length > context.loopWindowSize) window.shift()
+          context.toolWindowBySession.set(sid, window)
+          if (decision.shouldIntervene) context.loopInterventionsBySession.set(sid, used + 1)
+          if (decision.shouldIntervene || decision.exhausted) throw new LoopBlockedError(nudgeText, decision.exhausted, decision.count)
           throw new Error(nudgeText)
         }
         launches.set(subagentType, now)
@@ -100,9 +110,9 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
       })
 
       if (taskDecision.exhausted) {
-        console.log(
-          `[turn-guard] task watchdog: repeated ${subagentType || "task"} ${taskDecision.count}x in sid=${sid} ` +
-            `but escalation budget (${context.taskWatchdogMaxEscalations}) is spent; letting it through`,
+        throw new LoopBlockedError(
+          `${deps.LOOP_GUARD_MARKER} Already attempted this task. The recovery budget is exhausted; ` +
+          `this call was blocked and did not run. Pause and report the blocker.`, true, taskDecision.count,
         )
       } else if (taskDecision.shouldIntervene) {
         const routing = await deps.resolveLoopGuardRouting(sid, input, output)
@@ -459,88 +469,35 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
     })
 
     if (exhausted) {
-      console.log(
-        `[turn-guard] loop guard: ${toolName} repeated ${count}x in sid=${sid} but the ` +
-          `${context.loopMaxInterventions}-nudge budget is spent; letting it through`,
+      throw new LoopBlockedError(
+        `${deps.LOOP_GUARD_MARKER} Already attempted this call. The ${context.loopMaxInterventions}-nudge ` +
+        `recovery budget is exhausted. This call was blocked and did not run. Pause and report the blocker.`, true, count,
       )
-      return
     }
 
     if (!shouldIntervene) {
-      // A MUTATING tool called with NEW arguments is real progress: drop the
-      // history that preceded it. Keep this call's own signature though --
-      // seeding with [signature] instead of clearing outright is what lets an
-      // immediately-repeated identical command still accumulate.
-      //
-      // This used to be an early return at the top of the handler, before the
-      // repeat check ran at all. Because `bash` is in the mutation list, that
-      // made repeated identical shell commands structurally INVISIBLE to the
-      // guard -- and worse, every bash call wiped the window and erased the
-      // history of every other tool too. bash mutates sometimes, but it is
-      // also the most common READ tool (grep / ls / git status / test runs),
-      // so "saw bash, therefore progress" was never a safe assumption.
-      if (context.loopMutationTools.has(key) && count === 1) {
-        context.toolWindowBySession.set(sid, [{ signature, atMessage: currentMessage }])
-      } else {
-        window.push({ signature, atMessage: currentMessage })
-        while (window.length > context.loopWindowSize) window.shift()
-        context.toolWindowBySession.set(sid, window)
-      }
-      // Success signal: the model's next tool call after a
-      // blocked loop is a DIFFERENT signature than the one that was blocked —
-      // deterministic evidence the nudge broke the loop. Persist the pending
-      // loop-block patch; expire any other pending patches for this session.
-      // Best-effort, never blocks or throws into the turn.
-      void deps.confirmPendingInterventions({
-        sid,
-        confirmedKey: signature,
-        model: deps.activeRoutingBySession.get(sid)?.model ?? null,
-        taskText: `${toolName} ${JSON.stringify(args)}`,
-      })
+      // New arguments are not evidence of progress. Only observed file changes
+      // or a new real user request may invalidate the previous repeat evidence.
+      window.push({ signature, atMessage: currentMessage })
+      while (window.length > context.loopWindowSize) window.shift()
+      context.toolWindowBySession.set(sid, window)
       return
     }
 
-    // Nudge, then wipe the window so the model gets a clean slate to recover in
-    // rather than tripping the guard again on its very next call.
+    // Keep the evidence: recovery permits a different action, not another
+    // threshold-sized batch of the same blocked call.
     context.loopInterventionsBySession.set(sid, interventionsUsed + 1)
-    context.toolWindowBySession.delete(sid)
     const nudge = interventionsUsed + 1
-    console.log(
-      `[turn-guard] loop guard: aborting ${toolName} (repeat ${count}x, nudge ${nudge}/${context.loopMaxInterventions}) sid=${sid}`,
-    )
-
-    // WORDING IS LOAD-BEARING (measured 2026-08-18). A softer version of this
-    // message asked "are you looping?" and said "regroup before continuing" --
-    // in practice the model answered the question, took "continuing" as
-    // permission to proceed, and looped again. Manual interventions phrased as
-    // "you're looping, stop and move forward" broke the loop; ones phrased as
-    // "continue, you're looping, finish then move forward" did NOT. So: state
-    // it, never ask it; forbid the specific call; say move forward, never
-    // continue/finish/regroup; and do not invite narration, which just burns a
-    // turn explaining the loop instead of leaving it.
-    // 1) Block the tool call - the model gets a tool-error part and cannot
-    //    keep hammering the identical call. This alone is invisible in some
-    //    OpenCode surfaces: the error shows as a bare tool error, not a
-    //    conversational turn, so the model never "hears" the nudge.
-    const finalNudge = nudge >= context.loopMaxInterventions
     const nudgeText =
-      `${deps.LOOP_GUARD_MARKER} STOP. You have called \`${toolName}\` ${count} times with identical ` +
-      `arguments. You are looping.\n\n` +
-      `This call was BLOCKED and did not run. Calling \`${toolName}\` with these arguments again will ` +
-      `not produce a different result - the answer you already have is the answer.\n\n` +
-      `Move forward now:\n` +
-      `- Act on what you already have. The earlier identical call's result is in your context; use it.\n` +
-      `- If you genuinely need something else, take a DIFFERENT action: different tool, different ` +
-      `arguments, or a different approach to the problem.\n` +
-      `- If you cannot proceed without information you are unable to obtain, say so plainly and stop. ` +
-      `Do not retry.\n\n` +
-      `Your next action must be different from the one just blocked. Do not explain the loop, do not ` +
-      `apologise, and do not restate your plan - just take the next real step.` +
-      (finalNudge
-        ? `\n\nThis is the LAST time this will be blocked (${nudge}/${context.loopMaxInterventions}). If you ` +
-          `repeat it after this, abandon this line of work entirely and report what you have with your ` +
-          `remaining uncertainty stated.`
-        : `\n\n(nudge ${nudge}/${context.loopMaxInterventions} this session)`)
+      `${deps.LOOP_GUARD_MARKER} Already attempted this call ${count} times with identical arguments. ` +
+      `This repeated call was blocked and did not run; it has no new result. ` +
+      `Reuse the earlier evidence (including any failure); no success is implied. ` +
+      `Take a genuinely different recovery action or report the blocker. ` +
+      `Do not retry this call unchanged. Recovery ${nudge}/${context.loopMaxInterventions}.`
+
+    // V2 delivers a bounded receipt through its context hooks instead of adding
+    // another synthetic conversational message for each rejected attempt.
+    if (deps.contextReceipts) throw new LoopBlockedError(nudgeText, false, count)
 
     const routing = await deps.resolveLoopGuardRouting(sid, input, output)
 
@@ -568,13 +525,8 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
       console.error(`[turn-guard] loop guard: nudge prompt failed sid=${sid}:`, promptErr)
     }
 
-    // Attribute the repeated-tool loop to (model, shape) at
-    // nudge time. Task text = tool name + args (the shape function tolerates any
-    // text; for non-task tools this is a coarse but deterministic shape). The
-    // intervention text is only QUEUED — it becomes durable knowledge only if
-    // the model's NEXT tool call has a different signature (see the
-    // confirmPendingInterventions call below), which is deterministic proof the
-    // loop was broken. Fire-and-forget — best-effort, never blocks.
+    // Record the failure without treating different arguments as a verified
+    // recovery or filing an intervention patch on that basis.
     void deps.maybeRecordModelFailure({
       sid,
       model: routing.model ?? null,
@@ -583,8 +535,7 @@ export function bindToolExecuteBefore(deps: ToolExecuteBeforeDeps) {
       interventionLabel: "loop-block",
       interventionText: nudgeText,
     })
-    deps.queuePendingIntervention(sid, signature, "loop-block", nudgeText)
 
-    throw new Error(nudgeText)
+    throw new LoopBlockedError(nudgeText, false, count)
   }
 }

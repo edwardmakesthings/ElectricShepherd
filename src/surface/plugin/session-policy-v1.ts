@@ -714,11 +714,9 @@ export const TurnGuard = async ({ client, directory, disableV1ToolRegistry = tru
     INTERVENTION_REPLAY_HEADING,
     formatInterventionBlock,
     INTERVENTION_REPLAY_MAX_PATCHES,
-    confirmPendingInterventions,
-    activeRoutingBySession,
     LOOP_GUARD_MARKER,
     maybeRecordModelFailure,
-    queuePendingIntervention,
+    contextReceipts: v2Bridge,
   })
 
 
@@ -731,6 +729,23 @@ export const TurnGuard = async ({ client, directory, disableV1ToolRegistry = tru
     tool: toolRegistry,
   }
   if (v2Bridge) {
+    hooks.loopGuard = {
+      enabled: loopGuardEnabled,
+      mutationTools: loopMutationTools,
+      repeatedBlock: (sid: string) => {
+        const used = loopInterventionsBySession.get(sid) ?? 0
+        if (used >= loopMaxInterventions) return true
+        loopInterventionsBySession.set(sid, used + 1)
+        return false
+      },
+      resetSession: (sid: string) => {
+        toolWindowBySession.delete(sid)
+        loopInterventionsBySession.delete(sid)
+        taskWindowBySession.delete(sid)
+        taskEscalationsBySession.delete(sid)
+      },
+      invalidateEvidence: (sid: string) => { toolWindowBySession.delete(sid) },
+    }
     hooks.shadowJudge = createTurnGuardShadowJudge({
       mode: cfgRaw("turnGuard.judge.mode"),
       endpoint: cfgRaw("turnGuard.judge.endpoint"),
