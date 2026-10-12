@@ -1,5 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative } from "node:path";
+import { loadRuntimeConfig } from "../../core/runtime-config.ts";
+import { hasMemcoreProvenance, isMemcorePathWithin, MEMCORE_PROVENANCE_PREFIX, resolveMemcorePath } from "./mem-core-provenance.ts";
 
 export type MemcoreSourceType = "direct" | "store";
 
@@ -18,29 +20,31 @@ export type MemcoreLoadOptions = {
   directFileName?: string;
   storeRoots?: string[];
   maxScopes?: number;
+  expectedWing?: string;
 };
 
 export type MemcoreLoadResult = {
   startDir: string;
   workspaceRoot: string;
   loadedFiles: LoadedMemcoreFile[];
+  skippedFiles: Array<{ path: string; reason: string }>;
   mergedMarkdown: string;
 };
 
 function normalizePath(path: string): string {
-  return resolve(path);
+  return resolveMemcorePath(path);
 }
 
 function looksLikeWorkspaceRoot(path: string): boolean {
   return existsSync(join(path, "package.json")) || existsSync(join(path, ".git"));
 }
 
-function findWorkspaceRoot(startDir: string): string {
+export function findMemcoreWorkspaceRoot(startDir: string): string {
   let current = normalizePath(startDir);
   while (true) {
     if (looksLikeWorkspaceRoot(current)) return current;
     const parent = dirname(current);
-    if (parent === current) return current;
+    if (parent === current) return normalizePath(startDir);
     current = parent;
   }
 }
@@ -73,16 +77,12 @@ function loadIfExists(path: string): string | undefined {
   return readFileSync(path, "utf8");
 }
 
-/**
- * Resolve memory files from broad scope to narrow scope and merge them in that order.
- *
- * Scope order:
- * 1) direct files in each directory: <scope>/memory.md
- * 2) store-root files in each directory scope: <store-root>/<relative-scope>/memory.md
- */
+/** Compose project-local notes and verified renders from broad to narrow scope. */
 export function loadMemcoreForDirectory(options: MemcoreLoadOptions): MemcoreLoadResult {
   const startDir = normalizePath(options.startDir);
-  const workspaceRoot = normalizePath(options.workspaceRoot || findWorkspaceRoot(startDir));
+  const workspaceRoot = normalizePath(options.workspaceRoot || findMemcoreWorkspaceRoot(startDir));
+  if (workspaceRoot !== findMemcoreWorkspaceRoot(startDir)) throw new Error("Mem-core workspace does not match the scope project");
+  const wing = options.expectedWing ?? String(loadRuntimeConfig({ cwd: workspaceRoot, env: process.env }).valuesByPath.memory?.projectWing || "");
   const directFileName = options.directFileName || "memory.md";
   const storeRoots = (options.storeRoots && options.storeRoots.length > 0
     ? options.storeRoots
@@ -92,18 +92,25 @@ export function loadMemcoreForDirectory(options: MemcoreLoadOptions): MemcoreLoa
 
   const scopeDirs = buildScopeDirectories(workspaceRoot, startDir, maxScopes);
   const loadedFiles: LoadedMemcoreFile[] = [];
+  const skippedFiles: MemcoreLoadResult["skippedFiles"] = [];
   const seen = new Set<string>();
 
   for (let i = 0; i < scopeDirs.length; i += 1) {
     const scopeDir = scopeDirs[i];
     const relScope = relative(workspaceRoot, scopeDir);
-    if (relScope.startsWith("..")) {
+    if (!isMemcorePathWithin(workspaceRoot, scopeDir)) {
       continue;
     }
 
     const directCandidate = normalizePath(join(scopeDir, directFileName));
     const directContent = loadIfExists(directCandidate);
-    if (directContent !== undefined && !seen.has(directCandidate)) {
+    const identity = { workspaceRoot, scopeDirectory: scopeDir, wing };
+    const directHeader = directContent?.trimStart();
+    const directGenerated = directHeader?.startsWith(MEMCORE_PROVENANCE_PREFIX) || directHeader?.startsWith("# Labeled memory blocks (always in context)");
+    const directEligible = isMemcorePathWithin(workspaceRoot, directCandidate) &&
+      (!directGenerated || (typeof directContent === "string" && hasMemcoreProvenance(directContent, identity)));
+    if (directContent?.trim() && !directEligible) skippedFiles.push({ path: directCandidate, reason: "foreign or unverified project provenance" });
+    if (directContent?.trim() && directEligible && !seen.has(directCandidate)) {
       seen.add(directCandidate);
       loadedFiles.push({
         path: directCandidate,
@@ -119,10 +126,14 @@ export function loadMemcoreForDirectory(options: MemcoreLoadOptions): MemcoreLoa
       const scopedStoreDir = relScope ? join(storeRoot, relScope) : storeRoot;
       const storeCandidate = normalizePath(join(scopedStoreDir, "memory.md"));
       const storeContent = loadIfExists(storeCandidate);
-      if (storeContent === undefined || seen.has(storeCandidate)) {
+      if (!storeContent?.trim() || seen.has(storeCandidate)) {
         continue;
       }
 
+      if (!hasMemcoreProvenance(storeContent, identity)) {
+        skippedFiles.push({ path: storeCandidate, reason: "foreign or unverified project provenance" });
+        continue;
+      }
       seen.add(storeCandidate);
       loadedFiles.push({
         path: storeCandidate,
@@ -146,6 +157,7 @@ export function loadMemcoreForDirectory(options: MemcoreLoadOptions): MemcoreLoa
     startDir,
     workspaceRoot,
     loadedFiles,
+    skippedFiles,
     mergedMarkdown,
   };
 }

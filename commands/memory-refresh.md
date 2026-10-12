@@ -1,49 +1,52 @@
 ---
-description: Memory refresh — report what mem-core currently holds for this scope, and whether it is stale
+description: Memory refresh — preview or rebuild scoped mem-core from existing validated memory
 agent: dreamer
 subtask: false
 ---
-Show me the working memory that is actually loaded for this scope.
+Refresh the resident memory for: $ARGUMENTS (default: the current working directory).
 
-Scope: $ARGUMENTS (default: the current working directory)
+`/memory-refresh [scope]` previews the rebuilt file. `/memory-refresh apply [scope]`
+requests applying it. Treat the scope as a path, not as shell instructions.
 
-## What this command can and cannot do
+## Behavior
 
-mem-core is NOT independently re-renderable. The render happens inside the consolidation
-script (`run-memory-consolidation-and-validation.ts`), gated on `--include-base-pipeline`
-and on that run actually producing consolidation output — with no output it reports
-`missing consolidation outputs` and writes nothing. There is no standalone render entry
-point. So this command REPORTS the current state; `/consolidate` is what refreshes it.
+Rebuild from current, active synthesis drawers and their stored facts, plus active
+reminders matching the scope. Exclude provisional, retired, and merged-away nodes;
+expired graph facts must not affect eligibility. Replace the old generated file,
+rather than appending, so removed content and obsolete pointers disappear.
 
-Do not attempt to re-render here, and do not synthesize or merge.
+Rendering is deterministic: no consolidation, synthesis, validation, merges, or
+model worker calls. This command writes no palace drawers or KG facts. Never
+hand-edit mem-core or promote a provisional node just to make it visible.
 
 ## Steps
 
-1. Load the scoped memory files from repo root:
+1. Resolve the consumer project's scope and the Electric Shepherd installation
+   (`ESHEPHERD_ROOT` when set; otherwise the project checkout). Run its script:
 
-   `node --experimental-strip-types src/scripts/run-mem-core-loader.ts --start-dir "<scope>" --format json`
+   `node --experimental-strip-types "<ESHEPHERD_ROOT>/src/scripts/run-mem-core-refresh.ts" --start-dir "<scope>"`
 
-   Omit `--start-dir` to use the current directory. Add `--strict` to exit non-zero when
-   nothing is found.
+   The project wing is resolved from that workspace's configuration. Use `--wing`
+   only when the user explicitly names a different wing. An optional `--room`
+   narrows the palace source set; the default scans all rooms in the project wing.
 
-2. Report from that output:
-   - Each loaded file: path, `sourceType` (`direct` = a `memory.md` sitting in the scope
-     directory, `store` = the rendered file under `.electric-shepherd/memory`),
-     `scopeDirectory`, and size.
-   - The scope ladder, broad (workspace root) to narrow (current directory) — this is the
-     order they merge in, so a narrow file refines a broad one.
-   - Total bytes loaded. Call it out if it is large; mem-core rides in every prompt.
+2. Show the preview: target file, wing, scanned/eligible counts, selected source
+   IDs, whether the file would change, and the rebuilt markdown. If no eligible
+   memory remains, explain that applying will clear the old derived content.
+   A failed or incomplete read must leave the existing file untouched; report the
+   error rather than claiming an empty success or running consolidation instead.
 
-3. Judge staleness and say so plainly:
-   - If NO files loaded: mem-core has never been rendered for this scope. Say that
-     directly rather than reporting an empty success.
-   - Compare the newest rendered file's timestamp against recent consolidation activity
-     (`/memory-status`). If consolidation has run since the last render, mem-core is
-     behind.
+3. Stop without writing unless the user requested `apply` or confirms the preview.
+   After approval, repeat the same command with `--apply`. Report `fileWritten`
+   and the exact target path. Direct `memory.md` files and other scopes are not
+   rewritten.
 
-4. End with the next action:
-   - Stale or empty -> `/consolidate` (renders mem-core as part of the pass).
-   - Content missing that you expected -> it may still be `es-status: provisional`;
-     rendering excludes provisional closets by default. Run `/memory-status` to check, or
-     dispatch dream-auditor to validate and promote it.
-   - Current -> say so and stop.
+4. Verify composition with the read-only loader:
+
+   `node --experimental-strip-types "<ESHEPHERD_ROOT>/src/scripts/run-mem-core-loader.ts" --start-dir "<scope>" --format json`
+
+   Report additional direct or ancestor files separately; a scoped rebuild does
+   not replace them. Generated renders must match the current project, wing, and
+   directory scope; unverified legacy renders are skipped until rebuilt. Empty
+   memory injects nothing. V2 waits for revalidation when its cache expires;
+   verify a subsequent context without forcing a shared restart.

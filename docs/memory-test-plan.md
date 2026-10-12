@@ -82,11 +82,12 @@ Compare provisional count against total closet count.
 Two separate things. Both must be true.
 
 ```
-/memory-refresh
+/memory-refresh          (preview existing validated memory; no consolidation)
+/memory-refresh apply    (after approving the preview)
 ```
 
-- **Renders?** Confirm files exist under `.electric-shepherd/memory/`, and check the
-  timestamp is recent.
+- **Renders?** Confirm `fileWritten` and the target under `.electric-shepherd/memory/`.
+  An unchanged rebuild can legitimately report `fileWritten: false`.
 - **Loads?** This is the one that silently failed before. Check `opencode.jsonc` has an
   `instructions` entry pointing at those files, OR that a mem-core injection toggle is on.
   Then verify from inside a session: start fresh and ask *"what is in your mem-core?"* If

@@ -1,3 +1,6 @@
+import { resolve } from "node:path"
+import { findMemcoreWorkspaceRoot } from "../../capability/memcore/mem-core-loader.ts"
+import { resolveMemcorePath } from "../../capability/memcore/mem-core-provenance.ts"
 import { clipText } from "../turn-guard-helpers.ts"
 
 /**
@@ -8,8 +11,7 @@ import { clipText } from "../turn-guard-helpers.ts"
  * from ever settling. v2's session `context` hook runs before every agent model
  * request, so the current mem-core simply rides along in the system prompt: it
  * is present from the first request and survives compaction without any
- * trigger. Loads are cached per scope so a request never waits on the loader
- * more than once per scope.
+ * trigger. Loads are cached per scope and revalidated when the cache expires.
  */
 
 export const MEMCORE_CONTEXT_HEADING = "## Resident memory (mem-core)"
@@ -27,7 +29,7 @@ export function buildMemcoreSystemText(scopeDir: string, markdown: string, maxCh
 export interface MemcoreCacheOptions {
   load: (scopeDir: string) => Promise<string>
   maxChars: number
-  /** Age after which a cached scope is refreshed in the background. */
+  /** Age after which a request waits for scope revalidation. */
   ttlMs?: number
   now?: () => number
 }
@@ -39,38 +41,38 @@ interface CacheEntry {
 }
 
 /**
- * Stale-while-revalidate cache: the first request for a scope waits for the
- * loader; later requests get the cached text immediately and trigger a
- * background refresh once it is older than `ttlMs`.
+ * Revalidate expired entries before delivery; empty or failed loads cannot reuse old text.
  */
 export function createMemcoreCache(options: MemcoreCacheOptions) {
   const ttlMs = options.ttlMs ?? 60_000
   const now = options.now ?? Date.now
   const entries = new Map<string, CacheEntry>()
 
-  const refresh = (scopeDir: string): Promise<string> => {
-    const existing = entries.get(scopeDir)
+  const refresh = (scopeDir: string, key: string): Promise<string> => {
+    const existing = entries.get(key)
     if (existing?.refreshing) return existing.refreshing
     const refreshing = options
       .load(scopeDir)
       .then((markdown) => buildMemcoreSystemText(scopeDir, markdown, options.maxChars))
       .catch((error) => {
         console.error(`[turn-guard] v2 mem-core load failed for ${scopeDir}:`, error)
-        return existing?.text ?? ""
+        return ""
       })
       .then((text) => {
-        entries.set(scopeDir, { text, loadedAt: now() })
+        entries.set(key, { text, loadedAt: now() })
         return text
       })
-    entries.set(scopeDir, { text: existing?.text ?? "", loadedAt: existing?.loadedAt ?? 0, refreshing })
+    entries.set(key, { text: existing?.text ?? "", loadedAt: existing?.loadedAt ?? 0, refreshing })
     return refreshing
   }
 
   return {
     async get(scopeDir: string): Promise<string> {
-      const entry = entries.get(scopeDir)
-      if (!entry || (entry.loadedAt === 0 && entry.refreshing)) return entry?.refreshing ?? refresh(scopeDir)
-      if (now() - entry.loadedAt >= ttlMs) void refresh(scopeDir)
+      const scope = resolveMemcorePath(scopeDir)
+      const key = `${findMemcoreWorkspaceRoot(scope)}\0${scope}`
+      const entry = entries.get(key)
+      if (!entry || (entry.loadedAt === 0 && entry.refreshing)) return entry?.refreshing ?? refresh(scope, key)
+      if (now() - entry.loadedAt >= ttlMs) return refresh(scope, key)
       return entry.text
     },
   }
@@ -78,7 +80,7 @@ export function createMemcoreCache(options: MemcoreCacheOptions) {
 
 interface MemcoreContextHookContext {
   session: {
-    get(input: { sessionID: string }): Promise<any>
+    get(input: { sessionID: string }): Promise<{ location?: { directory?: string }; data?: { location?: { directory?: string } } }>
     hook(
       name: "context",
       callback: (event: { sessionID: string; system: Array<{ type: "text"; text: string }> }) => Promise<void> | void,
@@ -86,34 +88,32 @@ interface MemcoreContextHookContext {
   }
 }
 
-/**
- * Register the context hook. The scope is the configured override, else the
- * session's own directory, else the plugin instance's location.
- */
+/** Resolve the current session project before every request; never borrow the plugin location. */
 export async function registerMemcoreContext(
   ctx: MemcoreContextHookContext,
   options: { cache: ReturnType<typeof createMemcoreCache>; scopeDirOverride?: string; fallbackDir: string },
 ): Promise<void> {
-  const scopeBySession = new Map<string, string>()
-
-  const resolveScope = async (sessionID: string): Promise<string> => {
-    if (options.scopeDirOverride) return options.scopeDirOverride
-    const known = scopeBySession.get(sessionID)
-    if (known) return known
-    let scope = options.fallbackDir
+  const resolveScope = async (sessionID: string): Promise<string | undefined> => {
     try {
       const result = await ctx.session.get({ sessionID })
-      const info = result?.data ?? result
-      if (typeof info?.location?.directory === "string" && info.location.directory) scope = info.location.directory
-    } catch {
-      // Keep the plugin location as the scope.
+      const directory = (result.data ?? result).location?.directory
+      if (!directory) return undefined
+      const scope = resolveMemcorePath(directory)
+      if (options.scopeDirOverride) {
+        const override = resolveMemcorePath(resolve(options.fallbackDir, options.scopeDirOverride))
+        if (findMemcoreWorkspaceRoot(override) === findMemcoreWorkspaceRoot(scope)) return override
+      }
+      return scope
+    } catch (error) {
+      console.warn("[turn-guard] v2 mem-core session scope unavailable; omitting memory:", error)
+      return undefined
     }
-    scopeBySession.set(sessionID, scope)
-    return scope
   }
 
   await ctx.session.hook("context", async (event) => {
-    const text = await options.cache.get(await resolveScope(event.sessionID))
+    const scope = await resolveScope(event.sessionID)
+    if (!scope) return
+    const text = await options.cache.get(scope)
     if (text) event.system.push({ type: "text", text })
   })
 }

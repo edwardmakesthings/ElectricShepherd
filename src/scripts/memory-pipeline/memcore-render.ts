@@ -3,6 +3,8 @@
  * Extracted from run-memory-consolidation-and-validation.ts (criterion 2).
  */
 import { existsSync } from "node:fs";
+import { findMemcoreWorkspaceRoot } from "../../capability/memcore/mem-core-loader.ts";
+import { withMemcoreProvenance } from "../../capability/memcore/mem-core-provenance.ts";
 import { dirname, relative, resolve } from "node:path";
 import type { SynthesisConsolidationOptions, SynthesisConsolidationResult } from "../../capability/episodic/synthesis-consolidation.ts";
 import type { RawDrawerDraft } from "./chunk-consolidation.ts";
@@ -420,7 +422,12 @@ export async function renderAndApplyMemcore(params: {
       scopeDir: params.memcoreApply.scopeDir,
     });
 
-    tryWriteFile(targetFilePath, markdown, process.pid);
+    const scopedMarkdown = withMemcoreProvenance(markdown, {
+      workspaceRoot: findMemcoreWorkspaceRoot(params.memcoreApply.scopeDir || process.cwd()),
+      scopeDirectory: params.memcoreApply.scopeDir || process.cwd(),
+      wing: params.consolidationOptions.targetWing,
+    });
+    tryWriteFile(targetFilePath, scopedMarkdown, process.pid);
 
     return {
       applied: true,

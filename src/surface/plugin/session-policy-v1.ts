@@ -69,6 +69,7 @@ import {
   MIN_TERMINAL_MESSAGES_BEFORE_CHECKPOINT,
   CHECKPOINT_MODES, DEFAULT_CHECKPOINT_DISABLED_AGENTS, normalizePathForHost, toLowerSet,
 } from "./session-policy/constants.ts"
+import { findMemcoreWorkspaceRoot } from "../../capability/memcore/mem-core-loader.ts"
 import {
   findProjectRoot, loadMemcoreMarkdown,
   writeStatusFile, appendAutoConsolidationLog, appendMemoryUsageLog,
@@ -771,7 +772,7 @@ export const TurnGuard = async ({ client, directory, disableV1ToolRegistry = tru
       scopeDirOverride: cfgRaw("memcore.scopeDir") || undefined,
       fallbackDir: rootDirectory,
       load: async (scopeDir: string) => {
-        const { markdown } = await loadMemcoreMarkdown(projectRoot, scopeDir, {
+        const { markdown } = await loadMemcoreMarkdown(findMemcoreWorkspaceRoot(scopeDir), scopeDir, {
           maxScopes: cfgNum("memcore.maxScopes", DEFAULT_MEMCORE_MAX_SCOPES),
           directFileName: cfgRaw("memcore.directFileName") || "memory.md",
           storeRoots: cfgCSV("memcore.storeRoots").length > 0 ? cfgCSV("memcore.storeRoots") : [".electric-shepherd/memory"],
